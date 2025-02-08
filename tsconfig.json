@@ -1,4 +1,47 @@
 {
   "files": [],
-  "references": [{ "path": "packages/core" }]
+  "references": [
+    {
+      "path": "packages/core"
+    },
+    {
+      "path": "packages/schema"
+    },
+    {
+      "path": "packages/script"
+    },
+    {
+      "path": "packages/codecs"
+    },
+    {
+      "path": "packages/buffer"
+    },
+    {
+      "path": "packages/runtime"
+    },
+    {
+      "path": "packages/operators"
+    },
+    {
+      "path": "packages/sources"
+    },
+    {
+      "path": "packages/sinks"
+    },
+    {
+      "path": "packages/config"
+    },
+    {
+      "path": "packages/admin"
+    },
+    {
+      "path": "packages/testkit"
+    },
+    {
+      "path": "packages/lsp"
+    },
+    {
+      "path": "packages/cli"
+    }
+  ]
 }

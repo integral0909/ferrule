@@ -80,8 +80,9 @@ export class LogEvent {
   set(path: PathLike, value: Value): boolean {
     const p = toPath(path);
     if (p.length === 0) {
-      if (!(value instanceof Map))
+      if (!(value instanceof Map)) {
         throw new ValueTypeError('the root of a log event must be an object');
+      }
       this.fields = value;
       return true;
     }

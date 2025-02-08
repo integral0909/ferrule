@@ -51,8 +51,9 @@ export class Timestamp {
 
   static fromDate(date: Date): Timestamp {
     const ms = date.getTime();
-    if (Number.isNaN(ms))
+    if (Number.isNaN(ms)) {
       throw new ValueTypeError('cannot create a timestamp from an invalid Date');
+    }
     return new Timestamp(BigInt(ms) * NANOS_PER_MILLI);
   }
 
@@ -360,8 +361,9 @@ function pad2(n: number): string {
 
 function toBigIntExact(n: number | bigint, unit: string): bigint {
   if (typeof n === 'bigint') return n;
-  if (!Number.isSafeInteger(n))
+  if (!Number.isSafeInteger(n)) {
     throw new ValueTypeError(`${unit} must be a safe integer, got ${n}`);
+  }
   return BigInt(n);
 }
 

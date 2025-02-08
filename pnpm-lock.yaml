@@ -39,7 +39,172 @@ importers:
         specifier: ^3.2.7
         version: 3.2.7(@types/node@22.20.4)
 
+  packages/admin:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
+  packages/buffer:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/cli:
+    dependencies:
+      '@ferrule/admin':
+        specifier: workspace:*
+        version: link:../admin
+      '@ferrule/buffer':
+        specifier: workspace:*
+        version: link:../buffer
+      '@ferrule/codecs':
+        specifier: workspace:*
+        version: link:../codecs
+      '@ferrule/config':
+        specifier: workspace:*
+        version: link:../config
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/operators':
+        specifier: workspace:*
+        version: link:../operators
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../schema
+      '@ferrule/script':
+        specifier: workspace:*
+        version: link:../script
+      '@ferrule/sinks':
+        specifier: workspace:*
+        version: link:../sinks
+      '@ferrule/sources':
+        specifier: workspace:*
+        version: link:../sources
+      '@ferrule/testkit':
+        specifier: workspace:*
+        version: link:../testkit
+
+  packages/codecs:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/config:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../schema
+      '@ferrule/script':
+        specifier: workspace:*
+        version: link:../script
+
   packages/core: {}
+
+  packages/lsp:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/script':
+        specifier: workspace:*
+        version: link:../script
+
+  packages/operators:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../schema
+      '@ferrule/script':
+        specifier: workspace:*
+        version: link:../script
+
+  packages/runtime:
+    dependencies:
+      '@ferrule/buffer':
+        specifier: workspace:*
+        version: link:../buffer
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../schema
+
+  packages/schema:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/script:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/sinks:
+    dependencies:
+      '@ferrule/codecs':
+        specifier: workspace:*
+        version: link:../codecs
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../schema
+
+  packages/sources:
+    dependencies:
+      '@ferrule/codecs':
+        specifier: workspace:*
+        version: link:../codecs
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../schema
+
+  packages/testkit:
+    dependencies:
+      '@ferrule/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../schema
 
 packages:
 

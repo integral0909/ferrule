@@ -16,3 +16,4 @@ export * from './diagnostics.js';
 export * from './model.js';
 export * from './loader.js';
 export * from './diff.js';
+export * from './topology.js';

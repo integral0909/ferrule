@@ -1,0 +1,34 @@
+{
+  "name": "@ferrule/codecs",
+  "version": "0.1.0",
+  "description": "Wire formats and framing for Ferrule: protobuf/OTLP, syslog, logfmt, Prometheus text, StatsD, CSV, and more.",
+  "license": "Apache-2.0",
+  "author": "Fredrik Ahman <fredrik.fullstackdev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/integral0909/ferrule.git",
+    "directory": "packages/codecs"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "@ferrule/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@ferrule/core": "workspace:*"
+  }
+}

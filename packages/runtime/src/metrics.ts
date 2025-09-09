@@ -248,4 +248,8 @@ class ScopedMetricsRecorder implements MetricsRecorder {
   histogram(name: string, tags?: MetricTags): Histogram {
     return this.parent.histogram(name, this.merge(tags));
   }
+
+  snapshot(): MetricEvent[] {
+    return this.parent.snapshot();
+  }
 }

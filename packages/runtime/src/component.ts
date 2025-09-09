@@ -1,4 +1,4 @@
-import type { Event, EventKind, Timestamp } from '@ferrule/core';
+import type { Event, EventKind, MetricEvent, Timestamp } from '@ferrule/core';
 import type { Schema } from '@ferrule/schema';
 
 /**
@@ -73,6 +73,11 @@ export interface MetricsRecorder {
   counter(name: string, tags?: MetricTags): Counter;
   gauge(name: string, tags?: MetricTags): Gauge;
   histogram(name: string, tags?: MetricTags): Histogram;
+  /**
+   * Every instrument recorded in the whole pipeline, as metric events. Provided by the runtime's
+   * recorders; used by the `internal_metrics` source to publish Ferrule's own telemetry.
+   */
+  snapshot?(): MetricEvent[];
 }
 
 /**

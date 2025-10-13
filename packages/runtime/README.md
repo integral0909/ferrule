@@ -195,6 +195,32 @@ Guidelines that follow directly from the contract in `component.ts`:
   testable with `ManualClock` and so the runtime's shutdown deadlines stay coherent with a
   component's own timers.
 
+### Build time vs run time
+
+`build(options, ctx)` runs during validation, before anything starts, and again for every reload.
+Its `BuildContext` carries only the component ID, logger, data directory, and input IDs. Do the
+work that can fail because of bad configuration there (compiling scripts, checking paths), so
+errors are reported before the pipeline starts.
+
+Runtime services arrive later. Sources and sinks receive them on the context passed to `run`;
+transforms receive them in `start(ctx)`, which is called once before the first batch. Anything
+that needs the clock or metrics, such as token buckets, LRU caches with TTLs, and instrument
+handles, belongs in `start`:
+
+```ts
+build(options) {
+  let counter: Counter | undefined;
+  return {
+    start(ctx) {
+      counter = ctx.metrics.counter('my_dropped_total');
+    },
+    process(events, out) {
+      /* ... */
+    },
+  };
+}
+```
+
 ## Topology
 
 A `TopologySpec` is the programmatic (not YAML) representation of a pipeline:

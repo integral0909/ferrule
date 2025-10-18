@@ -40,9 +40,22 @@ export function createMetadata(init: MetadataInit = {}): EventMetadata {
   };
 }
 
-/** Copies metadata for a cloned event. Finalizers are cloned, not shared. */
-function cloneMetadata(metadata: EventMetadata): EventMetadata {
-  return { ...metadata, finalizers: metadata.finalizers.clone() };
+export interface CloneOptions {
+  /**
+   * Whether the copy participates in delivery tracking. `true` (the default) clones the
+   * finalizers, so the source's batch waits for the copy too; use this when the copy is routed
+   * to another destination. `false` gives the copy empty finalizers; use this for observers
+   * (taps, previews, tests) that must never hold up acknowledgements.
+   */
+  finalizers?: boolean;
+}
+
+/** Copies metadata for a cloned event. Finalizers are cloned, not shared, unless detached. */
+function cloneMetadata(metadata: EventMetadata, options: CloneOptions): EventMetadata {
+  return {
+    ...metadata,
+    finalizers: options.finalizers === false ? new Finalizers() : metadata.finalizers.clone(),
+  };
 }
 
 type PathLike = string | Path;
@@ -97,8 +110,8 @@ export class LogEvent {
     return this.get(path) !== undefined;
   }
 
-  clone(): LogEvent {
-    return new LogEvent(cloneValue(this.fields), cloneMetadata(this.metadata));
+  clone(options: CloneOptions = {}): LogEvent {
+    return new LogEvent(cloneValue(this.fields), cloneMetadata(this.metadata, options));
   }
 
   estimatedSize(): number {
@@ -145,12 +158,12 @@ export class MetricEvent {
     return this.series.tags;
   }
 
-  clone(): MetricEvent {
+  clone(options: CloneOptions = {}): MetricEvent {
     const copy = new MetricEvent({
       name: this.series.name,
       kind: this.metricKind,
       value: cloneMetricValue(this.value),
-      metadata: cloneMetadata(this.metadata),
+      metadata: cloneMetadata(this.metadata, options),
     });
     copy.series = cloneSeries(this.series);
     copy.timestamp = this.timestamp;
@@ -283,7 +296,7 @@ export class SpanEvent {
     return d < 0n ? 0n : d;
   }
 
-  clone(): SpanEvent {
+  clone(options: CloneOptions = {}): SpanEvent {
     const init: SpanInit = {
       traceId: this.traceId.slice(),
       spanId: this.spanId.slice(),
@@ -301,7 +314,7 @@ export class SpanEvent {
         attributes: cloneValue(l.attributes),
       })),
       resource: cloneValue(this.resource),
-      metadata: cloneMetadata(this.metadata),
+      metadata: cloneMetadata(this.metadata, options),
     };
     if (this.parentSpanId !== undefined) init.parentSpanId = this.parentSpanId.slice();
     if (this.traceState !== undefined) init.traceState = this.traceState;

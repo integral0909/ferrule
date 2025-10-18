@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LogEvent } from '@ferrule/core';
+import { BatchNotifier, LogEvent } from '@ferrule/core';
 import { ManualClock, TapHub } from '@ferrule/runtime';
 
 function log(message: string): LogEvent {
@@ -16,6 +16,20 @@ async function collect(iterable: AsyncIterable<unknown>, count: number): Promise
 }
 
 describe('TapHub', () => {
+  it('never holds up acknowledgements of the events it observes', async () => {
+    const hub = new TapHub(new ManualClock());
+    const sub = hub.subscribe({ componentId: 'src' });
+    const batch = new BatchNotifier();
+    const original = log('acked');
+    original.metadata.finalizers.add(batch.createFinalizer());
+    batch.seal();
+    hub.publish('src', '_default', [original]);
+    const [received] = await collect(sub, 1);
+    expect((received as LogEvent).metadata.finalizers.isEmpty).toBe(true);
+    original.metadata.finalizers.finish('delivered');
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
   it('delivers clones, never the original event, to subscribers', async () => {
     const hub = new TapHub(new ManualClock());
     const sub = hub.subscribe({ componentId: 'src' });

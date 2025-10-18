@@ -51,6 +51,18 @@ describe('LogEvent', () => {
     await expect(batch.completion).resolves.toBe('delivered');
   });
 
+  it('can clone without joining delivery tracking', async () => {
+    const batch = new BatchNotifier();
+    const event = LogEvent.fromMessage('x');
+    event.metadata.finalizers.add(batch.createFinalizer());
+    batch.seal();
+    const observed = event.clone({ finalizers: false });
+    expect(observed.metadata.finalizers.isEmpty).toBe(true);
+    expect(observed.get('message')).toBe('x');
+    event.metadata.finalizers.finish();
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
   it('estimates size from its fields', () => {
     expect(LogEvent.fromMessage('x'.repeat(1000)).estimatedSize()).toBeGreaterThan(1000);
   });

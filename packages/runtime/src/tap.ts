@@ -173,7 +173,7 @@ export class TapHub {
     const set = this.subscribers.get(tapKey({ componentId, port }));
     if (set === undefined || set.size === 0) return;
     for (const subscriber of set) {
-      for (const event of events) subscriber.offer(event.clone());
+      for (const event of events) subscriber.offer(event.clone({ finalizers: false }));
     }
   }
 

@@ -1,0 +1,36 @@
+{
+  "name": "@ferrule/admin",
+  "version": "0.1.0",
+  "description": "Ferrule admin API: health, topology, metrics, and live event tap.",
+  "license": "Apache-2.0",
+  "author": "Fredrik Ahman <fredrik.fullstackdev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/integral0909/ferrule.git",
+    "directory": "packages/admin"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "@ferrule/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@ferrule/codecs": "workspace:*",
+    "@ferrule/core": "workspace:*",
+    "@ferrule/runtime": "workspace:*"
+  }
+}

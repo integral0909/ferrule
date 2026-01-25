@@ -1,0 +1,173 @@
+import { randomBytes } from 'node:crypto';
+import { LogEvent, MetricEvent, SpanEvent, Timestamp, type Event } from '@ferrule/core';
+import { defaultCodecs } from '@ferrule/codecs';
+import { defineSink, FixedConcurrencyLimiter, runBatchedSink, type Clock } from '@ferrule/runtime';
+import { s, type Infer } from '@ferrule/schema';
+import { HttpClient, ensureSuccess } from '../client.js';
+import { contentTypeFor, frameChunks, type BatchFraming } from '../framing.js';
+import { batchSchema, concurrencySchema, retrySchema, transportSchemaNoAuth } from '../schema.js';
+import { buildRetryPolicy, clockDate, eventContext } from '../support.js';
+import { sha256Hex, signV4, uriEncodePath } from '../sigv4.js';
+import { compileFieldTemplate, formatTimePattern } from '../templating.js';
+
+export const objectStorageSinkOptions = transportSchemaNoAuth.extend({
+  /** S3-compatible endpoint, e.g. `https://s3.us-east-1.amazonaws.com` or `http://localhost:9000`. */
+  endpoint: s.url({ protocols: ['http', 'https'] }),
+  bucket: s.string().nonEmpty(),
+  /** Object key template: `%Y/%m/%d/%H`-style time tokens plus `{{ field }}` references. A random
+   * suffix is always appended so concurrent batches never collide. */
+  key: s.string().default('%Y/%m/%d/%H/events'),
+  region: s.string().default('us-east-1'),
+  service: s.string().default('s3'),
+  addressing: s.enum(['path', 'virtual']).default('path'),
+  accessKeyId: s.string().secret(),
+  secretAccessKey: s.string().secret(),
+  sessionToken: s.string().secret().optional(),
+  /** Whether the key template's time tokens use the batch-flush wall clock, or the first event's
+   * own timestamp. */
+  timeSource: s.enum(['batch', 'event']).default('batch'),
+  codec: s.enum(['json', 'ndjson', 'text', 'logfmt']).default('ndjson'),
+  framing: s.enum(['ndjson', 'json_array', 'newline']).default('ndjson'),
+  contentType: s.string().optional(),
+  batch: batchSchema.optional(),
+  retry: retrySchema.optional(),
+  concurrency: concurrencySchema,
+});
+export type ObjectStorageSinkOptions = Infer<typeof objectStorageSinkOptions>;
+
+interface Encoded {
+  readonly key: string;
+  readonly body: Uint8Array;
+}
+
+function eventTime(event: Event): Date {
+  if (event instanceof LogEvent) {
+    const ts = event.get('timestamp');
+    if (ts instanceof Timestamp) return ts.toDate();
+  } else if (event instanceof MetricEvent && event.timestamp !== undefined) {
+    return event.timestamp.toDate();
+  } else if (event instanceof SpanEvent) {
+    return event.startTime.toDate();
+  }
+  return event.metadata.receivedAt.toDate();
+}
+
+function appendUniqueSuffix(key: string): string {
+  const suffix = randomBytes(6).toString('hex');
+  const lastSlash = key.lastIndexOf('/');
+  const dir = lastSlash === -1 ? '' : key.slice(0, lastSlash + 1);
+  const base = lastSlash === -1 ? key : key.slice(lastSlash + 1);
+  const dot = base.lastIndexOf('.');
+  return dot <= 0
+    ? `${dir}${base}-${suffix}`
+    : `${dir}${base.slice(0, dot)}-${suffix}${base.slice(dot)}`;
+}
+
+/** S3-compatible object storage sink: batches are PUT as objects, signed with a hand-written AWS
+ * Signature Version 4 (header-based). Object keys combine time partitioning, event field
+ * references, and a random unique suffix so retries and concurrent batches never collide. */
+export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
+  kind: 'sink',
+  type: 'object_storage',
+  description: 'Writes batches of events as objects to an S3-compatible store, SigV4-signed.',
+  options: objectStorageSinkOptions,
+  accepts: ['log', 'metric', 'span'],
+  build: (options, ctx) => {
+    const endpoint = new URL(options.endpoint);
+    const encoder = defaultCodecs.createEncoder(options.codec);
+    const framing: BatchFraming = options.framing;
+    const contentType = options.contentType ?? contentTypeFor(framing);
+    const gzip = options.compression === 'gzip';
+    const keyHasTemplate = /\{\{/.test(options.key);
+
+    const client = new HttpClient({
+      tls: options.tls,
+      proxy: options.proxy,
+      timeoutMs: options.timeout,
+      maxResponseBytes: options.maxResponseBytes,
+      compression: options.compression,
+      headers: options.headers,
+      maxSockets: options.maxSockets,
+      logger: ctx.logger,
+    });
+
+    function renderKey(events: readonly Event[], clock: Clock): string {
+      const representative = options.timeSource === 'event' ? events[0]! : undefined;
+      const date = representative !== undefined ? eventTime(representative) : clockDate(clock);
+      let key = formatTimePattern(options.key, date);
+      if (keyHasTemplate) key = compileFieldTemplate(key).render(eventContext(events[0]!));
+      key = appendUniqueSuffix(key);
+      return gzip && !key.endsWith('.gz') ? `${key}.gz` : key;
+    }
+
+    function requestUrl(key: string): URL {
+      const encodedKey = uriEncodePath(key);
+      if (options.addressing === 'path') {
+        return new URL(`/${uriEncodePath(options.bucket)}/${encodedKey}`, endpoint);
+      }
+      return new URL(`${endpoint.protocol}//${options.bucket}.${endpoint.host}/${encodedKey}`);
+    }
+
+    return {
+      async run(sinkCtx) {
+        try {
+          await runBatchedSink<Encoded>(sinkCtx, {
+            ...(options.batch?.maxEvents !== undefined
+              ? { maxEvents: options.batch.maxEvents }
+              : {}),
+            ...(options.batch?.maxBytes !== undefined ? { maxBytes: options.batch.maxBytes } : {}),
+            timeoutMs: options.batch?.timeout ?? 1_000,
+            encode: (events) => ({
+              key: renderKey(events, sinkCtx.clock),
+              body: frameChunks(
+                events.map((event) => encoder.encode(event)),
+                framing,
+              ),
+            }),
+            send: async (payload) => {
+              const url = requestUrl(payload.key);
+              const bodyHash = sha256Hex(payload.body);
+              const signed = signV4({
+                method: 'PUT',
+                canonicalUri: url.pathname,
+                headers: { host: url.host },
+                payloadHash: bodyHash,
+                region: options.region,
+                service: options.service,
+                date: sinkCtx.clock.now().toDate(),
+                credentials: {
+                  accessKeyId: options.accessKeyId,
+                  secretAccessKey: options.secretAccessKey,
+                  ...(options.sessionToken !== undefined
+                    ? { sessionToken: options.sessionToken }
+                    : {}),
+                },
+              });
+              const headers: Record<string, string> = {
+                'content-type': contentType,
+                'x-amz-date': signed.amzDate,
+                'x-amz-content-sha256': bodyHash,
+                authorization: signed.authorizationHeader,
+              };
+              if (options.sessionToken !== undefined) {
+                headers['x-amz-security-token'] = options.sessionToken;
+              }
+              const response = await client.request({
+                method: 'PUT',
+                url: url.toString(),
+                headers,
+                body: payload.body,
+              });
+              const error = ensureSuccess(response, 'E_OBJECT_STORAGE_SINK');
+              if (error !== undefined) throw error;
+            },
+            retry: buildRetryPolicy(options.retry),
+            concurrency: new FixedConcurrencyLimiter(options.concurrency),
+          });
+        } finally {
+          client.close();
+        }
+      },
+    };
+  },
+});

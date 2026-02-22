@@ -156,6 +156,57 @@ describe('checker: fallibility', () => {
   });
 });
 
+describe('checker: parse_regex return-type inference', () => {
+  it('infers a closed object type with one string field per named group, from a regex literal', () => {
+    expect(
+      typeOfLastExprStatement(
+        String.raw`let parsed = parse_regex(.msg, r/(?<ip>\S+) (?<code>\d+)/) ?? abort` +
+          '\nparsed',
+      ),
+    ).toBe('object { ip: string, code: string }');
+  });
+
+  it('infers the same shape from a constant string pattern', () => {
+    expect(
+      typeOfLastExprStatement(
+        String.raw`let parsed = parse_regex(.msg, "(?<ip>\S+)") ?? abort` + '\nparsed',
+      ),
+    ).toBe('object { ip: string }');
+  });
+
+  it('a field access on the inferred shape type-checks as string, not any', () => {
+    expect(
+      errorsOf(
+        String.raw`let parsed = parse_regex(.msg, r/(?<ip>\S+)/) ?? abort` +
+          '\nlet ip = upcase(parsed.ip)',
+      ),
+    ).toEqual([]);
+  });
+
+  it('accessing an undeclared field on the inferred (closed) shape is an error', () => {
+    expect(
+      errorsOf(
+        String.raw`let parsed = parse_regex(.msg, r/(?<ip>\S+)/) ?? abort` + '\nparsed.nope',
+      ),
+    ).toContain('E302');
+  });
+
+  it('falls back to an open object type for a dynamic (non-literal) pattern', () => {
+    expect(
+      typeOfLastExprStatement('let parsed = parse_regex(.msg, .pattern) ?? abort\nparsed'),
+    ).toBe('object { ..any }');
+  });
+
+  it('falls back to an open object type when numeric_groups is true', () => {
+    expect(
+      typeOfLastExprStatement(
+        String.raw`let parsed = parse_regex(.msg, r/(?<ip>\S+)/, numeric_groups: true) ?? abort` +
+          '\nparsed',
+      ),
+    ).toBe('object { ..any }');
+  });
+});
+
 describe('checker: type errors', () => {
   it('never implicitly mixes int and float', () => {
     expect(errorsOf('let x = 1 + 1.5')).toContain('E305');
@@ -304,6 +355,21 @@ describe('checker: match', () => {
 
   it('flags duplicate literal arms', () => {
     expect(errorsOf('match .v {\n  1 => "a",\n  1 => "b",\n  _ => "c",\n}')).toContain('E310');
+  });
+
+  it('does not flag two distinct string-literal arms as duplicates', () => {
+    // Regression test: `literalKey` used to key every string-literal pattern on `pattern.value`,
+    // a field `StringLiteral` doesn't have (its text lives in `.parts`), so every string pattern
+    // collapsed to the same key and any two of them were wrongly flagged as duplicates.
+    expect(errorsOf('match .v {\n  "error" => 1,\n  "warn" => 2,\n  _ => 3,\n}')).not.toContain(
+      'E310',
+    );
+  });
+
+  it('still flags two identical string-literal arms as duplicates', () => {
+    expect(errorsOf('match .v {\n  "error" => 1,\n  "error" => 2,\n  _ => 3,\n}')).toContain(
+      'E310',
+    );
   });
 
   it('destructures an object pattern', () => {

@@ -13,16 +13,20 @@ import type {
   AssignStatement,
   BinaryExpr,
   BlockExpr,
+  BoolLiteral,
   CallExpr,
   ClosureExpr,
   Expr,
   FieldAccessExpr,
+  FloatLiteral,
   IfExpr,
   IndexExpr,
+  IntLiteral,
   IsExpr,
   LetCaptureStatement,
   LetStatement,
   MatchExpr,
+  NullLiteral,
   ObjectLiteral,
   ObjectPattern,
   Pattern,
@@ -694,9 +698,11 @@ class Checker {
     let anyMismatch = false;
     let closureReturn: ExprType | undefined;
     const positionalArgTypes: ExprType[] = [];
+    const argExprs: (Expr | undefined)[] = [];
 
     for (const p of signature.params) {
       const arg = slots.get(p);
+      argExprs.push(arg?.value);
       if (arg === undefined) {
         if (!p.optional) {
           this.error(
@@ -723,7 +729,10 @@ class Checker {
     }
 
     const fallible = signature.fallible === 'always' || anyMismatch;
-    const returnType = resolveReturnType(signature, positionalArgTypes, { closureReturn });
+    const returnType = resolveReturnType(signature, positionalArgTypes, {
+      closureReturn,
+      argExprs,
+    });
     this.calls.set(expr, { signature });
     return { type: returnType, fallible };
   }
@@ -1099,10 +1108,26 @@ function comparable(a: Type, b: Type): boolean {
   return a.kind === 'any' || b.kind === 'any' || isSubtype(a, b) || isSubtype(b, a);
 }
 
-function literalKey(value: { kind: string; value?: unknown }): string {
-  if (value.kind === 'int') return `int:${String(value.value)}`;
-  if (value.kind === 'float') return `float:${String(value.value)}`;
-  if (value.kind === 'string') return `string:${JSON.stringify(value.value)}`;
-  if (value.kind === 'bool') return `bool:${String(value.value)}`;
-  return 'null';
+function literalKey(
+  value: IntLiteral | FloatLiteral | StringLiteral | BoolLiteral | NullLiteral,
+): string {
+  switch (value.kind) {
+    case 'int':
+      return `int:${String(value.value)}`;
+    case 'float':
+      return `float:${String(value.value)}`;
+    case 'string':
+      // A `StringLiteral` has no `.value`: its text lives in `.parts`. Two plain-text patterns
+      // with the same text must produce the same key (this is what E310 checks for), so this
+      // reconstructs the literal text rather than keying on the AST shape (which would make every
+      // string pattern — having no `.value` field at all — collapse to the same key: see the
+      // regression test for the false-positive E310 this previously caused on any two distinct
+      // string patterns in one `match`). An interpolated string can't appear as a literal pattern
+      // (the parser only accepts a plain string here), so `.parts` is always a single text part.
+      return `string:${JSON.stringify(value.parts.map((p) => (p.kind === 'text' ? p.value : '')).join(''))}`;
+    case 'bool':
+      return `bool:${String(value.value)}`;
+    case 'null':
+      return 'null';
+  }
 }

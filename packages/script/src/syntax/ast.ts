@@ -341,7 +341,7 @@ export interface ObjectPattern {
   readonly kind: 'objectPattern';
   readonly span: Span;
   readonly fields: readonly ObjectPatternField[];
-  /** Whether the pattern ends with `, ..` to allow (and ignore) extra fields. */
+  /** Whether the pattern ends with `, _` to allow (and ignore) extra fields. */
   readonly rest: boolean;
 }
 

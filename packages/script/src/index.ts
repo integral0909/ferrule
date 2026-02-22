@@ -226,3 +226,62 @@ export { createDefaultRegistry, registerBuiltins } from './registry/builtins.js'
 export type { CheckOptions, CheckResult, ResolvedCall } from './check/typedProgram.js';
 export { didYouMean, editDistance } from './check/editDistance.js';
 export { Scope, type Binding } from './check/scope.js';
+
+// ---- compiler / runtime (M2 back end) --------------------------------------------------------
+
+export { compile, type CompileOptions, type CompiledProgram } from './compile/program.js';
+export { optimizeProgram } from './compile/optimizer.js';
+export { runInlineTests, type FieldDiff, type InlineTestResult } from './compile/testRunner.js';
+
+export {
+  impl,
+  ImplementationRegistry,
+  type BuiltinCall,
+  type CallArgs,
+  type FunctionImplementation,
+} from './registry/implementation.js';
+
+export { assertValue, failure, Failure, isFailure, ScriptBugError } from './runtime/failure.js';
+export {
+  abortSignal,
+  dropSignal,
+  limitSignal,
+  ScriptSignal,
+  type SignalKind,
+} from './runtime/signal.js';
+export {
+  checkCollectionSize,
+  checkEmittedEvents,
+  checkRegexInputLength,
+  checkStringLength,
+  DEFAULT_LIMITS,
+  resolveLimits,
+  type ResourceLimits,
+} from './runtime/limits.js';
+export type { Outcome } from './runtime/outcome.js';
+export {
+  createRunCtx,
+  RateLimiter,
+  type CompiledClosure,
+  type Eval,
+  type EvalFallible,
+  type Exec,
+  type Frame,
+  type LogSink,
+  type RunCtx,
+  type RunOptions,
+  type RuntimeValue,
+} from './runtime/context.js';
+export { isRegexValue, RegexValue, assertNoRegex } from './runtime/regex.js';
+export { matchesKindName, scriptKindOf, type ScriptKind } from './runtime/kinds.js';
+export { toDisplayString, toLiteralString } from './runtime/display.js';
+export { formatStrftime, parseStrftime } from './runtime/strftime.js';
+export {
+  deleteInValue,
+  getInValue,
+  hasInValue,
+  setInValue,
+  toPathSegments,
+} from './runtime/valuePath.js';
+
+export { createDefaultImplementations, registerStdlib } from './stdlib/index.js';

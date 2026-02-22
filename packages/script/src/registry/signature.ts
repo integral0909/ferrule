@@ -1,3 +1,4 @@
+import type { Expr } from '../syntax/ast.js';
 import type { ExprType, Type } from '../types/types.js';
 
 /**
@@ -43,6 +44,16 @@ export interface FunctionParam {
 export interface ClosureCallContext {
   /** The closure argument's declared return type, if the call site passed one. */
   readonly closureReturn: ExprType | undefined;
+  /**
+   * The argument *expression* actually passed for each parameter, in `params` declaration order
+   * (`undefined` where an optional parameter was not supplied). Optional: only the checker
+   * supplies it (`check/checker.ts`'s `checkResolvedCall`); `resolveReturnType`'s other caller
+   * (`registry.test.ts`) omits it. A return-type rule that wants to key its result on a literal
+   * argument — e.g. `parse_regex` inferring an object shape from a constant pattern's named
+   * capture groups — inspects `argExprs[i].kind` itself (`'string'`/`'regex'`/...); most rules
+   * (`map_values`, `filter`, `compact`, ...) don't need this and can ignore it.
+   */
+  readonly argExprs?: readonly (Expr | undefined)[];
 }
 
 /**

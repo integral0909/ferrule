@@ -25,14 +25,14 @@ and delivers them to storage and analysis backends with backpressure and at-leas
 
 ```ferrule
 # Parse an nginx access line, drop health checks, redact client IPs.
-let parsed = parse_regex(.message, r'^(?<ip>\S+) \S+ \S+ \[[^\]]+\] "(?<method>\S+) (?<path>\S+)[^"]*" (?<status>\d+)') ?? abort
+let parsed = parse_regex(.message, r/^(?<ip>\S+) \S+ \S+ \[[^\]]+\] "(?<method>\S+) (?<path>\S+)[^"]*" (?<status>\d+)/) ?? abort
 
 if parsed.path == "/healthz" { drop }
 
 .http.method = parsed.method
 .http.path   = parsed.path
 .http.status = to_int(parsed.status) ?? 0
-.client_ip   = redact_ip(parsed.ip, keep_prefix: 24)
+.client_ip   = redact_ip(parsed.ip, keep_prefix: 24) ?? "0.0.0.0"
 ```
 
 The language design is described in [docs/language/design.md](docs/language/design.md).

@@ -8,12 +8,12 @@ import {
   intType,
   nullType,
   objectType,
-  regexType,
   stringType,
   timestampType,
   unionType,
 } from '../types/types.js';
 import { FunctionRegistry, param, type FunctionSignature } from './signature.js';
+import { registerStdlib } from '../stdlib/index.js';
 
 function fn(
   name: string,
@@ -90,21 +90,6 @@ export function registerBuiltins(registry: FunctionRegistry): FunctionRegistry {
       true,
       'Parses a JSON document. Fails if the text is not valid JSON.',
       ['parse_json(.raw)!'],
-    ),
-  );
-
-  registry.register(
-    fn(
-      'parse_regex',
-      [
-        param('pattern', stringType),
-        param('flags', stringType, { optional: true, namedOnly: true, defaultDoc: '""' }),
-      ],
-      regexType,
-      'always',
-      true,
-      'Compiles a string into a regex. Fails if the pattern is invalid.',
-      ['parse_regex(.pattern, flags: "i")!'],
     ),
   );
 
@@ -223,6 +208,8 @@ export function registerBuiltins(registry: FunctionRegistry): FunctionRegistry {
       ['emit({ "kind": "child", "parent_id": .id })'],
     ),
   );
+
+  registerStdlib(registry);
 
   return registry;
 }

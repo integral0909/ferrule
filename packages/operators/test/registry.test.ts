@@ -3,10 +3,10 @@ import { ComponentRegistry } from '@ferrule/runtime';
 import { builtinOperators } from '@ferrule/operators';
 
 describe('builtinOperators', () => {
-  it('lists twelve transforms with unique type names', () => {
+  it('lists fifteen transforms with unique type names', () => {
     const operators = builtinOperators();
-    expect(operators).toHaveLength(12);
-    expect(new Set(operators.map((o) => o.type)).size).toBe(12);
+    expect(operators).toHaveLength(15);
+    expect(new Set(operators.map((o) => o.type)).size).toBe(15);
   });
 
   it('every operator declares a non-empty description and at least one accepted kind', () => {

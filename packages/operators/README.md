@@ -1,13 +1,13 @@
 # `@ferrule/operators`
 
-Built-in Ferrule transforms that don't need Ferrule Script: field remapping, sampling,
-throttling, deduplication, metric aggregation, log/metric conversion, cardinality limiting, log
-windowing, trace tail sampling, event-kind splitting, and metric tag helpers. `script`, `filter`,
-and `route` (which need compiled script conditions) are not part of this package; everything here
-is configured with plain, typed options — never a mini-language.
+Built-in Ferrule transforms: `script`, `filter`, and `route` (which compile and run Ferrule
+Script), plus a set of transforms that don't need it — field remapping, sampling, throttling,
+deduplication, metric aggregation, log/metric conversion, cardinality limiting, log windowing,
+trace tail sampling, event-kind splitting, and metric tag helpers — configured entirely with
+plain, typed options.
 
 Node.js standard library only — no runtime dependencies beyond `@ferrule/core`, `@ferrule/schema`,
-and `@ferrule/runtime`.
+`@ferrule/runtime`, and `@ferrule/script`.
 
 ```ts
 import { builtinOperators } from '@ferrule/operators';
@@ -20,6 +20,9 @@ registry.register(...builtinOperators());
 ## Contents
 
 - [Shared concepts](#shared-concepts)
+- [`script`](#script)
+- [`filter`](#filter)
+- [`route`](#route)
 - [`remap_fields`](#remap_fields)
 - [`sample`](#sample)
 - [`throttle`](#throttle)
@@ -74,6 +77,143 @@ transform (see `packages/runtime/README.md`):
   completes only once that combined event is actually delivered.
 - An operator that **fans one event out into several** (`log_to_metric`) clones the finalizers
   onto each output event, exactly like routing one event to multiple sinks.
+
+## `script`
+
+Runs a compiled [Ferrule Script](../script/README.md) program over every log event. The program
+is parsed, checked, and compiled once at **build time** (validation, before the pipeline starts),
+so a syntax or type error is reported immediately with the same rendered code frames
+`ferrule validate`/the language package produce, as a thrown `FerruleError`.
+
+| Option            | Type                          | Default | Description                                                                                                                     |
+| ----------------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `source`          | string                        | —       | inline Ferrule Script source (exactly one of `source`/`file`)                                                                   |
+| `file`            | string                        | —       | path to a `.fer` file, read once at build time                                                                                  |
+| `input_schema`    | map of field name → type name | —       | see below                                                                                                                       |
+| `drop_on_abort`   | boolean                       | `false` | deliberate `abort()`/type-mismatch: drop+count vs. route to `errors`                                                            |
+| `drop_on_error`   | boolean                       | `false` | resource-limit/internal-error abort: drop+count vs. route to `errors`                                                           |
+| `reroute_dropped` | boolean                       | `false` | route `drop()`ped events to the `dropped` port instead of finishing them                                                        |
+| `limits`          | object                        | `{}`    | per-event resource limit overrides (`max_string_length`, `max_collection_size`, `max_regex_input_length`, `max_emitted_events`) |
+
+`input_schema` is a **flat** field → type-name map (`null`/`bool`/`int`/`float`/`string`/`bytes`/
+`timestamp`/`array`/`object`/`any`), converted to a Ferrule object type (`objectType(fields,
+anyType)`): it types the top-level fields it names; anything else stays `any`, and named
+`array`/`object` fields stay fully open (no nested element typing) — see
+`docs/language/design.md` §3 for the default-`any` behaviour this narrows.
+
+**Metric and span events pass through unchanged**, counted by `script_passthrough_events_total`
+(tagged `kind`): `@ferrule/script`'s compiler only supports `LogEvent` today (see the script
+package README's "Execution model: logs only"), so there is no way to run a program against a
+metric or span, and rejecting a mixed-kind pipeline outright would be more surprising than useful.
+
+**Outcomes**, per `CompiledProgram.run`'s `Outcome`:
+
+- `continue` — the (possibly mutated) input event is pushed on the default port; any `emit()`-
+  added events are pushed too, each with a _clone_ of the original event's finalizers merged in,
+  so the upstream batch acknowledges only once every derived event finishes.
+- `drop` — finished `delivered` (the ordinary intentional-drop status), or routed to the `dropped`
+  port if `reroute_dropped` is set.
+- `abort` — the failure reason's prefix distinguishes a deliberate abort/mismatch (`drop_on_abort`)
+  from a resource limit or genuine bug (`limit exceeded: `/`internal error: `, `drop_on_error`).
+  Unless the applicable flag is `true` (finish `rejected`, counted under
+  `component_discarded_events_total`), the event is routed to the always-declared `errors` port
+  with the failure recorded on the event itself: `ferrule.error.reason` (string),
+  `ferrule.error.span.start`/`.end` (int, UTF-16 offsets into the script source), and
+  `ferrule.error.transform` (this component's ID).
+
+Metrics: `script_events_total` (tag `outcome: continue|drop|abort`) and
+`script_run_duration_seconds` (a histogram), both recorded per log event.
+
+```yaml
+transforms:
+  shape:
+    type: script
+    inputs: [app_logs]
+    source: |
+      .service = .service ?? "unknown"
+      if .level == "debug" { drop }
+    drop_on_abort: false
+  shape_errors:
+    type: console # or any sink
+    inputs: [shape.errors]
+```
+
+## `filter`
+
+Keeps log events for which a Ferrule Script boolean **expression** (not a full program) is true.
+
+| Option         | Type                          | Default | Description                                          |
+| -------------- | ----------------------------- | ------- | ---------------------------------------------------- |
+| `condition`    | string                        | —       | a Ferrule Script boolean expression                  |
+| `on_error`     | `keep` \| `drop`              | `drop`  | what an aborted condition means (see below)          |
+| `input_schema` | map of field name → type name | —       | same shape as `script`'s, used to type the condition |
+
+**Compilation approach.** `condition` is spliced into a tiny synthetic program that uses the
+language's own control flow rather than a scratch field: `if !((<condition>) ?? <on_error
+fallback>) { drop }`. Ferrule Script's checker only _warns_ (never errors) when `??` is applied to
+an already-non-fallible left side, so this compiles unchanged whether or not `condition` can fail.
+`Outcome.kind` then **is** the decision: `continue` keeps the event (original finalizers intact,
+plus any `emit()`-added events, exactly like `script`); `drop` discards it, finished `delivered`.
+
+A **`Failure`** (a fallible sub-expression, e.g. `to_int(.x) > 5` when `.x` isn't numeric) is
+caught by the `?? fallback` above and becomes an ordinary `true`/`false`. An **`abort`** (an
+explicit `abort()`, or an `any`-typed operand that isn't the kind an operator needs at runtime —
+not interceptable by `??`) is handled by `on_error`: `keep` pushes the event through as if it had
+matched; `drop` (the default) finishes it `rejected` — this is "bad data", the same
+permanent-failure semantics `remap_fields`'s `on_error: drop` uses — and counts it under
+`component_discarded_events_total` (`reason: condition_aborted`).
+
+Known limitation: a compile error's reported position is an offset into the synthetic wrapper
+source, not `condition` alone — the code frame still shows the right text and column, with the
+wrapper visible around it.
+
+```yaml
+transforms:
+  only_errors:
+    type: filter
+    inputs: [app_logs]
+    condition: '.status >= 500'
+```
+
+## `route`
+
+Sends each log event to every named route whose Ferrule Script condition is true, using the same
+compilation approach as `filter` (one wrapped program per route). A route's port is its own name.
+
+| Option            | Type                           | Default        | Description                                                        |
+| ----------------- | ------------------------------ | -------------- | ------------------------------------------------------------------ |
+| `routes`          | array of `{ name, condition }` | —              | at least one; names must be unique                                 |
+| `on_error`        | `keep` \| `drop`               | `drop`         | what an aborted route condition means for _that route's_ match     |
+| `route_unmatched` | boolean                        | `true`         | route events matching no route to `unmatched_port`                 |
+| `unmatched_port`  | string                         | `"_unmatched"` | port for events matching no route (used only if `route_unmatched`) |
+| `input_schema`    | map of field name → type name  | —              | same shape as `script`'s, used to type every condition             |
+
+Every route's condition is evaluated independently against the **original** event: a condition is
+a single expression, and the grammar has no way to put an assignment statement inside an
+expression, so no route's condition can mutate a field another route reads. An event matching
+several routes is fanned out to all of them — the first match reuses the original event object,
+every later match is `LogEvent.clone()` (which already clones finalizers), so the upstream batch
+acknowledges only once every copy finishes. A route condition that calls `emit()` is a known,
+documented gap: the extra event is discarded, since with several routes possibly matching there is
+no single obvious port for it — write route conditions as pure predicates.
+
+```yaml
+transforms:
+  by_status:
+    type: route
+    inputs: [app_logs]
+    routes:
+      - { name: errors, condition: '.status >= 500' }
+      - { name: client_errors, condition: '.status >= 400 && .status < 500' }
+    unmatched_port: ok
+sinks:
+  error_sink:
+    type: console
+    inputs: [by_status.errors]
+  ok_sink:
+    type: console
+    inputs: [by_status.ok]
+```
 
 ## `remap_fields`
 
@@ -447,6 +587,16 @@ transforms:
 
 ## Known gaps
 
+- `script`'s `input_schema` is a flat field → type-name map; there is no nested object/array
+  element typing (a named `array`/`object` field stays fully open), and metric/span events pass
+  through `script` untouched since `@ferrule/script`'s compiler only supports `LogEvent` (see the
+  script package README's "Execution model: logs only").
+- `filter`/`route` compile `condition` inside a synthetic wrapper program
+  (`if !((<condition>) ?? <fallback>) { drop }`); a compile error's position is reported against
+  that wrapper, not the bare `condition` string.
+- `route` discards any event an `emit()` call inside a route condition adds — conditions are
+  expected to be pure predicates; use `script` (which fully supports `emit()`) ahead of `route` if
+  you need to both derive and route additional events.
 - `sample`'s `key_field` and `exclude`, and `throttle`'s `key_field`, address log fields directly
   but only a small fixed set of paths for metrics (`name`, `namespace`, `tags.<key>`) and spans
   (`name`, `status`, `attributes.*`, `resource.*`); an arbitrary nested span attribute path works,

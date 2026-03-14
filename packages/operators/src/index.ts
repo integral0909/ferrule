@@ -1,8 +1,9 @@
 /**
- * `@ferrule/operators` — built-in Ferrule transforms that don't need Ferrule Script: field
- * remapping, sampling, throttling, deduplication, metric aggregation, log/metric conversion,
- * cardinality limiting, log windowing, trace tail sampling, event-kind splitting, and metric tag
- * helpers. See `README.md` for the full reference and YAML examples.
+ * `@ferrule/operators` — built-in Ferrule transforms: `script`, `filter`, and `route` (compiled
+ * Ferrule Script), plus a set of declarative transforms that don't need it: field remapping,
+ * sampling, throttling, deduplication, metric aggregation, log/metric conversion, cardinality
+ * limiting, log windowing, trace tail sampling, event-kind splitting, and metric tag helpers. See
+ * `README.md` for the full reference and YAML examples.
  */
 
 export { aggregateOptions, aggregateTransform, type AggregateOptions } from './aggregate.js';
@@ -12,6 +13,7 @@ export {
   type CardinalityLimitOptions,
 } from './cardinality_limit.js';
 export { dedupeOptions, dedupeTransform, type DedupeOptions } from './dedupe.js';
+export { filterOptions, filterTransform, type FilterOptions } from './filter.js';
 export {
   logToMetricOptions,
   logToMetricTransform,
@@ -30,7 +32,9 @@ export {
   type RemapFieldsOptions,
   type RemapOperation,
 } from './remap_fields.js';
+export { routeOptions, routeTransform, type RouteOptions, type RouteSpec } from './route.js';
 export { sampleOptions, sampleTransform, type SampleOptions } from './sample.js';
+export { scriptOptions, scriptTransform, type ScriptOptions } from './script.js';
 export {
   splitByKindOptions,
   splitByKindTransform,
@@ -70,3 +74,9 @@ export {
 } from './util/hash.js';
 export { coerceValue, toNumber, type CoerceTarget, type TimestampFormat } from './util/coerce.js';
 export { getEventField } from './util/fields.js';
+export {
+  compileScriptSource,
+  wrapBooleanCondition,
+  E_SCRIPT_COMPILE,
+} from './util/scriptCompile.js';
+export { inputSchemaType, FIELD_KIND_NAMES, type FieldKindName } from './util/inputSchema.js';

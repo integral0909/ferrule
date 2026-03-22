@@ -1,0 +1,13 @@
+sources:
+  in:
+    type: fake_source
+
+transforms:
+  upcase:
+    type: fake_upcase
+    inputs: [in]
+
+sinks:
+  out:
+    type: fake_sink
+    inputs: [upcase]

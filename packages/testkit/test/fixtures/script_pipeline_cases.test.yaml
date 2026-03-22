@@ -1,0 +1,18 @@
+config: ./script_pipeline.yaml
+description: pipeline cases for the script_pipeline fixture (also exercises inline test discovery)
+
+cases:
+  # The fixture registry's `type: script` definition is a passthrough stand-in (testkit does not
+  # depend on @ferrule/operators's real script transform, see test/helpers.ts), so this only
+  # exercises the pipeline plumbing end to end; the inline `test { ... }` blocks inside the
+  # component's `source` are what actually exercise Ferrule Script semantics (via
+  # runInlineScriptTests, independent of this fake transform's runtime behaviour).
+  - name: events flow through the pipeline unchanged
+    inputs:
+      in:
+        - { level: WARN }
+    outputs:
+      out:
+        count: 1
+        events:
+          - { level: WARN }

@@ -1,0 +1,33 @@
+config: ./pipeline.yaml
+description: passing cases for the fixture pipeline
+
+cases:
+  - name: uppercases the message
+    inputs:
+      in:
+        - { message: hello, status: 200 }
+    outputs:
+      out:
+        count: 1
+        events:
+          - { message: HELLO }
+        conditions:
+          - '.status == 200'
+
+  - name: skip drops the event, nothing reaches the sink
+    inputs:
+      in:
+        - { message: hello, skip: true }
+    outputs:
+      out:
+        none: true
+
+  - name: exact match requires every field
+    inputs:
+      in:
+        - { message: hi }
+    outputs:
+      out:
+        match: exact
+        events:
+          - { message: HI }

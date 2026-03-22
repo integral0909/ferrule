@@ -1,0 +1,38 @@
+{
+  "name": "@ferrule/testkit",
+  "version": "0.1.0",
+  "description": "Utilities for testing Ferrule pipelines and custom components.",
+  "license": "Apache-2.0",
+  "author": "Fredrik Ahman <fredrik.fullstackdev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/integral0909/ferrule.git",
+    "directory": "packages/testkit"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "@ferrule/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@ferrule/config": "workspace:*",
+    "@ferrule/core": "workspace:*",
+    "@ferrule/runtime": "workspace:*",
+    "@ferrule/schema": "workspace:*",
+    "@ferrule/script": "workspace:*"
+  }
+}

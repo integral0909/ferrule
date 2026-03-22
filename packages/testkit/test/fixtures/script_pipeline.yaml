@@ -1,0 +1,25 @@
+sources:
+  in:
+    type: fake_source
+
+transforms:
+  shape:
+    type: script
+    inputs: [in]
+    source: |
+      .level = downcase(.level) ?? "info"
+
+      test "normalises level" {
+        given { "level": "WARN" }
+        expect { "level": "warn" }
+      }
+
+      test "wrong expectation on purpose" {
+        given { "level": "WARN" }
+        expect { "level": "error" }
+      }
+
+sinks:
+  out:
+    type: fake_sink
+    inputs: [shape]

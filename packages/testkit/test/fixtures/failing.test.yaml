@@ -1,0 +1,46 @@
+config: ./pipeline.yaml
+description: intentionally failing cases, for exercising the reporters
+
+cases:
+  - name: wrong expected field value
+    inputs:
+      in:
+        - { message: hello }
+    outputs:
+      out:
+        events:
+          - { message: NOT_WHAT_WE_GOT }
+
+  - name: wrong count
+    inputs:
+      in:
+        - { message: a }
+        - { message: b }
+    outputs:
+      out:
+        count: 5
+
+  - name: condition is false
+    inputs:
+      in:
+        - { message: hello, status: 500 }
+    outputs:
+      out:
+        conditions:
+          - '.status == 200'
+
+  - name: expected none but got one
+    inputs:
+      in:
+        - { message: hello }
+    outputs:
+      out:
+        none: true
+
+  - name: unknown sink name
+    inputs:
+      in:
+        - { message: hello }
+    outputs:
+      does_not_exist:
+        none: true

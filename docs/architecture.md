@@ -111,21 +111,21 @@ while events are still being produced.
       (buffer depends on core; runtime depends on buffer)
 ```
 
-| Package     | Responsibility                                                                                                       |
-| ----------- | -------------------------------------------------------------------------------------------------------------------- |
-| `core`      | Values, events, timestamps, paths, lossless JSON, metric arithmetic, acks                                            |
-| `script`    | Ferrule Script: lexer, parser, resolver, type checker, optimizer, compiler, stdlib                                   |
-| `codecs`    | Framing and decoding/encoding: protobuf wire, OTLP, syslog, logfmt, Prometheus text, StatsD, CSV, patterns           |
-| `buffer`    | Crash-safe disk buffer: segmented WAL, checksums, recovery, acknowledgement-driven truncation                        |
-| `runtime`   | Bounded channels, topology graph, component lifecycle, retry, circuit breakers, hot reload                           |
-| `operators` | Built-in transforms: route, filter, aggregate, dedup, cardinality limit, log-to-metric, tail sampling                |
-| `sources`   | HTTP, OTLP/HTTP, syslog (TCP/UDP), file tailing, StatsD, internal metrics                                            |
-| `sinks`     | HTTP/webhook, object storage, ClickHouse, Postgres, Loki-compatible push, Kafka-protocol producer, console, file     |
-| `config`    | Config file loading (YAML/JSON/TOML subset), schema validation, env interpolation, secret handling, topology diffing |
-| `admin`     | Admin HTTP API: health, topology, component metrics, live `tap`                                                      |
-| `cli`       | The `ferrule` command: `run`, `validate`, `test`, `tap`, `fmt`, `repl`, `bench`                                      |
-| `lsp`       | Language server for Ferrule Script (diagnostics, hover, completion, formatting)                                      |
-| `testkit`   | Utilities for testing pipelines and custom components                                                                |
+| Package     | Responsibility                                                                                                   |
+| ----------- | ---------------------------------------------------------------------------------------------------------------- |
+| `core`      | Values, events, timestamps, paths, lossless JSON, metric arithmetic, acks                                        |
+| `script`    | Ferrule Script: lexer, parser, resolver, type checker, optimizer, compiler, stdlib                               |
+| `codecs`    | Framing and decoding/encoding: protobuf wire, OTLP, syslog, logfmt, Prometheus text, StatsD, CSV, patterns       |
+| `buffer`    | Crash-safe disk buffer: segmented WAL, checksums, recovery, acknowledgement-driven truncation                    |
+| `runtime`   | Bounded channels, topology graph, component lifecycle, retry, circuit breakers, hot reload                       |
+| `operators` | Built-in transforms: route, filter, aggregate, dedup, cardinality limit, log-to-metric, tail sampling            |
+| `sources`   | HTTP, OTLP/HTTP, syslog (TCP/UDP), file tailing, StatsD, internal metrics                                        |
+| `sinks`     | HTTP/webhook, object storage, ClickHouse, Postgres, Loki-compatible push, Kafka-protocol producer, console, file |
+| `config`    | Config file loading (YAML/JSON), schema validation, env interpolation, secret handling, topology diffing         |
+| `admin`     | Admin HTTP API: health, topology, component metrics, live `tap`                                                  |
+| `cli`       | The `ferrule` command: `run`, `validate`, `test`, `tap`, `fmt`, `repl`, `bench`                                  |
+| `lsp`       | Language server for Ferrule Script (diagnostics, hover, completion, formatting)                                  |
+| `testkit`   | Utilities for testing pipelines and custom components                                                            |
 
 Dependency direction is strictly downward. `core` has no dependencies, and no package imports
 from a package above it. This is enforced by TypeScript project references.
@@ -157,9 +157,14 @@ and reported).
 
 Ferrule runs on a single Node.js event loop per process by default. Transforms are
 synchronous functions over batches of events, which keeps per-event overhead low and ordering
-deterministic. CPU-heavy transforms can be moved to a `worker_threads` pool; events cross the
-thread boundary in a compact binary encoding (the same one the disk buffer uses), not through
-structured cloning.
+deterministic. To use more cores, run several Ferrule processes and split inputs between them
+(for example several file sources over disjoint globs, or several instances behind a load
+balancer).
+
+A `worker_threads` pool for CPU-heavy transforms is planned. The binary event encoding in
+`@ferrule/buffer` was designed so events can cross thread boundaries without structured cloning;
+what remains is an asynchronous variant of the transform contract so a transform can await its
+worker.
 
 ### 4.4 Disk buffer
 
@@ -168,9 +173,15 @@ A sink can have a disk buffer in front of it. The buffer is a **segmented write-
 - Records are length-prefixed and CRC-32C checksummed.
 - Segments roll over at a size limit. A segment is deleted once every record in it has been
   acknowledged by the sink.
-- On startup, the reader validates the tail segment, truncates any partially written record,
-  and resumes from the last acknowledged position.
+- On startup, recovery validates every segment, truncates a partially written tail record,
+  skips (and reports) corrupt records in sealed segments, and resumes from the last
+  acknowledged position.
 - Writers batch `fsync` calls, with a configurable `sync` policy (`always`, `interval`, `none`).
+- Once a write is durable, the buffer finishes the events' upstream finalizers, so the source
+  can acknowledge its client. Events read back carry fresh finalizers. `delivered` and
+  `rejected` release a record; `errored` keeps it, so it is redelivered after a restart.
+  Acknowledgement advances over the contiguous acknowledged prefix, which makes delivery
+  at-least-once.
 
 Crash safety is tested with a fault-injecting filesystem shim that tears writes at every byte
 offset.
@@ -207,7 +218,7 @@ source text → lexer → parser → AST → resolver → type checker → optim
 
 ## 6. Configuration
 
-Pipelines are declared in YAML (JSON and a TOML subset are also accepted):
+Pipelines are declared in YAML (JSON is also accepted):
 
 ```yaml
 sources:

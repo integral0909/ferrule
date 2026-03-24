@@ -1,89 +1,33 @@
 # Roadmap
 
-Ferrule is built in milestones. Each milestone ends with its packages documented, tested, and
-passing CI on all supported platforms. The rough sizes are planning estimates, not targets to
-pad toward.
+Ferrule was built in milestones, each ending with its packages documented, tested, and passing
+CI on Linux, macOS, and Windows. This page records what each milestone delivered and what comes
+next.
 
-| #   | Milestone                  | Packages                      | Est. production LOC | Est. test LOC |
-| --- | -------------------------- | ----------------------------- | ------------------- | ------------- |
-| M0  | Foundation & data model    | `core`                        | 3–4k                | 2–3k          |
-| M1  | Language front end         | `script` (lexer → checker)    | 10–12k              | 6–8k          |
-| M2  | Language back end & stdlib | `script` (compiler, ~150 fns) | 10–13k              | 7–9k          |
-| M3  | Codecs                     | `codecs`                      | 8–10k               | 5–6k          |
-| M4  | Runtime & disk buffer      | `runtime`, `buffer`           | 7–9k                | 5–6k          |
-| M5  | Operators                  | `operators`                   | 5–7k                | 3–4k          |
-| M6  | Sources & sinks            | `sources`, `sinks`            | 8–10k               | 4–5k          |
-| M7  | Config & control plane     | `config`, `admin`             | 4–5k                | 2–3k          |
-| M8  | CLI, testkit & LSP         | `cli`, `testkit`, `lsp`       | 5–7k                | 2–3k          |
+## Delivered
 
-Total: roughly 60–77k production and 36–47k test LOC, plus documentation.
+| #   | Milestone                  | Packages                | Highlights                                                                                                  |
+| --- | -------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------- |
+| M0  | Foundation & data model    | `core`, `schema`        | Integer/float-distinct values, nanosecond timestamps, lossless JSON, acknowledgements, typed option schemas |
+| M1  | Language front end         | `script`                | Error-recovering parser, type checker with fallibility and flow narrowing, diagnostics, formatter           |
+| M2  | Language back end & stdlib | `script`                | Closure compiler, optimizer, resource limits, inline tests, ~95 standard library functions                  |
+| M3  | Codecs                     | `codecs`                | Streaming framers, protobuf/OTLP, syslog, logfmt, CSV, Prometheus text, StatsD, pattern engine              |
+| M4  | Runtime & disk buffer      | `runtime`, `buffer`     | Bounded channels, hot reload, tap, sink toolkit, crash-safe segmented WAL with fault-injection tests        |
+| M5  | Operators                  | `operators`             | 15 transforms incl. script, route, aggregate, tail sampling, cardinality limiting                           |
+| M6  | Sources & sinks            | `sources`, `sinks`      | 10 sources, 15 sinks incl. hand-written Postgres, Kafka, SigV4, and Snappy implementations                  |
+| M7  | Config & control plane     | `config`, `admin`       | Position-aware YAML parser, secrets, code-frame diagnostics, admin API with live tap                        |
+| M8  | CLI, testkit & LSP         | `cli`, `testkit`, `lsp` | `ferrule` command, pipeline test runner with JUnit output, language server                                  |
 
-## M0 — Foundation & data model
+## Next
 
-- [x] Monorepo tooling, CI, security policy
-- [x] Value model (integer/float distinction, bytes, timestamps, ordered objects)
-- [x] Nanosecond timestamps with RFC 3339 parsing/formatting
-- [x] Duration and byte-size parsing
-- [x] Field paths: parse, format, get/set/delete
-- [x] Lossless, bounded JSON codec
-- [x] Log, metric, and span events
-- [x] Metric value arithmetic (merge incremental, absolute → incremental)
-- [x] End-to-end acknowledgements (batch notifiers, finalizers)
+Planned work, roughly in priority order:
 
-## M1 — Language front end
-
-- Lexer with raw strings, byte strings, timestamp and regex literals, and precise spans
-- Pratt parser with error recovery (multiple diagnostics per run)
-- Resolver: variables, scopes, field paths, function signatures
-- Type checker: kinds, unions, object shapes, fallibility tracking, flow narrowing
-- Diagnostics with codes, labels, notes, and fix suggestions; terminal renderer
-- Formatter (round-trip stable)
-
-## M2 — Language back end & standard library
-
-- Constant folding, dead-branch elimination, path access specialisation
-- Closure compiler with typed operation selection
-- Standard library: strings, numbers, timestamps, parsing (JSON, logfmt, key-value, regex,
-  syslog, CSV, URL, user agent), encoding, hashing, IP and CIDR, redaction, arrays/objects,
-  type coercion
-- Script test runner (inline `test` blocks)
-
-## M3 — Codecs
-
-- Protobuf wire format reader/writer; OTLP logs/metrics/traces mapping
-- Syslog RFC 3164 / 5424, logfmt, Prometheus text exposition, StatsD, CSV
-- Framing: newline, length-prefixed, octet-counting, chunked
-- Pattern library for common log formats
-
-## M4 — Runtime & disk buffer
-
-- Bounded channels (count and byte limits), fan-out with lazy cloning
-- Topology builder, lifecycle, graceful shutdown with drain deadlines
-- Retry with jittered backoff, circuit breakers, dead-letter routing
-- Segmented WAL disk buffer with crash recovery; fault-injection tests
-- Worker-thread transform pool
-
-## M5 — Operators
-
-- Route, filter, sample, dedup, throttle
-- Windowed aggregation (tumbling, sliding, session)
-- Metric cardinality limiter, log-to-metric
-- Tail-based trace sampling with policies and memory caps
-
-## M6 — Sources & sinks
-
-- Sources: HTTP, OTLP/HTTP, syslog TCP/UDP, file tail with checkpoints, StatsD, internal metrics
-- Sinks: HTTP/webhook, console, file, S3-compatible object storage, ClickHouse, Postgres,
-  Loki-compatible push, Kafka-protocol producer
-
-## M7 — Config & control plane
-
-- YAML subset parser, env and secret interpolation, schema validation with source positions
-- Topology diffing for hot reload
-- Admin API: health, topology, metrics, tap
-
-## M8 — CLI, testkit & LSP
-
-- `ferrule run | validate | test | tap | fmt | repl | bench`
-- `@ferrule/testkit` for component authors
-- Language server
+- **Worker-thread transforms.** An asynchronous transform contract and a `worker_threads` pool
+  for CPU-heavy scripts, reusing the binary event encoding from `@ferrule/buffer`.
+- **Script on metrics and spans.** The compiler currently runs on log events only; metrics and
+  spans pass through `script` unchanged.
+- **Kafka source** (consumer groups, offset commits driven by acknowledgements).
+- **Exponential histograms end to end.** Decoding is supported; encoding always produces
+  explicit-bucket histograms.
+- **More compression codecs** for Kafka and HTTP (lz4, zstd).
+- **Idempotent Kafka producer** to avoid duplicates on partial batch retries.

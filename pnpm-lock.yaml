@@ -41,6 +41,9 @@ importers:
 
   packages/admin:
     dependencies:
+      '@ferrule/codecs':
+        specifier: workspace:*
+        version: link:../codecs
       '@ferrule/core':
         specifier: workspace:*
         version: link:../core
@@ -166,6 +169,9 @@ importers:
 
   packages/sinks:
     dependencies:
+      '@ferrule/buffer':
+        specifier: workspace:*
+        version: link:../buffer
       '@ferrule/codecs':
         specifier: workspace:*
         version: link:../codecs
@@ -196,6 +202,9 @@ importers:
 
   packages/testkit:
     dependencies:
+      '@ferrule/config':
+        specifier: workspace:*
+        version: link:../config
       '@ferrule/core':
         specifier: workspace:*
         version: link:../core
@@ -205,6 +214,9 @@ importers:
       '@ferrule/schema':
         specifier: workspace:*
         version: link:../schema
+      '@ferrule/script':
+        specifier: workspace:*
+        version: link:../script
 
 packages:
 

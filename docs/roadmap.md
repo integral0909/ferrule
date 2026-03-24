@@ -1,8 +1,8 @@
 # Roadmap
 
 Ferrule was built in milestones, each ending with its packages documented, tested, and passing
-CI on Linux, macOS, and Windows. This page records what each milestone delivered and what comes
-next.
+the full local check (`pnpm run check`). This page records what each milestone delivered and
+what comes next.
 
 ## Delivered
 

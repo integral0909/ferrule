@@ -1,0 +1,32 @@
+# Receive OTLP traces, keep the interesting ones (errors, slow spans, and a small random sample
+# of everything else), and forward the survivors to another OTLP collector.
+#
+#   ferrule run -c examples/otlp_traces_tail_sampling.yaml --api
+
+sources:
+  otel_in:
+    type: otlp
+    address: 0.0.0.0:4318
+
+transforms:
+  sample_traces:
+    type: tail_sampling
+    inputs: [otel_in]
+    decision_wait: 10s
+    quiet_period: 3s
+    max_traces: 50000
+    policies:
+      - { type: status_error }
+      - { type: latency, threshold: 500ms, scope: any }
+      - { type: probabilistic, rate: 0.05 }
+
+sinks:
+  otel_out:
+    type: otlp
+    inputs: [sample_traces]
+    endpoint: http://otel-collector.internal:4318
+    signal: traces
+    protocol: protobuf
+    retry:
+      maxAttempts: 5
+      initialDelay: 200ms

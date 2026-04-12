@@ -1,0 +1,24 @@
+# Receive StatsD/DogStatsD metrics over UDP, roll them up into 10-second windows, and serve the
+# result as a Prometheus scrape endpoint.
+#
+#   ferrule run -c examples/statsd_to_prometheus.yaml
+#   curl http://localhost:9102/metrics
+
+sources:
+  statsd_in:
+    type: statsd
+    udp:
+      address: 0.0.0.0:8125
+
+transforms:
+  rollup:
+    type: aggregate
+    inputs: [statsd_in]
+    interval: 10s
+
+sinks:
+  prom_out:
+    type: prometheus_exporter
+    inputs: [rollup]
+    listenAddress: 0.0.0.0:9102
+    staleBound: 5m

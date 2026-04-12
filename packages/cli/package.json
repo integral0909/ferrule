@@ -1,0 +1,49 @@
+{
+  "name": "@ferrule/cli",
+  "version": "0.1.0",
+  "description": "The ferrule command-line interface.",
+  "license": "Apache-2.0",
+  "author": "Fredrik Ahman <fredrik.fullstackdev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/integral0909/ferrule.git",
+    "directory": "packages/cli"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "@ferrule/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "ferrule": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@ferrule/core": "workspace:*",
+    "@ferrule/schema": "workspace:*",
+    "@ferrule/script": "workspace:*",
+    "@ferrule/codecs": "workspace:*",
+    "@ferrule/buffer": "workspace:*",
+    "@ferrule/runtime": "workspace:*",
+    "@ferrule/operators": "workspace:*",
+    "@ferrule/sources": "workspace:*",
+    "@ferrule/sinks": "workspace:*",
+    "@ferrule/config": "workspace:*",
+    "@ferrule/admin": "workspace:*",
+    "@ferrule/testkit": "workspace:*",
+    "@ferrule/lsp": "workspace:*"
+  }
+}

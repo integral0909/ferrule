@@ -1,0 +1,49 @@
+# Tail an nginx access log, parse it into structured fields with a Ferrule Script transform, and
+# insert the result into ClickHouse. `data_dir` holds the file source's crash-safe read
+# checkpoints; override it at the command line with `--data-dir` if you don't want it next to
+# this file.
+#
+#   ferrule validate -c examples/nginx_to_clickhouse.yaml
+#   ferrule run -c examples/nginx_to_clickhouse.yaml --data-dir /var/lib/ferrule
+
+data_dir: ./data
+
+sources:
+  nginx_access:
+    type: file
+    include: ['/var/log/nginx/access.log']
+    decoding: text
+    readFrom: end
+
+transforms:
+  parse_nginx:
+    type: script
+    inputs: [nginx_access]
+    source: |
+      # Combined log format: IP - - [time] "METHOD path HTTP/x.y" status bytes "referer" "agent"
+      let parsed = parse_regex(
+        .message,
+        r'^(?<ip>\S+) \S+ \S+ \[[^\]]+\] "(?<method>\S+) (?<path>\S+)[^"]*" (?<status>\d+) (?<bytes>\d+)'
+      ) ?? abort
+
+      if parsed.path == "/healthz" { drop }
+
+      .http.method = parsed.method
+      .http.path   = parsed.path
+      .http.status = to_int(parsed.status) ?? 0
+      .http.bytes  = to_int(parsed.bytes) ?? 0
+      .client_ip   = parsed.ip
+      del(.message)
+
+sinks:
+  clickhouse_logs:
+    type: clickhouse
+    inputs: [parse_nginx]
+    url: http://clickhouse.internal:8123
+    database: telemetry
+    table: nginx_logs
+    batch:
+      maxEvents: 5000
+      timeout: 2s
+    retry:
+      maxAttempts: 5

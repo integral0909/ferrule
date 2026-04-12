@@ -1,0 +1,41 @@
+# Split one stream of logs into per-severity destinations with the `route` transform, and drop
+# noisy debug events first with `filter`. Demonstrates named output ports (`route.<name>`),
+# multi-sink fan-out, and Ferrule Script boolean conditions used declaratively rather than in a
+# full `script` transform.
+#
+#   ferrule run -c examples/route_by_severity.yaml
+
+sources:
+  demo:
+    type: demo_logs
+    format: json
+    eventsPerSecond: 10
+
+transforms:
+  drop_debug:
+    type: filter
+    inputs: [demo]
+    condition: '.level != "debug"'
+
+  by_severity:
+    type: route
+    inputs: [drop_debug]
+    routes:
+      - { name: errors, condition: '.level == "error"' }
+      - { name: warnings, condition: '.level == "warn"' }
+    route_unmatched: true
+    unmatched_port: ok
+
+sinks:
+  error_console:
+    type: console
+    inputs: [by_severity.errors]
+    stream: stderr
+
+  warning_console:
+    type: console
+    inputs: [by_severity.warnings]
+
+  everything_else:
+    type: blackhole
+    inputs: [by_severity.ok]

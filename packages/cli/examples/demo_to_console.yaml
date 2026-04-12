@@ -1,0 +1,17 @@
+# The simplest possible pipeline: synthetic demo logs straight to the console. No external
+# infrastructure required — good for a first "does ferrule even run" check.
+#
+#   ferrule run -c examples/demo_to_console.yaml
+
+sources:
+  demo:
+    type: demo_logs
+    format: apache_combined
+    eventsPerSecond: 5
+
+sinks:
+  console_out:
+    type: console
+    inputs: [demo]
+    encoding: json
+    framing: newline

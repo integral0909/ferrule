@@ -74,6 +74,9 @@ importers:
       '@ferrule/core':
         specifier: workspace:*
         version: link:../core
+      '@ferrule/lsp':
+        specifier: workspace:*
+        version: link:../lsp
       '@ferrule/operators':
         specifier: workspace:*
         version: link:../operators

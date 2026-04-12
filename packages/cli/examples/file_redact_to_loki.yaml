@@ -1,0 +1,43 @@
+# Tail JSON application logs, strip sensitive fields with a Ferrule Script transform, and push
+# the result to Loki through a crash-safe disk buffer (so a Loki outage or restart doesn't lose
+# events already accepted from the source).
+#
+#   ferrule run -c examples/file_redact_to_loki.yaml --data-dir /var/lib/ferrule
+
+data_dir: ./data
+
+sources:
+  app_logs:
+    type: file
+    include: ['/var/log/myapp/*.log']
+    decoding: json
+    readFrom: end
+
+transforms:
+  redact:
+    type: script
+    inputs: [app_logs]
+    source: |
+      del(.user.email)
+      del(.user.ssn)
+      del(.credit_card)
+
+      if is_string(.message) {
+        .message = replace(.message, r/\b\d{3}-\d{2}-\d{4}\b/, "[REDACTED-SSN]")
+      }
+
+sinks:
+  loki_out:
+    type: loki
+    inputs: [redact]
+    url: https://loki.internal:3100
+    labels:
+      service: '{service}'
+      env: production
+    buffer:
+      type: disk
+      max_size: 2GiB
+      when_full: block
+    retry:
+      maxAttempts: 10
+      maxDelay: 30s

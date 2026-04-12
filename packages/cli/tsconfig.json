@@ -1,0 +1,50 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src"],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../schema"
+    },
+    {
+      "path": "../script"
+    },
+    {
+      "path": "../codecs"
+    },
+    {
+      "path": "../buffer"
+    },
+    {
+      "path": "../runtime"
+    },
+    {
+      "path": "../operators"
+    },
+    {
+      "path": "../sources"
+    },
+    {
+      "path": "../sinks"
+    },
+    {
+      "path": "../config"
+    },
+    {
+      "path": "../admin"
+    },
+    {
+      "path": "../testkit"
+    },
+    {
+      "path": "../lsp"
+    }
+  ]
+}

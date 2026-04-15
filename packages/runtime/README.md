@@ -88,12 +88,20 @@ It then diffs the new topology against the current one by component ID, comparin
   inbox channel and — for a sink — its `EventBuffer`. The freshly built duplicate instance from
   the validation pass above is simply discarded.
 - **added**: the freshly built instance starts.
-- **removed**: the running instance's inbox is closed immediately (it drains whatever it already
-  had buffered) and it is given `settings.shutdownDeadlineMs` to finish before being force-
-  aborted, in the background — `reload()` does not block on this.
-- **changed**: treated as remove-old + add-new. The old instance's inbox is closed and it drains
-  in the background exactly like a removed component; the new instance starts immediately with a
-  fresh inbox.
+- **removed**: every producer's routing table is rebuilt first, so nothing routes to this
+  instance's inbox any more; then, in the background (`reload()` does not block on this), the
+  instance drains whatever it already had buffered — including any send that was already in
+  flight against it when the rewire happened, which is let through rather than rejected — and is
+  given `settings.shutdownDeadlineMs` to finish before being force-aborted.
+- **changed**: treated as remove-old + add-new. The old instance retires exactly like a removed
+  component; the new instance starts immediately with a fresh inbox.
+
+A retiring instance's inbox is only closed once every send already in flight against it has been
+admitted (or, failing that, once `settings.shutdownDeadlineMs` elapses, at which point it is
+force-drained and those events are finalized `errored` like any other deadline-exceeded drain).
+Closing it any earlier would reject a send still waiting for capacity with `ChannelClosedError`
+— which, since `send()` is called by the _upstream_ producer, would surface as a failure of a
+component that was never touched by the reload, not of the component actually being retired.
 
 Every producer's routing table is rebuilt from scratch after a reload, so an _unchanged_ producer
 correctly starts feeding a newly added consumer, or stops feeding a removed one, without needing

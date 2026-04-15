@@ -289,4 +289,69 @@ describe('Pipeline.reload', () => {
     ]);
     expect(newCollector.events.map((e) => (e as LogEvent).get('message'))).toEqual(['second']);
   });
+
+  it('does not fail the upstream source when a send is blocked on a retiring inbox', async () => {
+    // A ManualClock that is never advanced makes the deadline branch of drainAndStop
+    // unreachable: if the fix regresses to closing the retiring inbox eagerly, this test fails
+    // deterministically (not by timing out) because the source's second send is rejected with
+    // ChannelClosedError before the gate is ever released.
+    const clock = new ManualClock();
+    const { definition: src, handle } = createScriptedSourceDefinition([
+      { events: [LogEvent.fromMessage('first')] },
+      { events: [LogEvent.fromMessage('second')] },
+    ]);
+    const { definition: snk, received, release } = gatedTaggedSinkDefinition('gated_snk_race');
+    const registry = createRegistry(src, snk);
+    // A one-event inbox: the first send fills it (nothing drains it while the sink's gate is
+    // closed), so the second send blocks waiting for capacity.
+    const specA: TopologySpec = {
+      sources: { in: { type: src.type, options: {} } },
+      sinks: {
+        out: {
+          type: 'gated_snk_race',
+          options: { tag: 'a' },
+          inputs: ['in'],
+          buffer: { maxEvents: 1 },
+        },
+      },
+    };
+    const pipeline = await Pipeline.create(specA, { registry, clock });
+    await pipeline.start();
+
+    // Wait for the source to reach its second step: the first send has already been admitted
+    // (completions[0] was pushed and its send resolved) and the second send's completions entry
+    // has been pushed, which happens synchronously just before the second `ctx.output.send`
+    // call — so once this observes two completions, that call has already reached the channel
+    // and registered itself as a blocked pending send.
+    while (handle.completions.length < 2) await Promise.resolve();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    const specB: TopologySpec = {
+      sources: { in: { type: src.type, options: {} } },
+      sinks: {
+        out: {
+          type: 'gated_snk_race',
+          options: { tag: 'b' },
+          inputs: ['in'],
+          buffer: { maxEvents: 1 },
+        },
+      },
+    };
+    const result = await pipeline.reload(specB);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.changed).toEqual(['out']);
+
+    // The retiring sink is still running (just draining in the background); releasing its gate
+    // lets it consume the buffered event and, in turn, admits the still-blocked second send.
+    release();
+    const statuses = await Promise.all(handle.completions);
+    expect(statuses).toEqual(['delivered', 'delivered']);
+    expect(received.map((r) => r.message).sort()).toEqual(['first', 'second']);
+
+    const sourceHealth = pipeline.health().components.find((c) => c.id === 'in');
+    expect(sourceHealth?.state).not.toBe('failed');
+    expect(pipeline.health().overall).not.toBe('failed');
+
+    await pipeline.stop();
+  });
 });

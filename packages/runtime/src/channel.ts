@@ -66,6 +66,7 @@ export class EventChannel {
   private readonly pendingSends: PendingSend[] = [];
   private readonly pendingReceives: PendingReceive[] = [];
   private readonly spaceWaiters = new Set<() => void>();
+  private readonly sendsSettledWaiters = new Set<() => void>();
 
   constructor(
     readonly id: string,
@@ -134,6 +135,27 @@ export class EventChannel {
   }
 
   /**
+   * Resolves once no {@link send} call is currently waiting for capacity on this channel
+   * (immediately if none currently are). Hot reload uses this to let sends already in flight
+   * against a retiring inbox be admitted normally — the retiring component is still running and
+   * draining it — instead of closing the channel out from under them, which would reject an
+   * unrelated upstream producer's `send` with {@link ChannelClosedError}.
+   */
+  waitForSendsSettled(): Promise<void> {
+    if (this.pendingSends.length === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.sendsSettledWaiters.add(resolve);
+    });
+  }
+
+  private notifySendsSettled(): void {
+    if (this.pendingSends.length !== 0) return;
+    const waiters = [...this.sendsSettledWaiters];
+    this.sendsSettledWaiters.clear();
+    for (const waiter of waiters) waiter();
+  }
+
+  /**
    * Sends events, waiting for capacity if the channel is full (`whenFull: 'block'`, the default)
    * or dropping the whole batch if it does not fit (`whenFull: 'drop_newest'`). Resolves `true`
    * once the events are enqueued, or `false` if they were dropped instead (only possible in
@@ -182,6 +204,7 @@ export class EventChannel {
         const index = this.pendingSends.indexOf(entry);
         if (index !== -1) this.pendingSends.splice(index, 1);
         entry.fail(signal!.reason as unknown);
+        this.notifySendsSettled();
       };
       signal?.addEventListener('abort', onAbort, { once: true });
       this.pendingSends.push(entry);
@@ -216,6 +239,7 @@ export class EventChannel {
       next.admit();
     }
     this.notifySpaceWaiters();
+    this.notifySendsSettled();
   }
 
   private takeBatch(maxEvents: number, maxBytes: number): Event[] {
@@ -314,6 +338,7 @@ export class EventChannel {
       this.pendingReceives.length = 0;
     }
     this.notifySpaceWaiters();
+    this.notifySendsSettled();
   }
 
   /**

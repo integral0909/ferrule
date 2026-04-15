@@ -793,11 +793,29 @@ export class Pipeline {
     this.stopped = true;
   }
 
-  /** Retires a component replaced or removed by {@link reload}, outside the shutdown cascade. */
+  /**
+   * Retires a component replaced or removed by {@link reload}, outside the shutdown cascade.
+   * `rebuildRouting()` has already rewired every producer's routing table away from `rc` (to the
+   * replacement, for a changed component, or nowhere, for a removed one) by the time this runs,
+   * so no *new* send can target `rc.inbox`. A send that was already in flight against it,
+   * though, captured the channel before that rewire and may still be waiting for capacity; `rc`
+   * is still running and draining its inbox normally, so that send will be admitted in due
+   * course. Closing the inbox out from under it would instead reject it with
+   * {@link ChannelClosedError}, surfacing as a failure of the unrelated upstream producer — so
+   * wait for any such sends to settle before closing.
+   */
   private async drainAndStop(rc: RunningComponent, deadlineMs: number): Promise<void> {
     rc.consumers = [];
-    if (rc.kind === 'source') rc.abort.abort(new ShutdownError('retired by reload'));
-    else rc.inbox?.close();
+    if (rc.kind === 'source') {
+      rc.abort.abort(new ShutdownError('retired by reload'));
+    } else if (rc.inbox !== undefined) {
+      const timedOutWaiting = await timedOut(
+        rc.inbox.waitForSendsSettled(),
+        deadlineMs,
+        this.clock,
+      );
+      if (!timedOutWaiting) rc.inbox.close();
+    }
 
     const expired = await timedOut(rc.runPromise, deadlineMs, this.clock);
     if (expired) {

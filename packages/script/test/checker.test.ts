@@ -81,11 +81,11 @@ describe('checker: scoping and undefined variables', () => {
   });
 
   it('warns about an unused variable', () => {
-    expect(codesOf('let unused = 1')).toContain('E205');
+    expect(codesOf('let unused = 1')).toContain('W503');
   });
 
   it('does not warn about a variable prefixed with underscore', () => {
-    expect(codesOf('let _ignored = 1')).not.toContain('E205');
+    expect(codesOf('let _ignored = 1')).not.toContain('W503');
   });
 });
 
@@ -106,10 +106,10 @@ describe('checker: fallibility', () => {
     expect(errorsOf('let x, err = to_int(.code)')).toEqual([]);
   });
 
-  it('warns W502 for an unused error-capture binding, distinct from E205', () => {
+  it('warns W502 for an unused error-capture binding, distinct from W503', () => {
     const codes = codesOf('let x, err = to_int(.code)\nx');
     expect(codes).toContain('W502');
-    expect(codes).not.toContain('E205');
+    expect(codes).not.toContain('W503');
   });
 
   it('does not warn about an unused error binding named with an underscore', () => {
@@ -117,9 +117,9 @@ describe('checker: fallibility', () => {
     expect(codes).not.toContain('W502');
   });
 
-  it('still warns E205 for an unused error-capture *value* binding', () => {
+  it('still warns W503 for an unused error-capture *value* binding', () => {
     const codes = codesOf('let x, err = to_int(.code)\nerr');
-    expect(codes).toContain('E205');
+    expect(codes).toContain('W503');
     expect(codes).not.toContain('W502');
   });
 
@@ -138,7 +138,7 @@ describe('checker: fallibility', () => {
   });
 
   it('flags redundant `!` on an infallible expression', () => {
-    expect(codesOf('let x = "a"\nupcase(x)!')).toContain('E402');
+    expect(codesOf('let x = "a"\nupcase(x)!')).toContain('W505');
   });
 
   it('flags redundant `??` when the left side cannot be null or fail', () => {
@@ -382,16 +382,16 @@ describe('checker: match', () => {
 
 describe('checker: unreachable code', () => {
   it('flags code after drop', () => {
-    expect(codesOf('drop\nlet x = 1')).toContain('E206');
+    expect(codesOf('drop\nlet x = 1')).toContain('W504');
   });
 
   it('flags code after abort', () => {
-    expect(codesOf('abort "no"\nlet x = 1')).toContain('E206');
+    expect(codesOf('abort "no"\nlet x = 1')).toContain('W504');
   });
 
   it('only reports unreachable once for a run of statements', () => {
     const codes = codesOf('drop\nlet x = 1\nlet y = 2');
-    expect(codes.filter((c) => c === 'E206')).toHaveLength(1);
+    expect(codes.filter((c) => c === 'W504')).toHaveLength(1);
   });
 });
 

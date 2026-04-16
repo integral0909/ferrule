@@ -163,7 +163,7 @@ class Checker {
     let diverged = false;
     for (const stmt of statements) {
       if (diverged && !this.reportedUnreachable) {
-        this.warn('E206', 'unreachable code', stmt.span);
+        this.warn('W504', 'unreachable code', stmt.span);
         this.reportedUnreachable = true;
       }
       const stmtDiverges = this.checkStatement(stmt, scope);
@@ -570,7 +570,7 @@ class Checker {
   private checkAssert(expr: AssertExpr, scope: Scope): ExprType {
     const operand = this.checkExpr(expr.operand, scope);
     if (!operand.fallible) {
-      this.warn('E402', 'redundant `!`: this expression cannot fail', expr.span);
+      this.warn('W505', 'redundant `!`: this expression cannot fail', expr.span);
     }
     return handled(operand.type);
   }
@@ -1021,7 +1021,7 @@ class Checker {
           binding.span,
         );
       } else {
-        this.warn('E205', `unused variable '${binding.name}'`, binding.span);
+        this.warn('W503', `unused variable '${binding.name}'`, binding.span);
       }
     }
   }

@@ -15,7 +15,7 @@ const RELATIONAL_OPS = new Set(['<', '<=', '>', '>=']);
 interface OptCtx {
   readonly checkResult: CheckResult;
   readonly implementations: ImplementationRegistry;
-  /** Start offsets of `let`s the checker flagged unused (E205), for dead-`let` elimination. */
+  /** Start offsets of `let`s the checker flagged unused (W503), for dead-`let` elimination. */
   readonly unusedLetSpans: ReadonlySet<number>;
   /** Every surviving (non-folded) call, keyed by its *rewritten* node; see {@link OptimizedProgram}. */
   readonly calls: Map<CallExpr, ResolvedCall>;
@@ -44,7 +44,7 @@ export interface OptimizedProgram {
  *   applies to arithmetic/comparison/equality operators on two literal operands.
  * - **Dead-branch elimination**: `if` with a literal `bool` condition (including one that just
  *   folded to a literal) is replaced by whichever branch always runs.
- * - **Dead `let` elimination**: a non-`mut` `let` the checker's unused-variable warning (E205)
+ * - **Dead `let` elimination**: a non-`mut` `let` the checker's unused-variable warning (W503)
  *   already flagged is dropped *if* its value is trivially side-effect-free after folding (a
  *   literal, a path/metadata-path read, or a plain variable read) — never a call, which might
  *   have a resource-limit or `emit`/`log` side effect that must still run.
@@ -62,7 +62,7 @@ export function optimizeProgram(
 ): OptimizedProgram {
   const unusedLetSpans = new Set<number>();
   for (const d of checkResult.diagnostics) {
-    if (d.code === 'E205') unusedLetSpans.add(d.primary.span.start);
+    if (d.code === 'W503') unusedLetSpans.add(d.primary.span.start);
   }
   const calls = new Map<CallExpr, ResolvedCall>();
   const ctx: OptCtx = { checkResult, implementations, unusedLetSpans, calls };

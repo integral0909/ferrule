@@ -96,13 +96,23 @@ export function outcomeForError(error: unknown, fallbackSpan: Span): Outcome {
   if (error instanceof ScriptSignal) {
     if (error.signalKind === 'drop') return { kind: 'drop' };
     if (error.signalKind === 'limit') {
-      return { kind: 'abort', reason: `limit exceeded: ${error.reason}`, span: error.span };
+      return {
+        kind: 'abort',
+        reason: `limit exceeded: ${error.reason}`,
+        span: error.span,
+        cause: 'limit',
+      };
     }
-    return { kind: 'abort', reason: error.reason, span: error.span };
+    return { kind: 'abort', reason: error.reason, span: error.span, cause: 'abort' };
   }
   if (error instanceof ScriptBugError) {
-    return { kind: 'abort', reason: error.message, span: error.span };
+    return { kind: 'abort', reason: error.message, span: error.span, cause: 'internal' };
   }
   const message = error instanceof Error ? error.message : String(error);
-  return { kind: 'abort', reason: `internal error: ${message}`, span: fallbackSpan };
+  return {
+    kind: 'abort',
+    reason: `internal error: ${message}`,
+    span: fallbackSpan,
+    cause: 'internal',
+  };
 }

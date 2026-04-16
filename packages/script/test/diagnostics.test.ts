@@ -22,14 +22,37 @@ describe('diagnostic catalog', () => {
     expect(explainCode('E999')).toBeUndefined();
   });
 
+  it('gives every warning a W-prefixed code', () => {
+    for (const e of DIAGNOSTIC_CATALOG) {
+      if (e.severity === 'warning') expect(e.code).toMatch(/^W/);
+      else expect(e.code).toMatch(/^E/);
+    }
+  });
+
   it('looks up the default severity for a code that omits it', () => {
-    const d = makeDiagnostic({ code: 'E205', message: 'unused', span: { start: 0, end: 1 } });
+    const d = makeDiagnostic({ code: 'W503', message: 'unused', span: { start: 0, end: 1 } });
     expect(d.severity).toBe('warning');
   });
 
   it('defaults to error severity for a code not in the catalog', () => {
     const d = makeDiagnostic({ code: 'E999', message: 'x', span: { start: 0, end: 1 } });
     expect(d.severity).toBe('error');
+  });
+
+  it('still resolves a renamed E-code to its replacement, with a note about the rename', () => {
+    const renamed = explainCode('E205');
+    const current = explainCode('W503');
+    expect(renamed).toBeDefined();
+    expect(renamed?.code).toBe('W503');
+    expect(renamed?.severity).toBe('warning');
+    expect(renamed?.summary).toBe(current?.summary);
+    expect(renamed?.explanation).toContain('E205');
+    expect(renamed?.explanation).toContain('W503');
+    // The live catalog entry itself is unaffected by looking it up under its old code.
+    expect(current?.explanation).not.toContain('renamed');
+
+    expect(explainCode('E206')?.code).toBe('W504');
+    expect(explainCode('E402')?.code).toBe('W505');
   });
 });
 

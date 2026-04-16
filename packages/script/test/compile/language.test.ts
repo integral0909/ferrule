@@ -39,6 +39,7 @@ describe('fallibility handling', () => {
   it('! aborts the event on failure, with the failure message as the reason', () => {
     const outcome = runOnce('.n = to_int(.n)!', { n: 'nope' });
     expect(outcome.kind).toBe('abort');
+    if (outcome.kind === 'abort') expect(outcome.cause).toBe('abort');
   });
 
   it('! passes through a successful value', () => {

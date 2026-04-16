@@ -18,7 +18,7 @@ function outcomesEqual(a: Outcome, b: Outcome): boolean {
     if (a.events.length !== b.events.length) return false;
     return a.events.every((e, i) => fieldsEqual(e.fields, b.events[i]!.fields));
   }
-  if (a.kind === 'abort' && b.kind === 'abort') return a.reason === b.reason;
+  if (a.kind === 'abort' && b.kind === 'abort') return a.reason === b.reason && a.cause === b.cause;
   return true; // both 'drop'
 }
 

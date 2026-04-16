@@ -8,7 +8,7 @@ export interface Binding {
   readonly span: Span;
   /** Mutated by the checker when a read of this binding is seen, for the unused-variable warning. */
   used: boolean;
-  /** True for the `err` half of `let v, err = expr`, so an unused one reports W502, not E205. */
+  /** True for the `err` half of `let v, err = expr`, so an unused one reports W502, not W503. */
   readonly isErrorCapture?: boolean;
 }
 

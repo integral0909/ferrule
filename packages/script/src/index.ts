@@ -258,7 +258,7 @@ export {
   resolveLimits,
   type ResourceLimits,
 } from './runtime/limits.js';
-export type { Outcome } from './runtime/outcome.js';
+export type { AbortCause, Outcome } from './runtime/outcome.js';
 export {
   createRunCtx,
   RateLimiter,

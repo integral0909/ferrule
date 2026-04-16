@@ -18,7 +18,10 @@ describe('resource limits', () => {
       limits: { maxStringLength: 100 },
     });
     expect(outcome.kind).toBe('abort');
-    if (outcome.kind === 'abort') expect(outcome.reason).toContain('limit exceeded');
+    if (outcome.kind === 'abort') {
+      expect(outcome.reason).toContain('limit exceeded');
+      expect(outcome.cause).toBe('limit');
+    }
   });
 
   it('aborts with a distinct reason when string interpolation exceeds the limit', () => {
@@ -27,7 +30,10 @@ describe('resource limits', () => {
       limits: { maxStringLength: 100 },
     });
     expect(outcome.kind).toBe('abort');
-    if (outcome.kind === 'abort') expect(outcome.reason).toContain('limit exceeded');
+    if (outcome.kind === 'abort') {
+      expect(outcome.reason).toContain('limit exceeded');
+      expect(outcome.cause).toBe('limit');
+    }
   });
 
   it('does not abort when comfortably under the string length limit', () => {
@@ -42,14 +48,20 @@ describe('resource limits', () => {
     const program = compileSource('.r = [1, 2, 3, 4, 5]');
     const outcome = program.run(LogEvent.from({}), { limits: { maxCollectionSize: 3 } });
     expect(outcome.kind).toBe('abort');
-    if (outcome.kind === 'abort') expect(outcome.reason).toContain('limit exceeded');
+    if (outcome.kind === 'abort') {
+      expect(outcome.reason).toContain('limit exceeded');
+      expect(outcome.cause).toBe('limit');
+    }
   });
 
   it('aborts with a distinct reason when emit() exceeds the max emitted events limit', () => {
     const program = compileSource('emit({ "n": 1 })\nemit({ "n": 2 })\nemit({ "n": 3 })');
     const outcome = program.run(LogEvent.from({}), { limits: { maxEmittedEvents: 2 } });
     expect(outcome.kind).toBe('abort');
-    if (outcome.kind === 'abort') expect(outcome.reason).toContain('limit exceeded');
+    if (outcome.kind === 'abort') {
+      expect(outcome.reason).toContain('limit exceeded');
+      expect(outcome.cause).toBe('limit');
+    }
   });
 
   it('allows emit() up to the limit', () => {

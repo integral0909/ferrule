@@ -43,13 +43,17 @@ describe('compiler smoke test', () => {
     const program = compileSource('if .level == "fatal" { abort "fatal event" }');
     const outcome = program.run(LogEvent.from({ level: 'fatal' }));
     expect(outcome.kind).toBe('abort');
-    if (outcome.kind === 'abort') expect(outcome.reason).toBe('fatal event');
+    if (outcome.kind === 'abort') {
+      expect(outcome.reason).toBe('fatal event');
+      expect(outcome.cause).toBe('abort');
+    }
   });
 
   it('aborts on an unhandled assert failure', () => {
     const program = compileSource('.n = to_int(.n)!');
     const outcome = program.run(LogEvent.from({ n: 'not a number' }));
     expect(outcome.kind).toBe('abort');
+    if (outcome.kind === 'abort') expect(outcome.cause).toBe('abort');
   });
 
   it('computes int arithmetic with 64-bit wrapping', () => {

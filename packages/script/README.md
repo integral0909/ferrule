@@ -211,9 +211,14 @@ single `ScriptSignal` exception (`runtime/signal.ts`, discriminated by `signalKi
 one of these and only when it is ending anyway, the cost of a JavaScript exception here is
 irrelevant. Any _other_ exception escaping a standard library implementation (a genuine bug) is
 also caught at that same boundary and turned into `{ kind: 'abort', reason: 'internal error: ...',
-span }` using `ctx.currentSpan` (updated at each statement and call boundary) — a runtime error
-never escapes `run` as a raw exception, matching design.md §1 ("a program can never crash the
-pipeline").
+span, cause: 'internal' }` using `ctx.currentSpan` (updated at each statement and call boundary) —
+a runtime error never escapes `run` as a raw exception, matching design.md §1 ("a program can
+never crash the pipeline"). `outcomeForError` (`compile/program.ts`) is what maps `signalKind` (or
+a `ScriptBugError`/other exception) to an abort `Outcome`'s `cause: 'abort' | 'limit' | 'internal'`
+— a structured field callers should match on instead of inspecting `reason`'s text, which is for
+humans and may change (it does, incidentally, still carry the historical `limit exceeded: `/
+`internal error: ` prefixes for the `limit`/`internal` causes, but that's message content, not a
+contract).
 
 **`any`-typed operators that turn out to mismatch abort, they don't fail.** `+ - * == != < <= >
 
@@ -260,7 +265,7 @@ compilation:
 - **Dead-branch elimination.** An `if` whose condition is a literal `bool` (including one that
   itself just folded to a literal) is replaced by whichever branch always runs.
 - **Dead `let` elimination.** A non-`mut` `let` the checker already flagged as unused (diagnostic
-  `E205`) is dropped, but _only_ if its value is trivially side-effect-free after folding — a
+  `W503`) is dropped, but _only_ if its value is trivially side-effect-free after folding — a
   literal, a path/metadata-path read, or a plain variable read, never a call (which might have a
   resource-limit, `emit`, or `log` side effect that must still run even though its result is
   unused).

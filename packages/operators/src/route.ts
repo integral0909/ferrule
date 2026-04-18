@@ -9,7 +9,7 @@ import {
   type TransformOutput,
 } from '@ferrule/runtime';
 import type { CompiledProgram, Type } from '@ferrule/script';
-import { compileScriptSource, wrapBooleanCondition } from './util/scriptCompile.js';
+import { compileConditionSource } from './util/scriptCompile.js';
 import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
 
 /**
@@ -116,8 +116,9 @@ export const routeTransform = defineTransform<RouteOptions>({
     const routePrograms: readonly { name: string; program: CompiledProgram }[] = options.routes.map(
       (route) => ({
         name: route.name,
-        program: compileScriptSource(
-          wrapBooleanCondition(route.condition, options.on_error === 'keep'),
+        program: compileConditionSource(
+          route.condition,
+          options.on_error === 'keep',
           `<route ${JSON.stringify(route.name)}>`,
           compileOpts,
         ),

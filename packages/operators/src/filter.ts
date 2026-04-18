@@ -9,7 +9,7 @@ import {
   type TransformOutput,
 } from '@ferrule/runtime';
 import type { Type } from '@ferrule/script';
-import { compileScriptSource, wrapBooleanCondition } from './util/scriptCompile.js';
+import { compileConditionSource } from './util/scriptCompile.js';
 import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
 
 /**
@@ -43,10 +43,10 @@ import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
  * permanent-failure semantics `remap_fields`'s `on_error: drop` uses) and counts it under
  * `component_discarded_events_total` (`reason: condition_aborted`).
  *
- * Known limitation: because `condition` is compiled inside a synthetic wrapper source, a compile
- * error's reported position is an offset into `if !((<condition>) ?? <fallback>) { drop }`, not
- * into the `condition` string alone — the rendered code frame still shows the right source text
- * and column, just with the wrapper visible around it.
+ * `condition` is compiled inside a synthetic wrapper source (`if !((<condition>) ?? <fallback>)
+ * { drop }`), but a compile error's code frame is rendered against `condition` itself — see
+ * `compileConditionSource` in `./util/scriptCompile.js` — so the caret lands on the right token
+ * in the user's own expression, not somewhere inside the wrapper around it.
  */
 
 export const filterOptions = s.object({
@@ -74,11 +74,15 @@ export const filterTransform = defineTransform<FilterOptions>({
   accepts: ['log'],
   examples: [{ title: 'Keep only 2xx/3xx responses', config: { condition: '.status < 400' } }],
   build: (options) => {
-    const source = wrapBooleanCondition(options.condition, options.on_error === 'keep');
     const inputSchema = inputSchemaType(options.input_schema);
     const compileOpts: { inputSchema?: Type } = {};
     if (inputSchema !== undefined) compileOpts.inputSchema = inputSchema;
-    const program = compileScriptSource(source, '<filter condition>', compileOpts);
+    const program = compileConditionSource(
+      options.condition,
+      options.on_error === 'keep',
+      '<filter condition>',
+      compileOpts,
+    );
 
     let ctx!: TransformContext;
     let keptCounter!: Counter;

@@ -150,4 +150,24 @@ describe('route', () => {
       buildTransform(routeTransform, { routes: [{ name: 'bad', condition: '.a ==' }] }),
     ).rejects.toBeInstanceOf(FerruleError);
   });
+
+  it('renders a compile error against the route condition text, not the synthetic wrapper', async () => {
+    const condition = '.status == "bad"';
+    let message: string | undefined;
+    try {
+      await buildTransform(routeTransform, {
+        routes: [{ name: 'bad', condition }],
+        input_schema: { status: 'int' },
+      });
+    } catch (err) {
+      expect(err).toBeInstanceOf(FerruleError);
+      message = (err as FerruleError).message;
+    }
+    expect(message).toBeDefined();
+    expect(message).toContain(`| ${condition}\n`);
+    expect(message).not.toContain('if !((');
+    expect(message).not.toContain('{ drop }');
+    expect(message).toContain('"bad">:1:1');
+    expect(message).toContain(`| ${'^'.repeat(condition.length)} `);
+  });
 });

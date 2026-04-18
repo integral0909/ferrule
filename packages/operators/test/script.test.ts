@@ -126,6 +126,22 @@ describe('script', () => {
     await expect(batch.completion).resolves.toBe('rejected');
   });
 
+  it('drop_on_abort alone does not suppress a resource-limit abort', async () => {
+    // The two flags key off Outcome.cause (a structured field in @ferrule/script), not off
+    // matching text in the reason string: drop_on_abort must not accidentally catch a `limit`
+    // cause, only an `abort` one.
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      source: 'let s = "xx"\nlet r = repeat(s, 100) ?? ""\n.out = r',
+      limits: { max_string_length: 2 },
+      drop_on_abort: true,
+    });
+    transform.process([logEvent({})], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.port).toBe('errors');
+    const out = harness.pushed[0]!.event as LogEvent;
+    expect(out.get('ferrule.error.reason')).toContain('limit exceeded');
+  });
+
   it('emit(): extra events get cloned finalizers so the batch only acks once all finish', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
       source: 'emit({ "extra": true })',

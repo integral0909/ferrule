@@ -75,6 +75,7 @@ export {
 export { coerceValue, toNumber, type CoerceTarget, type TimestampFormat } from './util/coerce.js';
 export { getEventField } from './util/fields.js';
 export {
+  compileConditionSource,
   compileScriptSource,
   wrapBooleanCondition,
   E_SCRIPT_COMPILE,

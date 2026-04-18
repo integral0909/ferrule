@@ -63,6 +63,29 @@ describe('filter', () => {
     );
   });
 
+  it('renders a compile error against the condition text, not the synthetic wrapper', async () => {
+    // `condition` is compiled inside `if !((<condition>) ?? <fallback>) { drop }`; the rendered
+    // code frame must show the user's own condition (with the caret under the right token in
+    // it), not an offset into that wrapper program.
+    const condition = '.status == "bad"';
+    let message: string | undefined;
+    try {
+      await buildTransform(filterTransform, { condition, input_schema: { status: 'int' } });
+    } catch (err) {
+      expect(err).toBeInstanceOf(FerruleError);
+      message = (err as FerruleError).message;
+    }
+    expect(message).toBeDefined();
+    // The source line shown is exactly the condition, not `if !((.status == "bad") ?? ...`.
+    expect(message).toContain(`| ${condition}\n`);
+    expect(message).not.toContain('if !((');
+    expect(message).not.toContain('{ drop }');
+    // Position and caret are relative to the condition text alone: it starts at column 1 and the
+    // caret underlines the whole (1-indexed length 17) comparison expression.
+    expect(message).toContain('<filter condition>:1:1');
+    expect(message).toContain(`| ${'^'.repeat(condition.length)} `);
+  });
+
   it('input_schema types the condition', async () => {
     // `.status` typed as `string`: comparing to an int literal is a checker error (E301).
     await expect(

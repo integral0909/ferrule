@@ -12,7 +12,7 @@ import {
   type TransformContext,
   type TransformOutput,
 } from '@ferrule/runtime';
-import type { ResourceLimits, Type } from '@ferrule/script';
+import type { AbortCause, ResourceLimits, Type } from '@ferrule/script';
 import { compileScriptSource } from './util/scriptCompile.js';
 import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
 
@@ -39,9 +39,10 @@ import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
  * - `drop` — the event is discarded. By default this finishes its finalizers `delivered` (an
  *   intentional drop, per the package README's shared finalizer contract); set `reroute_dropped`
  *   to route it to the `dropped` port instead.
- * - `abort` — the event failed. The reason's prefix tells apart a deliberate `abort`/mismatch
- *   (routed by `drop_on_abort`) from a resource-limit or genuine bug (`limit exceeded: `/
- *   `internal error: `, routed by `drop_on_error`) — see the script package's `outcomeForError`.
+ * - `abort` — the event failed. `Outcome.cause` (a structured field, not a string match on
+ *   `reason` — see `@ferrule/script`'s `AbortCause`) tells apart a deliberate `abort`/mismatch
+ *   (`cause: 'abort'`, routed by `drop_on_abort`) from a resource-limit or genuine bug
+ *   (`cause: 'limit'`/`'internal'`, routed by `drop_on_error`).
  *   Unless the applicable flag is `true` (in which case the event is finished `rejected` and
  *   counted under `component_discarded_events_total`), the event is routed to the `errors` port
  *   with the failure recorded under the event's own `ferrule.error` field:
@@ -98,8 +99,8 @@ export const scriptOptions = s
       .boolean()
       .default(false)
       .describe(
-        'when a resource-limit or internal-error abort happens (reason prefixed `limit ' +
-          'exceeded: `/`internal error: `): finish the event `rejected` and count it (true), or ' +
+        'when a resource-limit or internal-error abort happens (Outcome.cause `limit`/`internal`, ' +
+          'see @ferrule/script): finish the event `rejected` and count it (true), or ' +
           'route it to the `errors` port (false, the default)',
       ),
     reroute_dropped: s
@@ -145,10 +146,9 @@ function resolveLimitOverrides(options: ScriptOptions['limits']): Partial<Resour
   return overrides;
 }
 
-const ABORT_REASON_ERROR_PREFIXES = ['limit exceeded: ', 'internal error: '] as const;
-
-function isInternalAbort(reason: string): boolean {
-  return ABORT_REASON_ERROR_PREFIXES.some((prefix) => reason.startsWith(prefix));
+/** `cause: 'limit'`/`'internal'` are routed by `drop_on_error`; `cause: 'abort'` by `drop_on_abort`. */
+function isInternalAbort(cause: AbortCause): boolean {
+  return cause === 'limit' || cause === 'internal';
 }
 
 function attachAbortMetadata(
@@ -254,7 +254,7 @@ export const scriptTransform = defineTransform<ScriptOptions>({
             }
             case 'abort': {
               abortCounter.increment();
-              const internal = isInternalAbort(outcome.reason);
+              const internal = isInternalAbort(outcome.cause);
               const shouldDrop = internal ? options.drop_on_error : options.drop_on_abort;
               if (shouldDrop) {
                 (internal ? discardedErrorCounter : discardedAbortCounter).increment();

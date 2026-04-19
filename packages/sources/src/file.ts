@@ -26,12 +26,28 @@
  *   from the last point we know was safely delivered, at the cost of possibly re-reading (and
  *   re-sending) a little data that was in flight but unacknowledged when the process stopped —
  *   which is exactly the "at-least-once" contract the rest of the pipeline expects from sources.
+ * - **Per-file outstanding chunks are tracked as an ordered queue of ranges, not one scalar.**
+ *   Each poll's newly-read, newly-decoded chunk is sent immediately and queued as a `'pending'`
+ *   range rather than awaited inline, so one file's slow or stuck acknowledgement can't hold up
+ *   another file's tail, and several of one file's own chunks can be in flight at once. The
+ *   *persisted* checkpoint only ever advances over the **contiguous prefix** of that queue that
+ *   has resolved to something other than `'errored'` (`tryAdvanceCheckpoint`): a chunk that
+ *   resolves `'errored'` is left in place at the head of the queue rather than skipped, so a
+ *   later chunk resolving `'delivered'` — however much later — can never let the watermark jump
+ *   past it. This is what closes the gap the single-watermark design used to have: previously an
+ *   errored chunk followed, within the same run, by a delivered later chunk let the checkpoint
+ *   advance past the errored region, silently losing it on the next restart. Concretely: an
+ *   `'errored'` range permanently blocks that file's checkpoint from advancing any further for
+ *   the rest of this run (matching the existing "an errored chunk is not retried mid-run, only on
+ *   restart" contract) — the range queue for that file then only grows, up to `maxOutstandingChunks`
+ *   ranges, at which point the reader stops reading further bytes from that file (backpressure)
+ *   rather than growing the queue (and memory) without bound.
  */
 import { type FSWatcher, watch as fsWatch } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { BatchNotifier, FerruleError, LogEvent } from '@ferrule/core';
+import { BatchNotifier, FerruleError, LogEvent, type DeliveryStatus } from '@ferrule/core';
 import { decodeFrames, defaultCodecs, type CodecRegistry, type Decoder } from '@ferrule/codecs';
 import {
   defineSource,
@@ -97,6 +113,15 @@ const options = s.object({
     .byteSize()
     .default(1024 * 1024)
     .describe('Maximum bytes read from one file per poll, so many active files stay responsive.'),
+  maxOutstandingChunks: s
+    .integer({ min: 1 })
+    .default(64)
+    .describe(
+      'Maximum not-yet-acknowledged chunks kept in memory per file before pausing that file’s ' +
+        'reads (backpressure) until one resolves. Bounds memory if delivery stalls, and — since ' +
+        'an errored chunk permanently blocks that file’s checkpoint from advancing again this ' +
+        'run — bounds how much gets queued up (and re-read on restart) behind one.',
+    ),
   ignoreOlderThanMs: s
     .duration()
     .optional()
@@ -153,6 +178,19 @@ interface MultilinePending {
   lastLineAtMonoMs: number;
 }
 
+/**
+ * One decoded chunk's checkpoint-eligible endpoint and its delivery outcome, queued in file
+ * order. The persisted checkpoint only advances over the *contiguous prefix* of a file's queue
+ * that has resolved to something other than `'errored'` — see `tryAdvanceCheckpoint`. A range
+ * that resolves `'errored'` is never removed: once one exists, it permanently blocks its file's
+ * checkpoint from advancing past it for the rest of this run (a restart re-reads from before it).
+ */
+interface OutstandingRange {
+  /** File offset immediately after this chunk (`FrameOut.throughOffset` of its last unit). */
+  readonly endOffset: number;
+  status: DeliveryStatus | 'pending';
+}
+
 interface TrackedFile {
   path: string;
   device: number;
@@ -160,8 +198,8 @@ interface TrackedFile {
   handle: Awaited<ReturnType<typeof open>>;
   /** Bytes already read off disk (may include an incomplete trailing line kept in `lineRemainder`). */
   diskReadOffset: number;
-  /** Bytes of the file that correspond to fully-decoded events, safe to checkpoint once acknowledged. */
-  flushedOffset: number;
+  /** Chunks sent downstream since the last persisted checkpoint, oldest first; see {@link OutstandingRange}. */
+  outstandingRanges: OutstandingRange[];
   /** The offset actually persisted to the checkpoint file (delivered/rejected, never past `errored`). */
   checkpointedOffset: number;
   lineRemainder: Uint8Array;
@@ -444,7 +482,7 @@ export const fileSource = defineSource<FileSourceOptions>({
             inode: st.ino,
             handle,
             diskReadOffset: startOffset,
-            flushedOffset: startOffset,
+            outstandingRanges: [],
             checkpointedOffset: startOffset,
             lineRemainder: new Uint8Array(0),
             multilinePending: undefined,
@@ -564,7 +602,7 @@ export const fileSource = defineSource<FileSourceOptions>({
             size: st.size,
           });
           entry.diskReadOffset = 0;
-          entry.flushedOffset = 0;
+          entry.outstandingRanges = [];
           entry.checkpointedOffset = 0;
           entry.lineRemainder = new Uint8Array(0);
           entry.multilinePending = undefined;
@@ -583,6 +621,10 @@ export const fileSource = defineSource<FileSourceOptions>({
             updatedAtMs: Date.now(),
           };
           checkpointsDirty = true;
+        }
+
+        if (entry.outstandingRanges.length >= opts.maxOutstandingChunks) {
+          return; // backpressure: too many not-yet-resolved chunks; wait for one to resolve
         }
 
         const toRead = Math.min(opts.maxReadBytesPerTick, st.size - entry.diskReadOffset);
@@ -627,8 +669,7 @@ export const fileSource = defineSource<FileSourceOptions>({
 
         const lastUnitOffset = units[units.length - 1]!.throughOffset;
         if (events.length === 0) {
-          entry.flushedOffset = lastUnitOffset;
-          advanceCheckpointIfSafe(entry, key);
+          queueRange(entry, key, lastUnitOffset, 'delivered');
           return;
         }
 
@@ -638,35 +679,76 @@ export const fileSource = defineSource<FileSourceOptions>({
         await ctx.output.send(events, DEFAULT_PORT);
 
         if (!ctx.acknowledgements) {
-          entry.flushedOffset = lastUnitOffset;
-          advanceCheckpointIfSafe(entry, key);
+          queueRange(entry, key, lastUnitOffset, 'delivered');
           return;
         }
-        const status = await batch.completion;
-        if (status === 'errored') {
-          ctx.logger.warn('file: delivery errored; checkpoint will not advance past this chunk', {
-            path: entry.path,
-          });
-          return; // do not advance; a restart (or the file simply staying open) will not re-offer
-          // these exact bytes mid-run, but the checkpoint staying behind means a restart re-reads
-          // them, which is the documented at-least-once behavior for a transient failure.
-        }
-        entry.flushedOffset = lastUnitOffset;
-        advanceCheckpointIfSafe(entry, key);
+
+        // Queued as 'pending' and resolved later, not awaited inline: this lets more of this
+        // file (or another file entirely) keep being read and sent while this chunk's
+        // acknowledgement is still outstanding, instead of one slow delivery stalling every
+        // other tracked file. tryAdvanceCheckpoint only ever drains a *contiguous* prefix of
+        // resolved ranges, so a later chunk resolving first can't let the watermark skip past
+        // this one until this one resolves too.
+        const range: OutstandingRange = { endOffset: lastUnitOffset, status: 'pending' };
+        entry.outstandingRanges.push(range);
+        void batch.completion.then((status) => {
+          range.status = status;
+          if (status === 'errored') {
+            ctx.logger.warn('file: delivery errored; checkpoint will not advance past this chunk', {
+              path: entry.path,
+            });
+            // Left in the queue rather than removed: a restart re-reads from the checkpoint,
+            // which this now permanently blocks from advancing past this range for the rest of
+            // this run — the documented at-least-once behavior for a transient failure. A
+            // later chunk resolving 'delivered' must not be allowed to skip past it.
+          }
+          tryAdvanceCheckpoint(entry, key);
+        });
       }
 
-      function advanceCheckpointIfSafe(entry: TrackedFile, key: string): void {
-        if (entry.flushedOffset <= entry.checkpointedOffset) return;
-        entry.checkpointedOffset = entry.flushedOffset;
+      /** Queues an already-resolved range (no acknowledgement to wait for) and tries to advance. */
+      function queueRange(
+        entry: TrackedFile,
+        key: string,
+        endOffset: number,
+        status: DeliveryStatus,
+      ): void {
+        entry.outstandingRanges.push({ endOffset, status });
+        tryAdvanceCheckpoint(entry, key);
+      }
+
+      /**
+       * Drains and persists the contiguous prefix of `entry.outstandingRanges` that has resolved
+       * to something other than `'errored'`: `'pending'` or `'errored'` at the head stops the
+       * drain, so the persisted checkpoint can never advance past a chunk that hasn't resolved
+       * yet, or one that resolved badly, no matter what resolves after it.
+       */
+      function tryAdvanceCheckpoint(entry: TrackedFile, key: string): void {
+        let advanced = false;
+        while (entry.outstandingRanges.length > 0) {
+          const head = entry.outstandingRanges[0]!;
+          if (head.status === 'pending' || head.status === 'errored') break;
+          entry.outstandingRanges.shift();
+          entry.checkpointedOffset = head.endOffset;
+          advanced = true;
+        }
+        if (!advanced) return;
         const existing = checkpoints[key];
         if (existing === undefined) return;
-        checkpoints[key] = { ...existing, offset: entry.flushedOffset, updatedAtMs: Date.now() };
+        checkpoints[key] = {
+          ...existing,
+          offset: entry.checkpointedOffset,
+          updatedAtMs: Date.now(),
+        };
         checkpointsDirty = true;
       }
 
       async function forgetGoneFiles(): Promise<void> {
         for (const [key, entry] of [...tracked]) {
-          if (entry.diskReadOffset < entry.flushedOffset) continue; // still has unflushed data? shouldn't happen, guard anyway
+          // A pending range's completion still resolves fine after the file is forgotten (its
+          // callback closes over `entry`/`key` directly, not a `tracked` lookup), but hold off
+          // anyway so a file with an acknowledgement genuinely in flight isn't torn down under it.
+          if (entry.outstandingRanges.some((r) => r.status === 'pending')) continue;
           try {
             await stat(entry.path);
           } catch {

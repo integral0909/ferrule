@@ -228,6 +228,7 @@ always authoritative, so behavior is identical on every OS and filesystem.
 | `maxOpenFiles`                  | integer            | `64`        | Max files tailed at once; extra discoveries are deferred to a later poll.    |
 | `maxLineLength`                 | byte size          | `1MiB`      | Longer lines are truncated (and counted) at this length.                     |
 | `maxReadBytesPerTick`           | byte size          | `1MiB`      | Max bytes read from one file per poll, so many active files stay responsive. |
+| `maxOutstandingChunks`          | integer            | `64`        | Max not-yet-acknowledged chunks queued per file before pausing its reads.    |
 | `ignoreOlderThanMs`             | duration, optional | —           | Ignore files whose mtime is older than this.                                 |
 | `fingerprintBytes`              | byte size          | `256`       | Bytes hashed at the start of a file to validate a resumed checkpoint.        |
 | `decoding`                      | codec name         | `text`      | Codec used to decode each line.                                              |
@@ -261,10 +262,17 @@ re-validated before trusting the stored offset, guarding against the rare case o
 inode for unrelated content.
 
 **The checkpoint offset only ever advances past fully-decoded, and — when `ctx.acknowledgements` is
-on — acknowledged, data**, and it's a single monotonic watermark per file: an `'errored'`
-acknowledgement never advances it (so a restart re-reads that data), a `'delivered'` or
-`'rejected'` one does (retrying permanently-bad data would just loop forever). Checkpoints are
-written atomically (temp file + rename) so a crash mid-write never corrupts the checkpoint file.
+on — acknowledged, data.** Each poll's chunk is sent immediately and queued (not awaited inline),
+so several of a file's own chunks — and other files entirely — can be in flight at once, up to
+`maxOutstandingChunks` per file (beyond that, reading that file pauses until one resolves). The
+persisted checkpoint advances only over the _contiguous prefix_ of a file's queued chunks that has
+resolved to something other than `'errored'`: a `'delivered'` or `'rejected'` chunk (retrying
+permanently-bad data would just loop forever) advances past it once everything queued before it
+has too, but an `'errored'` chunk is left in place and blocks every chunk queued behind it — so a
+_later_ chunk delivering successfully in the same run can never let the watermark skip past an
+earlier chunk that errored; only a restart, which re-reads from before it, retries that data.
+Checkpoints are written atomically (temp file + rename) so a crash mid-write never corrupts the
+checkpoint file.
 
 ---
 

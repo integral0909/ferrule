@@ -379,13 +379,6 @@ describe('file: rotation and truncation', () => {
 });
 
 describe('file: checkpoints and acknowledgements', () => {
-  // These are two independent scenarios rather than one combined test: once a chunk's
-  // acknowledgement resolves (of either outcome), this source's checkpoint is a single
-  // monotonic watermark per file, so a *later* chunk's outcome always determines where the
-  // watermark ends up — there's no way to observe an earlier 'errored' chunk's non-advancement
-  // once a later chunk has been flushed past it in the same run. That's fine: what the
-  // checkpoint needs to guarantee is "never advance past unacknowledged-or-errored data", which
-  // both scenarios below verify independently, each against a freshly started source.
   it('does not advance the checkpoint for an errored delivery', async () => {
     const dataDir = await tempDir();
     const logDir = await tempDir();
@@ -471,6 +464,88 @@ describe('file: checkpoints and acknowledgements', () => {
     );
     await waitForNextBatch(harness, 0); // no ack needed — the source must not be waiting on one
     expect(messages(harness)).toEqual(['only line']);
+    await stop(harness, runPromise);
+  });
+
+  it('an errored chunk permanently blocks the checkpoint, even once a later chunk in the same run delivers', async () => {
+    // The gap this regression test covers: chunk A (from the first poll) errors, then, in the
+    // *same run*, chunk B (a later poll, more data appended in between) delivers. A single
+    // watermark that's just overwritten by the latest resolved chunk would let B's success push
+    // the checkpoint straight past A's still-errored region — silently losing it on restart. The
+    // fix tracks outstanding chunks as an ordered queue and only ever drains its contiguous
+    // resolved-and-not-errored prefix, so an errored chunk at the head blocks every chunk queued
+    // behind it, no matter what order they resolve in.
+    const dataDir = await tempDir();
+    const logDir = await tempDir();
+    const logFile = join(logDir, 'app.log');
+    await writeFile(logFile, 'line one\n');
+
+    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+      include: [join(logDir, '*.log')],
+      readFrom: 'beginning',
+      pollIntervalMs: 50,
+    });
+
+    await waitForNextBatch(harness, 0);
+    expect(messages(harness)).toEqual(['line one']);
+    for (const event of harness.sent[0]!.events) event.metadata.finalizers.finish('errored');
+    await yieldToEventLoop();
+    await yieldToEventLoop();
+
+    await appendLine(logFile, 'line two');
+    while (harness.clock.pendingCount === 0) await yieldToEventLoop();
+    await harness.clock.advance(pollIntervalMs);
+
+    await waitForNextBatch(harness, 1);
+    expect(messages(harness)).toEqual(['line one', 'line two']);
+    for (const event of harness.sent[1]!.events) event.metadata.finalizers.finish('delivered');
+    await yieldToEventLoop();
+    await yieldToEventLoop();
+
+    await stop(harness, runPromise);
+
+    // Not advanced past chunk A at all — even though chunk B, entirely past chunk A, delivered.
+    const checkpoint = await readCheckpointFile(dataDir);
+    expect(Object.values(checkpoint)[0]?.offset).toBe(0);
+  });
+
+  it('backpressures a file once maxOutstandingChunks unacknowledged chunks are queued', async () => {
+    const dataDir = await tempDir();
+    const logDir = await tempDir();
+    const logFile = join(logDir, 'app.log');
+    await writeFile(logFile, 'line one\n');
+
+    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+      include: [join(logDir, '*.log')],
+      readFrom: 'beginning',
+      pollIntervalMs: 50,
+      maxOutstandingChunks: 2,
+    });
+
+    // Fill the two outstanding slots without acknowledging either.
+    await waitForNextBatch(harness, 0);
+    await appendLine(logFile, 'line two');
+    while (harness.clock.pendingCount === 0) await yieldToEventLoop();
+    await harness.clock.advance(pollIntervalMs);
+    await waitForNextBatch(harness, 1);
+
+    // A third chunk's worth of data arrives, but the file is backpressured: it must not be read
+    // (and so not sent) while both outstanding slots are still unacknowledged.
+    await appendLine(logFile, 'line three');
+    while (harness.clock.pendingCount === 0) await yieldToEventLoop();
+    await harness.clock.advance(pollIntervalMs);
+    for (let i = 0; i < 20; i++) await yieldToEventLoop();
+    expect(harness.sent).toHaveLength(2);
+
+    // Acknowledging one of the two frees a slot, and the third chunk is read and sent.
+    for (const event of harness.sent[0]!.events) event.metadata.finalizers.finish('delivered');
+    await yieldToEventLoop();
+    await yieldToEventLoop();
+    while (harness.clock.pendingCount === 0) await yieldToEventLoop();
+    await harness.clock.advance(pollIntervalMs);
+    await waitForNextBatch(harness, 2);
+    expect(messages(harness)).toEqual(['line one', 'line two', 'line three']);
+
     await stop(harness, runPromise);
   });
 });

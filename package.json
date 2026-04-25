@@ -27,6 +27,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "docs:generate": "tsc -b && node --experimental-strip-types scripts/generate-component-docs.ts",
+    "docs:check": "tsc -b && node --experimental-strip-types scripts/generate-component-docs.ts --check",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test"
   },
   "devDependencies": {

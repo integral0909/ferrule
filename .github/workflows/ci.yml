@@ -29,6 +29,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run format:check
       - run: pnpm run lint
+      - name: Component reference is up to date
+        run: pnpm run docs:check
 
   test:
     name: Test (node ${{ matrix.node }}, ${{ matrix.os }})
@@ -56,6 +58,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run test:coverage
+      - name: Smoke-test the CLI binary
+        shell: bash
+        run: |
+          node packages/cli/dist/bin.js --version
+          for f in packages/cli/examples/*.yaml; do
+            node packages/cli/dist/bin.js validate --no-environment -c "$f"
+          done
       - if: matrix.os == 'ubuntu-latest' && matrix.node == '22'
         uses: actions/upload-artifact@v4
         with:

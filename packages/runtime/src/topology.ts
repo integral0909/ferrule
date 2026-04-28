@@ -241,7 +241,7 @@ export async function buildTopology(
       errors.push({
         severity: 'error',
         code: 'E_NO_INPUTS',
-        message: `${entry.kind} ${JSON.stringify(entry.id)} has no inputs`,
+        message: `${entry.kind} has no inputs`,
         componentId: entry.id,
       });
     }
@@ -255,7 +255,7 @@ export async function buildTopology(
           severity: 'error',
           code: 'E_UNKNOWN_INPUT',
           message:
-            `${entry.id}: unknown input ${JSON.stringify(formatInputRef(ref))}` +
+            `unknown input ${JSON.stringify(formatInputRef(ref))}` +
             (suggestion === undefined ? '' : ` (did you mean ${JSON.stringify(suggestion)}?)`),
           componentId: entry.id,
         });
@@ -266,7 +266,7 @@ export async function buildTopology(
         errors.push({
           severity: 'error',
           code: 'E_SINK_AS_INPUT',
-          message: `${entry.id}: ${JSON.stringify(ref.componentId)} is a sink and cannot be used as an input`,
+          message: `${JSON.stringify(ref.componentId)} is a sink and cannot be used as an input`,
           componentId: entry.id,
         });
         continue;
@@ -278,7 +278,7 @@ export async function buildTopology(
           severity: 'error',
           code: 'E_UNKNOWN_PORT',
           message:
-            `${entry.id}: ${JSON.stringify(ref.componentId)} has no port ${JSON.stringify(ref.port)}` +
+            `${JSON.stringify(ref.componentId)} has no port ${JSON.stringify(ref.port)}` +
             (suggestion === undefined ? '' : ` (did you mean ${JSON.stringify(suggestion)}?)`),
           componentId: entry.id,
         });
@@ -352,7 +352,7 @@ export async function buildTopology(
       errors.push({
         severity: 'error',
         code: isFerruleError(error) ? error.code : 'E_COMPONENT_BUILD_FAILED',
-        message: `${id}: ${error instanceof Error ? error.message : String(error)}`,
+        message: error instanceof Error ? error.message : String(error),
         componentId: id,
       });
     }
@@ -527,7 +527,7 @@ function checkEventKinds(
         severity: 'error',
         code: 'E_EVENT_KIND_MISMATCH',
         message:
-          `${id} accepts [${definition.accepts.join(', ')}] but its inputs produce ` +
+          `accepts [${definition.accepts.join(', ')}] but its inputs produce ` +
           `[${inputKindList.join(', ')}]`,
         componentId: id,
       });

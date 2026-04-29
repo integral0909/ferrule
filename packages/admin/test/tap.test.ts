@@ -17,7 +17,8 @@ describe('GET /tap/:component', () => {
   });
 
   it('streams events as newline-delimited JSON by default', async () => {
-    const h = await createAdminHarness(undefined, [
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [
       { events: [LogEvent.fromMessage('hello'), LogEvent.fromMessage('world')], delayMs: 20 },
     ]);
     cleanup = h.stop;
@@ -25,6 +26,13 @@ describe('GET /tap/:component', () => {
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in`);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/x-ndjson/);
+
+    // Deterministic instead of a real-timing race: don't release the scripted source's delayed
+    // step until the tap subscription is actually registered server-side, so the events can
+    // never fire before anything is listening for them.
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(20);
+
     const lines = await readLines(res, 2);
     req.destroy();
 
@@ -85,11 +93,15 @@ describe('GET /tap/:component', () => {
   }, 15_000);
 
   it('accepts an explicit ?port= for the default port', async () => {
-    const h = await createAdminHarness(undefined, [
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [
       { events: [LogEvent.fromMessage('x')], delayMs: 10 },
     ]);
     cleanup = h.stop;
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?port=_default`);
+    // Deterministic instead of a real-timing race: see the first test in this file.
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(10);
     const lines = await readLines(res, 1);
     req.destroy();
     expect(lines).toHaveLength(1);

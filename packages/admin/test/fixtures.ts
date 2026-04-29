@@ -7,6 +7,7 @@ import {
   createCollectingSinkDefinition,
   createScriptedSourceDefinition,
   defineSink,
+  type Clock,
   type Collector,
   type ScriptedSourceHandle,
   type TopologySpec,
@@ -47,6 +48,7 @@ function defaultSteps(): ScriptStepInit[] {
  * testing helpers, already started. */
 export async function createHarness(
   steps: readonly ScriptStepInit[] = defaultSteps(),
+  options: { readonly clock?: Clock } = {},
 ): Promise<Harness> {
   const { definition: sourceDef, handle: sourceHandle } = createScriptedSourceDefinition(steps, {
     type: SOURCE_TYPE,
@@ -59,7 +61,11 @@ export async function createHarness(
     sinks: { out: { type: sinkDef.type, options: {}, inputs: ['in'] } },
   };
   const metrics = new MetricsRegistry();
-  const pipeline = await Pipeline.create(spec, { registry, metrics });
+  const pipeline = await Pipeline.create(spec, {
+    registry,
+    metrics,
+    ...(options.clock !== undefined ? { clock: options.clock } : {}),
+  });
   await pipeline.start();
   return {
     pipeline,
@@ -149,7 +155,9 @@ export async function createAdminHarness(
   options: Partial<Omit<AdminServerOptions, 'pipeline' | 'metrics' | 'address'>> = {},
   steps?: readonly ScriptStepInit[],
 ): Promise<Harness & StartedAdmin> {
-  const harness = await createHarness(steps);
+  const harness = await createHarness(steps, {
+    ...(options.clock !== undefined ? { clock: options.clock } : {}),
+  });
   const admin = await startAdmin({
     pipeline: harness.pipeline,
     metrics: harness.metrics,

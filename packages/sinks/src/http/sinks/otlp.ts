@@ -28,8 +28,8 @@ export const otlpSinkOptions = transportSchema.extend({
   protocol: s.enum(['protobuf', 'json']).default('protobuf'),
   /** Overrides the standard per-signal path (`/v1/logs`, `/v1/metrics`, `/v1/traces`). */
   path: s.string().optional(),
-  batch: batchSchema.optional(),
-  retry: retrySchema.optional(),
+  batch: batchSchema,
+  retry: retrySchema,
   concurrency: concurrencySchema,
 });
 export type OtlpSinkOptions = Infer<typeof otlpSinkOptions>;
@@ -104,6 +104,12 @@ export const otlpSink = defineSink<OtlpSinkOptions>({
   description: 'Exports events to an OTLP/HTTP collector (logs, metrics, or traces).',
   options: otlpSinkOptions,
   accepts: ['log', 'metric', 'span'],
+  examples: [
+    {
+      title: 'Forward traces to another OTLP collector',
+      config: { endpoint: 'http://otel-collector.internal:4318', signal: 'traces' },
+    },
+  ],
   build: (options, ctx) => {
     const signal = options.signal;
     const kind = SIGNAL_KIND[signal];
@@ -118,10 +124,10 @@ export const otlpSink = defineSink<OtlpSinkOptions>({
       tls: options.tls,
       proxy: options.proxy,
       timeoutMs: options.timeout,
-      maxResponseBytes: options.maxResponseBytes,
+      maxResponseBytes: options.max_response_size,
       compression: options.compression,
       headers: options.headers,
-      maxSockets: options.maxSockets,
+      maxSockets: options.max_sockets,
       logger: ctx.logger,
     });
 
@@ -129,10 +135,10 @@ export const otlpSink = defineSink<OtlpSinkOptions>({
       async run(sinkCtx) {
         try {
           await runBatchedSink<Uint8Array | undefined>(sinkCtx, {
-            ...(options.batch?.maxEvents !== undefined
-              ? { maxEvents: options.batch.maxEvents }
+            ...(options.batch?.max_events !== undefined
+              ? { maxEvents: options.batch.max_events }
               : {}),
-            ...(options.batch?.maxBytes !== undefined ? { maxBytes: options.batch.maxBytes } : {}),
+            ...(options.batch?.max_size !== undefined ? { maxBytes: options.batch.max_size } : {}),
             timeoutMs: options.batch?.timeout ?? 1_000,
             encode: (events: Event[]) => {
               const matched: Event[] = [];

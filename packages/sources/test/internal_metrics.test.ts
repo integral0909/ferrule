@@ -22,7 +22,7 @@ describe('internal_metrics: declared shape', () => {
 
 describe('internal_metrics: emission timing', () => {
   it('emits nothing before the first interval elapses, then a snapshot per tick', async () => {
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await internalMetricsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     harness.metrics.counter('widgets_total').increment(5);
@@ -43,7 +43,7 @@ describe('internal_metrics: emission timing', () => {
   });
 
   it('skips a tick with nothing recorded rather than sending an empty batch', async () => {
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await internalMetricsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const runPromise = handle.run(harness.ctx);
@@ -57,7 +57,7 @@ describe('internal_metrics: emission timing', () => {
   });
 });
 
-describe('internal_metrics: namespaceOverride', () => {
+describe('internal_metrics: namespace_override', () => {
   function fakeMetricsWithSnapshot(events: readonly MetricEvent[]): MetricsRecorder {
     return {
       counter: () => ({ increment: () => {} }),
@@ -76,7 +76,7 @@ describe('internal_metrics: namespaceOverride', () => {
         value: { type: 'counter', value: 3 },
       }),
     ];
-    const opts = parse({ intervalMs: 1000, namespaceOverride: 'ferrule' });
+    const opts = parse({ interval: 1000, namespace_override: 'ferrule' });
     const handle = await internalMetricsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const ctx: SourceContext = { ...harness.ctx, metrics: fakeMetricsWithSnapshot(canned) };
@@ -101,7 +101,7 @@ describe('internal_metrics: namespaceOverride', () => {
         value: { type: 'counter', value: 3 },
       }),
     ];
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await internalMetricsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const ctx: SourceContext = { ...harness.ctx, metrics: fakeMetricsWithSnapshot(canned) };
@@ -151,7 +151,7 @@ describe('internal_metrics: fails fast without ctx.metrics.snapshot', () => {
 
 describe('internal_metrics: graceful shutdown', () => {
   it('stops emitting and lets run() resolve promptly once ctx.signal aborts', async () => {
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await internalMetricsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     harness.metrics.counter('widgets_total').increment(1);

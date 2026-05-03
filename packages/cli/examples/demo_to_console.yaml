@@ -7,11 +7,11 @@ sources:
   demo:
     type: demo_logs
     format: apache_combined
-    eventsPerSecond: 5
+    events_per_second: 5
 
 sinks:
   console_out:
     type: console
     inputs: [demo]
-    encoding: json
-    framing: newline
+    encoding: { codec: json }
+    framing: { method: newline }

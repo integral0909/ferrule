@@ -44,8 +44,8 @@ export const clickhouseSinkOptions = transportSchema.extend({
   columns: columnMappingSchema.optional(),
   /** Extra ClickHouse HTTP settings sent as query parameters, e.g. `{ async_insert: "1" }`. */
   settings: s.record(s.string()).optional(),
-  batch: batchSchema.optional(),
-  retry: retrySchema.optional(),
+  batch: batchSchema,
+  retry: retrySchema,
   concurrency: concurrencySchema,
 });
 export type ClickhouseSinkOptions = Infer<typeof clickhouseSinkOptions>;
@@ -73,6 +73,16 @@ export const clickhouseSink = defineSink<ClickhouseSinkOptions>({
   description: 'Inserts events into ClickHouse via its HTTP interface (JSONEachRow).',
   options: clickhouseSinkOptions,
   accepts: ['log', 'metric', 'span'],
+  examples: [
+    {
+      title: 'Insert events into a ClickHouse table',
+      config: {
+        url: 'http://clickhouse.internal:8123',
+        database: 'telemetry',
+        table: 'logs',
+      },
+    },
+  ],
   build: (options, ctx) => {
     const database = quoteClickHouseIdentifier(options.database);
     const table = quoteClickHouseIdentifier(options.table);
@@ -89,10 +99,10 @@ export const clickhouseSink = defineSink<ClickhouseSinkOptions>({
       tls: options.tls,
       proxy: options.proxy,
       timeoutMs: options.timeout,
-      maxResponseBytes: options.maxResponseBytes,
+      maxResponseBytes: options.max_response_size,
       compression: options.compression,
       headers: options.headers,
-      maxSockets: options.maxSockets,
+      maxSockets: options.max_sockets,
       logger: ctx.logger,
     });
 
@@ -100,10 +110,10 @@ export const clickhouseSink = defineSink<ClickhouseSinkOptions>({
       async run(sinkCtx) {
         try {
           await runBatchedSink(sinkCtx, {
-            ...(options.batch?.maxEvents !== undefined
-              ? { maxEvents: options.batch.maxEvents }
+            ...(options.batch?.max_events !== undefined
+              ? { maxEvents: options.batch.max_events }
               : {}),
-            ...(options.batch?.maxBytes !== undefined ? { maxBytes: options.batch.maxBytes } : {}),
+            ...(options.batch?.max_size !== undefined ? { maxBytes: options.batch.max_size } : {}),
             timeoutMs: options.batch?.timeout ?? 1_000,
             encode: (events) =>
               frameChunks(

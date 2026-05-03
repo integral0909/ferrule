@@ -35,7 +35,7 @@ describe('ferrule tap / ferrule top (against a real running pipeline + admin ser
     const metrics = new MetricsRegistry({ clock });
     pipeline = await Pipeline.create(
       {
-        sources: { demo: { type: 'demo_logs', options: { eventsPerSecond: 30 } } },
+        sources: { demo: { type: 'demo_logs', options: { events_per_second: 30 } } },
         sinks: { out: { type: 'blackhole', options: {}, inputs: ['demo'] } },
       },
       { registry, clock, metrics, logger: createNullLogger() },

@@ -185,10 +185,10 @@ describe('statsd: decode errors', () => {
   });
 });
 
-describe('statsd: tcp maxConnections', () => {
+describe('statsd: tcp max_connections', () => {
   it('closes connections beyond the configured limit', async () => {
     const { handle } = await startTracked({
-      tcp: { address: '127.0.0.1:0', maxConnections: 1 },
+      tcp: { address: '127.0.0.1:0', max_connections: 1 },
     });
     const addr = handle.tcpAddress()!;
     const first = await connectTcpClient(addr.port, addr.host);
@@ -205,7 +205,7 @@ describe('statsd: tcp maxConnections', () => {
 describe('statsd: udp backpressure', () => {
   it('bounds in-flight sends and drops datagrams beyond the limit until a slot frees up', async () => {
     const { harness, handle } = await startTracked({
-      udp: { address: '127.0.0.1:0', maxInFlightSends: 1 },
+      udp: { address: '127.0.0.1:0', max_in_flight_sends: 1 },
     });
     const addr = handle.udpAddress()!;
     harness.blockSends();

@@ -1,24 +1,9 @@
 import { LogEvent, MetricEvent, type Event, type ValueMap } from '@ferrule/core';
-import { RetryPolicy, type Clock } from '@ferrule/runtime';
-import type { BatchOptions, RetryOptions } from './schema.js';
+import type { BatchOptions } from '../fragments.js';
 
 /** Small pieces shared by every sink's `build()` that don't belong in `client.ts`/`schema.ts`. */
 
-/** Builds a `RetryPolicy` from the shared `retrySchema` shape, falling back to the toolkit's own
- * defaults for anything not set. */
-export function buildRetryPolicy(
-  options: RetryOptions | undefined,
-  random?: () => number,
-): RetryPolicy {
-  return new RetryPolicy({
-    initialDelayMs: options?.initialDelay ?? 100,
-    maxDelayMs: options?.maxDelay ?? 30_000,
-    multiplier: options?.multiplier ?? 2,
-    ...(options?.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
-    ...(options?.maxElapsed !== undefined ? { maxElapsedMs: options.maxElapsed } : {}),
-    ...(random !== undefined ? { random } : {}),
-  });
-}
+export { buildRetryPolicy, clockDate } from '../fragments.js';
 
 export function batchTimeoutMs(options: BatchOptions | undefined): number {
   return options?.timeout ?? 1_000;
@@ -46,9 +31,4 @@ export function eventContext(event: Event): ValueMap {
   context.set('attributes', event.attributes);
   context.set('resource', event.resource);
   return context;
-}
-
-/** Wall-clock `Date` for a sink's `ctx.clock`, for time-partitioned templates (object keys, etc.). */
-export function clockDate(clock: Clock): Date {
-  return clock.now().toDate();
 }

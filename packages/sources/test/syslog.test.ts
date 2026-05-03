@@ -177,9 +177,9 @@ describe('syslog: tcp decoding errors and limits', () => {
     socket.destroy();
   });
 
-  it('closes the connection when a newline-framed line exceeds maxFrameLength, without crashing the source', async () => {
+  it('closes the connection when a newline-framed line exceeds max_frame_length, without crashing the source', async () => {
     const { harness, handle } = await startTracked(
-      { tcp: { address: '127.0.0.1:0', maxFrameLength: 128 } },
+      { tcp: { address: '127.0.0.1:0', max_frame_length: 128 } },
       false,
     );
     const addr = handle.tcpAddress()!;
@@ -193,9 +193,9 @@ describe('syslog: tcp decoding errors and limits', () => {
     good.destroy();
   });
 
-  it('closes the connection when an octet-counted length exceeds maxFrameLength', async () => {
+  it('closes the connection when an octet-counted length exceeds max_frame_length', async () => {
     const { handle } = await startTracked(
-      { tcp: { address: '127.0.0.1:0', maxFrameLength: 8 } },
+      { tcp: { address: '127.0.0.1:0', max_frame_length: 8 } },
       false,
     );
     const addr = handle.tcpAddress()!;
@@ -204,9 +204,9 @@ describe('syslog: tcp decoding errors and limits', () => {
     await waitForClose(socket);
   });
 
-  it('rejects a connection over maxConnections', async () => {
+  it('rejects a connection over max_connections', async () => {
     const { handle } = await startTracked(
-      { tcp: { address: '127.0.0.1:0', maxConnections: 1 } },
+      { tcp: { address: '127.0.0.1:0', max_connections: 1 } },
       false,
     );
     const addr = handle.tcpAddress()!;
@@ -233,7 +233,7 @@ describe('syslog: tcp TLS', () => {
     await fs.writeFile(keyFile, keyPem);
     try {
       const { harness, handle } = await startTracked(
-        { tcp: { address: '127.0.0.1:0', tls: { certFile, keyFile } } },
+        { tcp: { address: '127.0.0.1:0', tls: { cert_file: certFile, key_file: keyFile } } },
         false,
       );
       const addr = handle.tcpAddress()!;
@@ -441,7 +441,7 @@ describe('syslog: udp', () => {
 
   it('drops an oversize datagram and counts it, without crashing the source', async () => {
     const { harness, handle } = await startTracked(
-      { udp: { address: '127.0.0.1:0', maxPacketBytes: 128 } },
+      { udp: { address: '127.0.0.1:0', max_packet_size: 128 } },
       false,
     );
     const addr = handle.udpAddress()!;

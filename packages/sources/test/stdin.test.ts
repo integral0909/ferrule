@@ -14,14 +14,12 @@ function buildCtx(): BuildContext {
 describe('stdin: declared shape', () => {
   it('reports produces() based on the configured codec', () => {
     expect(stdinSource.produces(stdinSource.options.parse({}))).toEqual(['log']);
-    expect(stdinSource.produces(stdinSource.options.parse({ decoding: 'statsd' }))).toEqual([
-      'metric',
-    ]);
-    expect(stdinSource.produces(stdinSource.options.parse({ decoding: 'otlp_json' }))).toEqual([
-      'log',
-      'metric',
-      'span',
-    ]);
+    expect(
+      stdinSource.produces(stdinSource.options.parse({ decoding: { codec: 'statsd' } })),
+    ).toEqual(['metric']);
+    expect(
+      stdinSource.produces(stdinSource.options.parse({ decoding: { codec: 'otlp_json' } })),
+    ).toEqual(['log', 'metric', 'span']);
   });
 
   it('createStdinSource builds an independent, injectable instance', () => {

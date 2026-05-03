@@ -192,6 +192,7 @@ export class HttpClient {
       cert: this.tls.cert,
       key: this.tls.key,
       rejectUnauthorized: this.tls.rejectUnauthorized,
+      ...(this.tls.servername !== undefined ? { servername: this.tls.servername } : {}),
     });
     return this.plainHttpsAgent;
   }
@@ -212,8 +213,8 @@ export class HttpClient {
 
 /** Applies an {@link AuthOptions} strategy to a (lower-cased) header map. Never logs the secret. */
 export function applyAuth(headers: Record<string, string>, auth: AuthOptions): void {
-  if (auth === undefined || auth.type === 'none') return;
-  switch (auth.type) {
+  if (auth === undefined || auth.strategy === 'none') return;
+  switch (auth.strategy) {
     case 'basic':
       headers['authorization'] =
         `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;

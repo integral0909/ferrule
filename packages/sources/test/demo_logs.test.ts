@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isLogEvent, toPlain, type LogEvent } from '@ferrule/core';
+import { isLogEvent, toPlain, type LogEvent, type Timestamp } from '@ferrule/core';
 import type { BuildContext } from '@ferrule/runtime';
 import { createCapturingLogger } from '@ferrule/runtime';
 import { demoLogsSource, type DemoLogsOptions } from '../src/demo_logs.js';
@@ -40,8 +40,8 @@ describe('demo_logs: declared shape', () => {
 });
 
 describe('demo_logs: pacing', () => {
-  it('emits eventsPerSecond events per tick, paced with ctx.clock.sleep', async () => {
-    const opts = parse({ format: 'json', eventsPerSecond: 2, count: 5 });
+  it('emits events_per_second events per tick, paced with ctx.clock.sleep', async () => {
+    const opts = parse({ format: 'json', events_per_second: 2, count: 5 });
     const handle = await demoLogsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const runPromise = handle.run(harness.ctx);
@@ -64,7 +64,7 @@ describe('demo_logs: pacing', () => {
   });
 
   it('runs until ctx.signal aborts when count is omitted', async () => {
-    const opts = parse({ format: 'json', eventsPerSecond: 1 });
+    const opts = parse({ format: 'json', events_per_second: 1 });
     const handle = await demoLogsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const runPromise = handle.run(harness.ctx);
@@ -76,8 +76,14 @@ describe('demo_logs: pacing', () => {
 });
 
 describe('demo_logs: determinism', () => {
-  it('produces byte-for-byte identical output for the same seed and count', async () => {
-    const raw = { format: 'all', seed: 42, count: 40, eventsPerSecond: 40 };
+  it('produces byte-for-byte identical output for the same seed, start_time, and count', async () => {
+    const raw = {
+      format: 'all',
+      seed: 42,
+      count: 40,
+      events_per_second: 40,
+      start_time: '2024-01-01T00:00:00Z',
+    };
     const first = await collectAll(raw);
     const second = await collectAll(raw);
 
@@ -88,10 +94,49 @@ describe('demo_logs: determinism', () => {
   });
 
   it('produces different output for a different seed', async () => {
-    const first = await collectAll({ format: 'all', seed: 1, count: 20, eventsPerSecond: 20 });
-    const second = await collectAll({ format: 'all', seed: 2, count: 20, eventsPerSecond: 20 });
+    const raw = {
+      format: 'all',
+      count: 20,
+      events_per_second: 20,
+      start_time: '2024-01-01T00:00:00Z',
+    };
+    const first = await collectAll({ ...raw, seed: 1 });
+    const second = await collectAll({ ...raw, seed: 2 });
     const canon = (events: LogEvent[]): unknown[] => events.map((e) => toPlain(e.fields));
     expect(canon(first)).not.toEqual(canon(second));
+  });
+});
+
+describe('demo_logs: timestamps', () => {
+  it('anchors generated events to ctx.clock.now() when start_time is omitted, advancing tick over tick', async () => {
+    const opts = parse({ format: 'json', events_per_second: 2, count: 4 });
+    const handle = await demoLogsSource.build(opts, buildCtx());
+    const harness = createControllableSourceContext({ acknowledgements: false });
+    // The harness's ManualClock starts at a fixed, known instant (the Unix epoch); run() reads
+    // it once, at the very start, as the base for every generated timestamp.
+    const startMs = harness.clock.now().toMillis();
+    const runPromise = handle.run(harness.ctx);
+
+    await waitUntil(() => harness.sent.length === 1);
+    await harness.clock.advance(1000);
+    await waitUntil(() => harness.sent.length === 2);
+    await runPromise;
+
+    const firstTick = harness.sent[0]!.events.filter(isLogEvent);
+    const secondTick = harness.sent[1]!.events.filter(isLogEvent);
+    expect(firstTick).toHaveLength(2);
+    expect(secondTick).toHaveLength(2);
+
+    for (const event of firstTick) {
+      const ts = event.get('timestamp') as Timestamp;
+      expect(ts.toMillis()).toBeGreaterThanOrEqual(startMs);
+      expect(ts.toMillis()).toBeLessThan(startMs + 1000);
+    }
+    for (const event of secondTick) {
+      const ts = event.get('timestamp') as Timestamp;
+      expect(ts.toMillis()).toBeGreaterThanOrEqual(startMs + 1000);
+      expect(ts.toMillis()).toBeLessThan(startMs + 2000);
+    }
   });
 });
 
@@ -150,7 +195,7 @@ describe('demo_logs: formats', () => {
 
 describe('demo_logs: acknowledgements', () => {
   it('logs a warning when a batch is not delivered', async () => {
-    const opts = parse({ format: 'json', eventsPerSecond: 1, count: 1 });
+    const opts = parse({ format: 'json', events_per_second: 1, count: 1 });
     const handle = await demoLogsSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: true });
     const runPromise = handle.run(harness.ctx);

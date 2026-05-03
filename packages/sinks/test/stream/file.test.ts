@@ -17,17 +17,15 @@ function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {
 
 function baseOptions(baseDir: string, overrides: Partial<FileSinkOptions> = {}): FileSinkOptions {
   return {
-    baseDir,
+    base_dir: baseDir,
     path: 'out.log',
-    encoding: 'json',
-    framing: 'newline',
-    lengthPrefixWidth: 'u32',
-    lengthPrefixEndianness: 'BE',
+    encoding: { codec: 'json' },
+    framing: { method: 'newline' },
     gzip: false,
-    maxOpenFiles: 64,
-    idleClose: 30_000,
+    max_open_files: 64,
+    idle_close: 30_000,
     fsync: 'none',
-    fsyncInterval: 1_000,
+    fsync_interval: 1_000,
     ...overrides,
   };
 }
@@ -93,7 +91,7 @@ describe('file sink', () => {
     expect(fs.existsSync(nodePath.join(nested, 'sub', 'dir', 'out.log'))).toBe(true);
   });
 
-  it('rejects an event whose rendered path tries to escape baseDir, and writes nothing outside it', async () => {
+  it('rejects an event whose rendered path tries to escape base_dir, and writes nothing outside it', async () => {
     const sink = createFileSink(baseOptions(dir, { path: '{{ path }}' }));
     const ctx = createTestSinkContext();
     const escaping = LogEvent.from({ path: '../../../../etc/passwd', message: 'pwn' });
@@ -114,7 +112,7 @@ describe('file sink', () => {
 
   it('gzip-compresses file contents, readable back via zlib', async () => {
     const sink = createFileSink(
-      baseOptions(dir, { path: 'out.log.gz', gzip: true, encoding: 'text' }),
+      baseOptions(dir, { path: 'out.log.gz', gzip: true, encoding: { codec: 'text' } }),
     );
     const ctx = createTestSinkContext();
     const events = [LogEvent.fromMessage('line one'), LogEvent.fromMessage('line two')];
@@ -129,7 +127,7 @@ describe('file sink', () => {
   it('rotates by size into suffixed generations', async () => {
     // Each framed "message":"N" line is a little over 20 bytes; force a rotation every ~2 lines.
     const sink = createFileSink(
-      baseOptions(dir, { path: 'rot.log', rotateBytes: 45, encoding: 'json' }),
+      baseOptions(dir, { path: 'rot.log', rotate_size: 45, encoding: { codec: 'json' } }),
     );
     const ctx = createTestSinkContext();
     const events = Array.from({ length: 6 }, (_, i) => LogEvent.fromMessage(`m${i}`));
@@ -148,7 +146,7 @@ describe('file sink', () => {
   });
 
   it('resumes rotation state from disk across a fresh writer for the same files', async () => {
-    const options = baseOptions(dir, { path: 'resume.log', rotateBytes: 30 });
+    const options = baseOptions(dir, { path: 'resume.log', rotate_size: 30 });
     // First writer fills generation 0 close to the limit.
     await fsp.writeFile(nodePath.join(dir, 'resume.log'), '{"message":"already-full-xxxxxxx"}\n');
     const sink = createFileSink(options);
@@ -164,8 +162,8 @@ describe('file sink', () => {
 });
 
 describe('FileSinkWriter (direct unit tests for LRU and idle close)', () => {
-  it('enforces maxOpenFiles by closing the least-recently-used handle', async () => {
-    const options = baseOptions(dir, { path: '{{ id }}.log', maxOpenFiles: 2 });
+  it('enforces max_open_files by closing the least-recently-used handle', async () => {
+    const options = baseOptions(dir, { path: '{{ id }}.log', max_open_files: 2 });
     const harness = createTestSinkContext();
     const writer = new FileSinkWriter(options, harness.ctx);
     await writer.start();
@@ -188,8 +186,8 @@ describe('FileSinkWriter (direct unit tests for LRU and idle close)', () => {
     }
   });
 
-  it('closes idle handles once idleClose has elapsed, driven by the manual clock', async () => {
-    const options = baseOptions(dir, { path: 'idle.log', idleClose: 1_000 });
+  it('closes idle handles once idle_close has elapsed, driven by the manual clock', async () => {
+    const options = baseOptions(dir, { path: 'idle.log', idle_close: 1_000 });
     const harness = createTestSinkContext();
     const writer = new FileSinkWriter(options, harness.ctx);
     await writer.start();

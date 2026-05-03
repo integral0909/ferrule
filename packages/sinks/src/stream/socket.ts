@@ -3,55 +3,53 @@ import { defaultCodecs, type CodecRegistry } from '@ferrule/codecs';
 import {
   defineSink,
   runBatchedSink,
-  RetryPolicy,
   type BuildContext,
   type Logger,
   type Sink,
   type SinkContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import {
+  batchSchema,
+  buildRetryPolicy,
+  encodingSchema,
+  framingSchema,
+  retrySchema,
+  splitCodecOptions,
+  tlsSchema,
+} from '../fragments.js';
 import { writeWithBackpressure } from './backpressure-write.js';
 import { frameBytes, type FramingMode } from './frame-writer.js';
-import { TcpTransport, UdpTransport, tlsOptionsSchema, type Transport } from './wire-transport.js';
+import { TcpTransport, UdpTransport, type Transport } from './wire-transport.js';
 
 export const socketSinkOptionsSchema = s.object({
   protocol: s.enum(['tcp', 'udp']),
   host: s.string().nonEmpty(),
   port: s.integer({ min: 1, max: 65535 }),
-  encoding: s.string().default('json'),
-  encodingOptions: s.unknown().optional(),
+  /** Codec used to encode each event. Default `json`. */
+  encoding: encodingSchema('json'),
   /** How events are separated on the wire. TCP only; UDP sends one datagram per event. */
-  framing: s.enum(['newline', 'length_prefixed', 'octet_counting']).default('newline'),
-  lengthPrefixWidth: s.enum(['u16', 'u32']).default('u32'),
-  lengthPrefixEndianness: s.enum(['BE', 'LE']).default('BE'),
-  /** TCP only: batches up to this many events into one write. Default 500. */
-  batchMaxEvents: s.integer({ min: 1 }).default(500),
-  /** TCP only: batches up to this many estimated bytes into one write. Default 1MiB. */
-  batchMaxBytes: s.byteSize().default(1024 * 1024),
-  /** TCP only: flushes a partial batch after this long. Default 1s. */
-  batchTimeout: s.duration().default(1_000),
+  framing: framingSchema,
+  /** TCP only: groups events into batches before writing them. Default: 500 events / 1MiB / 1s. */
+  batch: batchSchema,
   /** UDP only: a datagram larger than this is rejected rather than sent. Default 65507 (the
    * maximum IPv4 UDP payload). */
-  maxDatagramBytes: s.byteSize().default(65_507),
-  tls: tlsOptionsSchema.optional(),
+  max_datagram_size: s.byteSize().default(65_507),
+  tls: tlsSchema,
   /** How long a TCP connection attempt may take before it is treated as a failure. Default 10s. */
-  connectTimeout: s.duration().default(10_000),
-  /** Reconnect/retry backoff for TCP connection and write failures. */
-  retryInitialDelay: s.duration().default(250),
-  retryMaxDelay: s.duration().default(30_000),
+  connect_timeout: s.duration().default(10_000),
+  /** Reconnect/retry backoff for TCP connection and write failures. Default 250ms/30s. */
+  retry: retrySchema,
 });
 
 export type SocketSinkOptions = Infer<typeof socketSinkOptionsSchema>;
 
 function framingModeOf(options: SocketSinkOptions): FramingMode {
-  if (options.framing === 'length_prefixed') {
-    return {
-      kind: 'length_prefixed',
-      width: options.lengthPrefixWidth,
-      endianness: options.lengthPrefixEndianness,
-    };
+  const framing = options.framing;
+  if (framing.method === 'length_prefixed') {
+    return { kind: 'length_prefixed', width: framing.width, endianness: framing.endianness };
   }
-  if (options.framing === 'octet_counting') return { kind: 'octet_counting' };
+  if (framing.method === 'octet_counting') return { kind: 'octet_counting' };
   return { kind: 'newline' };
 }
 
@@ -87,10 +85,10 @@ function makeEncodeBatch(
         continue;
       }
       if (options.protocol === 'udp') {
-        if (bytes.length > options.maxDatagramBytes) {
+        if (bytes.length > options.max_datagram_size) {
           logger.warn('socket sink rejected an oversize UDP datagram', {
             size: bytes.length,
-            maxDatagramBytes: options.maxDatagramBytes,
+            max_datagram_size: options.max_datagram_size,
           });
           event.metadata.finalizers.finish('rejected');
           continue;
@@ -108,7 +106,8 @@ export function createSocketSink(
   options: SocketSinkOptions,
   codecs: CodecRegistry = defaultCodecs,
 ): Sink {
-  const encoder = codecs.createEncoder(options.encoding, options.encodingOptions);
+  const [codec, codecOptions] = splitCodecOptions(options.encoding);
+  const encoder = codecs.createEncoder(codec, codecOptions);
   const framing = framingModeOf(options);
   return {
     async run(ctx: SinkContext): Promise<void> {
@@ -117,14 +116,16 @@ export function createSocketSink(
       const isUdp = options.protocol === 'udp';
       try {
         await runBatchedSink(ctx, {
-          maxEvents: isUdp ? 1 : options.batchMaxEvents,
-          ...(isUdp ? {} : { maxBytes: options.batchMaxBytes, timeoutMs: options.batchTimeout }),
+          maxEvents: isUdp ? 1 : (options.batch?.max_events ?? 500),
+          ...(isUdp
+            ? {}
+            : {
+                maxBytes: options.batch?.max_size ?? 1024 * 1024,
+                timeoutMs: options.batch?.timeout ?? 1_000,
+              }),
           encode: encodeBatch,
           send: (payload) => transport.send(payload, ctx.signal),
-          retry: new RetryPolicy({
-            initialDelayMs: options.retryInitialDelay,
-            maxDelayMs: options.retryMaxDelay,
-          }),
+          retry: buildRetryPolicy(options.retry ?? { initial_backoff: 250, max_backoff: 30_000 }),
         });
       } finally {
         await transport.close();

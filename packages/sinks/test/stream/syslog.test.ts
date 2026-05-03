@@ -19,16 +19,13 @@ function baseOptions(overrides: Partial<SyslogSinkOptions>): SyslogSinkOptions {
     host: '127.0.0.1',
     port: 0,
     framing: 'octet_counting',
-    defaultFacility: 1,
-    defaultSeverity: 6,
-    appName: 'ferrule',
-    batchMaxEvents: 500,
-    batchMaxBytes: 1024 * 1024,
-    batchTimeout: 1_000,
-    maxDatagramBytes: 65_507,
-    connectTimeout: 2_000,
-    retryInitialDelay: 10,
-    retryMaxDelay: 50,
+    default_facility: 1,
+    default_severity: 6,
+    app_name: 'ferrule',
+    batch: { max_events: 500, max_size: 1024 * 1024, timeout: 1_000 },
+    max_datagram_size: 65_507,
+    connect_timeout: 2_000,
+    retry: { initial_backoff: 10, max_backoff: 50 },
     ...overrides,
   };
 }
@@ -88,7 +85,7 @@ function parseOctetCounted(buf: Buffer): ReturnType<typeof parseSyslog5424> {
 describe('syslog sink', () => {
   it('sends an RFC 5424 message over TCP with octet-counting framing', async () => {
     const { port, received } = await startTcpServer();
-    const sink = createSyslogSink(baseOptions({ protocol: 'tcp', port, appName: 'myapp' }));
+    const sink = createSyslogSink(baseOptions({ protocol: 'tcp', port, app_name: 'myapp' }));
     const ctx = createTestSinkContext();
     const event = LogEvent.from({ message: 'hello syslog' });
     const completion = withFinalizer(event);
@@ -106,9 +103,9 @@ describe('syslog sink', () => {
     await expect(completion).resolves.toBe('delivered');
   });
 
-  it('maps a textual level field to severity via levelMap', async () => {
+  it('maps a textual level field to severity via level_map', async () => {
     const { port, received } = await startTcpServer();
-    const sink = createSyslogSink(baseOptions({ protocol: 'tcp', port, levelField: ['level'] }));
+    const sink = createSyslogSink(baseOptions({ protocol: 'tcp', port, level_field: ['level'] }));
     const ctx = createTestSinkContext();
     const event = LogEvent.from({ message: 'oops', level: 'error' });
     const completion = withFinalizer(event);
@@ -126,7 +123,7 @@ describe('syslog sink', () => {
   it('reads an explicit numeric facility field, overriding the default', async () => {
     const { port, received } = await startTcpServer();
     const sink = createSyslogSink(
-      baseOptions({ protocol: 'tcp', port, facilityField: ['facility'], defaultFacility: 1 }),
+      baseOptions({ protocol: 'tcp', port, facility_field: ['facility'], default_facility: 1 }),
     );
     const ctx = createTestSinkContext();
     const event = LogEvent.from({ message: 'x', facility: 16n }); // local0

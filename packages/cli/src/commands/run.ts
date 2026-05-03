@@ -160,7 +160,7 @@ export const runCommand: Command = {
     const logger: Logger = createLogger({
       level: resolveLogLevel(args, config),
       format: resolveLogFormat(args, config),
-      sink: { write: (chunk) => ctx.env.stdout.write(chunk) },
+      sink: { write: (chunk) => ctx.env.stderr.write(chunk) },
       clock: ctx.env.clock,
     });
     const metrics = new MetricsRegistry({ clock: ctx.env.clock });

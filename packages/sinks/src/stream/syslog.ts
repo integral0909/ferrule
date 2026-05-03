@@ -11,13 +11,13 @@ import { encodeSyslog5424, type Syslog5424Message } from '@ferrule/codecs';
 import {
   defineSink,
   runBatchedSink,
-  RetryPolicy,
   type BuildContext,
   type Logger,
   type Sink,
   type SinkContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { batchSchema, buildRetryPolicy, retrySchema, tlsSchema } from '../fragments.js';
 import { writeWithBackpressure } from './backpressure-write.js';
 import { frameBytes, type FramingMode } from './frame-writer.js';
 import {
@@ -26,7 +26,7 @@ import {
   renderTemplate,
   type CompiledTemplate,
 } from './template.js';
-import { TcpTransport, UdpTransport, tlsOptionsSchema, type Transport } from './wire-transport.js';
+import { TcpTransport, UdpTransport, type Transport } from './wire-transport.js';
 
 /** Standard RFC 5424 level-name aliases, mapped to their severity code (0 = most severe). */
 const DEFAULT_LEVEL_MAP: Readonly<Record<string, number>> = {
@@ -51,40 +51,41 @@ export const syslogSinkOptionsSchema = s.object({
   protocol: s.enum(['tcp', 'udp']).default('tcp'),
   host: s.string().nonEmpty(),
   port: s.integer({ min: 1, max: 65535 }).default(514),
-  tls: tlsOptionsSchema.optional(),
+  tls: tlsSchema,
   /** TCP framing per RFC 6587. `octet_counting` is the transparent framing the RFC recommends;
    * `newline` is the common non-transparent alternative many receivers also accept. Ignored for
    * UDP, where each event is always its own datagram. */
   framing: s.enum(['octet_counting', 'newline']).default('octet_counting'),
-  /** Facility (0-23) used when `facilityField` is unset or the event's value is out of range. */
-  defaultFacility: s.integer({ min: 0, max: 23 }).default(1),
+  /** Facility (0-23) used when `facility_field` is unset or the event's value is out of range. */
+  default_facility: s.integer({ min: 0, max: 23 }).default(1),
   /** Event field holding a numeric facility override. */
-  facilityField: s.fieldPath().optional(),
-  /** Severity (0-7) used when neither `severityField` nor `levelField` resolves one. */
-  defaultSeverity: s.integer({ min: 0, max: 7 }).default(6),
-  /** Event field holding a numeric severity (0-7) override; takes priority over `levelField`. */
-  severityField: s.fieldPath().optional(),
-  /** Event field holding a textual level (`"error"`, `"warn"`, ...), mapped via `levelMap`. */
-  levelField: s.fieldPath().optional(),
+  facility_field: s.fieldPath().optional(),
+  /** Severity (0-7) used when neither `severity_field` nor `level_field` resolves one. */
+  default_severity: s.integer({ min: 0, max: 7 }).default(6),
+  /** Event field holding a numeric severity (0-7) override; takes priority over `level_field`. */
+  severity_field: s.fieldPath().optional(),
+  /** Event field holding a textual level (`"error"`, `"warn"`, ...), mapped via `level_map`. */
+  level_field: s.fieldPath().optional(),
   /** Extra (or overriding) level-name-to-severity entries, merged over the RFC 5424 defaults. */
-  levelMap: s.record(s.integer({ min: 0, max: 7 })).optional(),
+  level_map: s.record(s.integer({ min: 0, max: 7 })).optional(),
   /** APP-NAME template. Supports `{{ field.path }}`. Default `"ferrule"`. */
-  appName: s.string().default('ferrule'),
+  app_name: s.string().default('ferrule'),
   /** HOSTNAME template. Default: the local hostname. */
   hostname: s.string().optional(),
   /** Event field used as MSGID. */
-  msgIdField: s.fieldPath().optional(),
+  msg_id_field: s.fieldPath().optional(),
   /** Event field used as PROCID. */
-  procIdField: s.fieldPath().optional(),
+  proc_id_field: s.fieldPath().optional(),
   /** Event field used as the MSG part (free text after the header). Default `"message"`. */
-  messageField: s.fieldPath().optional(),
-  batchMaxEvents: s.integer({ min: 1 }).default(500),
-  batchMaxBytes: s.byteSize().default(1024 * 1024),
-  batchTimeout: s.duration().default(1_000),
-  maxDatagramBytes: s.byteSize().default(65_507),
-  connectTimeout: s.duration().default(10_000),
-  retryInitialDelay: s.duration().default(250),
-  retryMaxDelay: s.duration().default(30_000),
+  message_field: s.fieldPath().optional(),
+  /** Groups events into batches before writing them. Default: 500 events / 1MiB / 1s. */
+  batch: batchSchema,
+  /** UDP only: a datagram larger than this is rejected rather than sent. Default 65507 (the
+   * maximum IPv4 UDP payload). */
+  max_datagram_size: s.byteSize().default(65_507),
+  connect_timeout: s.duration().default(10_000),
+  /** Reconnect/retry backoff for TCP connection and write failures. Default 250ms/30s. */
+  retry: retrySchema,
 });
 
 export type SyslogSinkOptions = Infer<typeof syslogSinkOptionsSchema>;
@@ -112,20 +113,20 @@ function resolveSeverity(
   levelMap: Record<string, number>,
   event: Event,
 ): number {
-  const explicit = numberField(event, options.severityField);
+  const explicit = numberField(event, options.severity_field);
   if (explicit !== undefined && explicit >= 0 && explicit <= 7) return explicit;
-  const level = stringField(event, options.levelField);
+  const level = stringField(event, options.level_field);
   if (level !== undefined) {
     const mapped = levelMap[level.toLowerCase()];
     if (mapped !== undefined) return mapped;
   }
-  return options.defaultSeverity;
+  return options.default_severity;
 }
 
 function resolveFacility(options: SyslogSinkOptions, event: Event): number {
-  const explicit = numberField(event, options.facilityField);
+  const explicit = numberField(event, options.facility_field);
   if (explicit !== undefined && explicit >= 0 && explicit <= 23) return explicit;
-  return options.defaultFacility;
+  return options.default_facility;
 }
 
 function structuredDataOf(event: Event): Map<string, Map<string, string>> {
@@ -154,7 +155,7 @@ function buildMessage(
   event: Event,
   now: Timestamp,
 ): Syslog5424Message {
-  const messagePath = options.messageField ?? DEFAULT_MESSAGE_PATH;
+  const messagePath = options.message_field ?? DEFAULT_MESSAGE_PATH;
   const message = stringField(event, messagePath);
   const msg: Syslog5424Message = {
     facility: resolveFacility(options, event),
@@ -164,8 +165,8 @@ function buildMessage(
     hostname:
       hostnameTemplate === undefined ? os.hostname() : renderTemplate(hostnameTemplate, event, now),
     appName: renderTemplate(appNameTemplate, event, now),
-    procId: stringField(event, options.procIdField),
-    msgId: stringField(event, options.msgIdField),
+    procId: stringField(event, options.proc_id_field),
+    msgId: stringField(event, options.msg_id_field),
     structuredData: structuredDataOf(event),
     message,
   };
@@ -193,10 +194,10 @@ function makeEncodeBatch(
       const msg = buildMessage(options, levelMap, appNameTemplate, hostnameTemplate, event, now);
       const bytes = utf8Encode(encodeSyslog5424(msg));
       if (options.protocol === 'udp') {
-        if (bytes.length > options.maxDatagramBytes) {
+        if (bytes.length > options.max_datagram_size) {
           ctx.logger.warn('syslog sink rejected an oversize UDP datagram', {
             size: bytes.length,
-            maxDatagramBytes: options.maxDatagramBytes,
+            max_datagram_size: options.max_datagram_size,
           });
           event.metadata.finalizers.finish('rejected');
           continue;
@@ -212,10 +213,10 @@ function makeEncodeBatch(
 
 export function createSyslogSink(options: SyslogSinkOptions): Sink {
   const levelMap: Record<string, number> = { ...DEFAULT_LEVEL_MAP };
-  if (options.levelMap !== undefined) {
-    for (const [name, severity] of options.levelMap) levelMap[name] = severity;
+  if (options.level_map !== undefined) {
+    for (const [name, severity] of options.level_map) levelMap[name] = severity;
   }
-  const appNameTemplate = compileTemplate(options.appName);
+  const appNameTemplate = compileTemplate(options.app_name);
   const hostnameTemplate =
     options.hostname !== undefined ? compileTemplate(options.hostname) : undefined;
   const framing = framingModeOf(options);
@@ -233,14 +234,16 @@ export function createSyslogSink(options: SyslogSinkOptions): Sink {
       const isUdp = options.protocol === 'udp';
       try {
         await runBatchedSink(ctx, {
-          maxEvents: isUdp ? 1 : options.batchMaxEvents,
-          ...(isUdp ? {} : { maxBytes: options.batchMaxBytes, timeoutMs: options.batchTimeout }),
+          maxEvents: isUdp ? 1 : (options.batch?.max_events ?? 500),
+          ...(isUdp
+            ? {}
+            : {
+                maxBytes: options.batch?.max_size ?? 1024 * 1024,
+                timeoutMs: options.batch?.timeout ?? 1_000,
+              }),
           encode: encodeBatch,
           send: (payload) => transport.send(payload, ctx.signal),
-          retry: new RetryPolicy({
-            initialDelayMs: options.retryInitialDelay,
-            maxDelayMs: options.retryMaxDelay,
-          }),
+          retry: buildRetryPolicy(options.retry ?? { initial_backoff: 250, max_backoff: 30_000 }),
         });
       } finally {
         await transport.close();
@@ -267,7 +270,7 @@ export const syslogSink = defineSink({
     { title: 'RFC 5424 over TCP with octet-counting', config: { host: '127.0.0.1', port: 6514 } },
     {
       title: 'Severity taken from a level field',
-      config: { host: '127.0.0.1', port: 514, protocol: 'udp', levelField: 'level' },
+      config: { host: '127.0.0.1', port: 514, protocol: 'udp', level_field: 'level' },
     },
   ],
   build: (options: SyslogSinkOptions, _ctx: BuildContext) => createSyslogSink(options),

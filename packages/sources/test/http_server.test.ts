@@ -117,10 +117,10 @@ describe('http_server: decoding errors and limits', () => {
     expect(json.error.message).not.toContain('Authorization');
   });
 
-  it('responds 413 for a body exceeding maxBodyBytes', async () => {
+  it('responds 413 for a body exceeding max_body_size', async () => {
     const { baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      maxBodyBytes: 16,
+      max_body_size: 16,
     });
     const response = await fetch(`${baseUrl}/`, {
       method: 'POST',
@@ -129,10 +129,10 @@ describe('http_server: decoding errors and limits', () => {
     expect(response.status).toBe(413);
   });
 
-  it('rejects a zip bomb: a small gzip body that decompresses past maxBodyBytes', async () => {
+  it('rejects a zip bomb: a small gzip body that decompresses past max_body_size', async () => {
     const { baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      maxBodyBytes: 1024,
+      max_body_size: 1024,
     });
     const huge = `{"message":"${'x'.repeat(1_000_000)}"}\n`;
     const compressed = gzipSync(Buffer.from(huge));
@@ -173,7 +173,7 @@ describe('http_server: authentication', () => {
   it('rejects requests with no Authorization header when bearer auth is required', async () => {
     const { baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      auth: { scheme: 'bearer', token: 'secret-token' },
+      auth: { strategy: 'bearer', token: 'secret-token' },
     });
     const response = await fetch(`${baseUrl}/`, { method: 'POST', body: '{}' });
     expect(response.status).toBe(401);
@@ -182,7 +182,7 @@ describe('http_server: authentication', () => {
   it('rejects an incorrect bearer token with 403', async () => {
     const { baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      auth: { scheme: 'bearer', token: 'secret-token' },
+      auth: { strategy: 'bearer', token: 'secret-token' },
     });
     const response = await fetch(`${baseUrl}/`, {
       method: 'POST',
@@ -195,7 +195,7 @@ describe('http_server: authentication', () => {
   it('accepts a correct bearer token', async () => {
     const { harness, baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      auth: { scheme: 'bearer', token: 'secret-token' },
+      auth: { strategy: 'bearer', token: 'secret-token' },
     });
     const responsePromise = fetch(`${baseUrl}/`, {
       method: 'POST',
@@ -210,7 +210,7 @@ describe('http_server: authentication', () => {
   it('accepts correct basic credentials and rejects incorrect ones', async () => {
     const { harness, baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      auth: { scheme: 'basic', username: 'alice', password: 'hunter2' },
+      auth: { strategy: 'basic', username: 'alice', password: 'hunter2' },
     });
     const bad = await fetch(`${baseUrl}/`, {
       method: 'POST',
@@ -234,7 +234,7 @@ describe('http_server: backpressure and acknowledgement outcomes', () => {
   it('responds 503 with Retry-After once the backpressure timeout elapses', async () => {
     const parsed = httpServerSource.options.parse({
       address: '127.0.0.1:0',
-      backpressureTimeoutMs: 200,
+      backpressure_timeout: 200,
     });
     const handle = (await httpServerSource.build(parsed, buildCtx())) as HttpServerSourceHandle;
     const harness = createControllableSourceContext();
@@ -279,10 +279,10 @@ describe('http_server: backpressure and acknowledgement outcomes', () => {
     expect(response.status).toBe(400);
   });
 
-  it('rejects requests over maxConcurrentRequests with 429', async () => {
+  it('rejects requests over max_concurrent_requests with 429', async () => {
     const { harness, baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      maxConcurrentRequests: 1,
+      max_concurrent_requests: 1,
     });
     harness.blockSends();
     const first = fetch(`${baseUrl}/`, { method: 'POST', body: '{"message":"a"}\n' });
@@ -337,7 +337,10 @@ describe('http_server: TLS', () => {
     await fs.writeFile(certFile, certPem);
     await fs.writeFile(keyFile, keyPem);
     try {
-      const { handle } = await startTracked({ address: '127.0.0.1:0', tls: { certFile, keyFile } });
+      const { handle } = await startTracked({
+        address: '127.0.0.1:0',
+        tls: { cert_file: certFile, key_file: keyFile },
+      });
       const addr = handle.address()!;
 
       // Node's fetch (undici) validates the peer certificate against the system trust store; a

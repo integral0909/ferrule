@@ -18,9 +18,9 @@ export const prometheusRemoteWriteSinkOptions = transportSchema.extend({
   url: s.url({ protocols: ['http', 'https'] }),
   /** How long a series may go unobserved before the next sample restarts its running total
    * instead of adding to a now-stale one. */
-  staleBound: s.duration({ minMs: 1 }).default(5 * 60_000),
-  batch: batchSchema.optional(),
-  retry: retrySchema.optional(),
+  stale_bound: s.duration({ minMs: 1 }).default(5 * 60_000),
+  batch: batchSchema,
+  retry: retrySchema,
   concurrency: concurrencySchema,
 });
 export type PrometheusRemoteWriteSinkOptions = Infer<typeof prometheusRemoteWriteSinkOptions>;
@@ -36,19 +36,25 @@ export const prometheusRemoteWriteSink = defineSink<PrometheusRemoteWriteSinkOpt
   description: 'Writes metrics to a Prometheus remote-write endpoint.',
   options: prometheusRemoteWriteSinkOptions,
   accepts: ['metric'],
+  examples: [
+    {
+      title: 'Write metrics to Prometheus remote-write',
+      config: { url: 'http://prometheus.internal:9090/api/v1/write' },
+    },
+  ],
   build: (options, ctx) => {
-    const accumulator = new MetricAccumulator(options.staleBound);
+    const accumulator = new MetricAccumulator(options.stale_bound);
     const client = new HttpClient({
       auth: options.auth,
       tls: options.tls,
       proxy: options.proxy,
       timeoutMs: options.timeout,
-      maxResponseBytes: options.maxResponseBytes,
+      maxResponseBytes: options.max_response_size,
       // Remote write mandates Snappy-compressed protobuf; this sink compresses the body itself
       // rather than delegating to the client's generic (gzip-only) request compression.
       compression: 'none',
       headers: options.headers,
-      maxSockets: options.maxSockets,
+      maxSockets: options.max_sockets,
       logger: ctx.logger,
     });
 
@@ -56,10 +62,10 @@ export const prometheusRemoteWriteSink = defineSink<PrometheusRemoteWriteSinkOpt
       async run(sinkCtx) {
         try {
           await runBatchedSink<Uint8Array | undefined>(sinkCtx, {
-            ...(options.batch?.maxEvents !== undefined
-              ? { maxEvents: options.batch.maxEvents }
+            ...(options.batch?.max_events !== undefined
+              ? { maxEvents: options.batch.max_events }
               : {}),
-            ...(options.batch?.maxBytes !== undefined ? { maxBytes: options.batch.maxBytes } : {}),
+            ...(options.batch?.max_size !== undefined ? { maxBytes: options.batch.max_size } : {}),
             timeoutMs: options.batch?.timeout ?? 1_000,
             encode: (events: Event[]) => {
               const nowMs = sinkCtx.clock.now().toMillis();

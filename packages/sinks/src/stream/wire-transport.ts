@@ -1,27 +1,16 @@
+import { readFileSync } from 'node:fs';
 import * as dgram from 'node:dgram';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { FerruleError } from '@ferrule/core';
 import { SinkError, type Logger } from '@ferrule/runtime';
-import { s, type Infer } from '@ferrule/schema';
-
-/** Shared TLS option shape for every sink that dials a raw TCP socket (`socket`, `syslog`). */
-export const tlsOptionsSchema = s.object({
-  enabled: s.boolean().default(false),
-  ca: s.string().optional(),
-  cert: s.string().optional(),
-  key: s.string().optional(),
-  rejectUnauthorized: s.boolean().default(true),
-  serverName: s.string().optional(),
-});
-
-export type TlsOptions = Infer<typeof tlsOptionsSchema>;
+import type { TlsOptions } from '../fragments.js';
 
 export interface WireEndpoint {
   readonly host: string;
   readonly port: number;
   readonly tls?: TlsOptions;
-  readonly connectTimeout: number;
+  readonly connect_timeout: number;
 }
 
 export interface Transport {
@@ -35,6 +24,55 @@ export interface Transport {
 export function describeError(error: unknown): string {
   if (error instanceof FerruleError) return `${error.code}: ${error.message}`;
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The subset of Node's `tls.connect()` options every raw-socket TLS dial in this package needs,
+ * resolved from the shared `tlsSchema` shape. */
+export interface ResolvedTlsConnectOptions {
+  readonly ca?: Buffer;
+  readonly cert?: Buffer;
+  readonly key?: Buffer;
+  readonly rejectUnauthorized: boolean;
+  readonly servername: string;
+}
+
+/**
+ * Reads the certificate/key files declared in `tlsOptions` (if any) and turns them into the
+ * options Node's `tls` module expects to dial out with. Shared by every sink in this package that
+ * dials a raw TCP/TLS socket itself — the stream family's `socket`/`syslog` sinks (via
+ * {@link TcpTransport}), Kafka's broker connections, and PostgreSQL's wire protocol client — so
+ * the file-reading and error-wrapping logic lives in exactly one place instead of one copy per
+ * caller. `errorCode` lets each caller surface a code consistent with its own family's other
+ * errors (e.g. `E_KAFKA_TLS_FILE`); it defaults to `E_SOCKET_TLS_FILE`.
+ */
+export function resolveTlsConnectOptions(
+  tlsOptions: TlsOptions | undefined,
+  defaultServerName: string,
+  errorCode = 'E_SOCKET_TLS_FILE',
+): ResolvedTlsConnectOptions {
+  return {
+    ...(tlsOptions?.ca_file !== undefined
+      ? { ca: readTlsFile(tlsOptions.ca_file, 'CA', errorCode) }
+      : {}),
+    ...(tlsOptions?.cert_file !== undefined
+      ? { cert: readTlsFile(tlsOptions.cert_file, 'client certificate', errorCode) }
+      : {}),
+    ...(tlsOptions?.key_file !== undefined
+      ? { key: readTlsFile(tlsOptions.key_file, 'client private key', errorCode) }
+      : {}),
+    rejectUnauthorized: tlsOptions?.verify_certificate ?? true,
+    servername: tlsOptions?.server_name ?? defaultServerName,
+  };
+}
+
+function readTlsFile(path: string, kind: string, errorCode: string): Buffer {
+  try {
+    return readFileSync(path);
+  } catch (cause) {
+    throw new FerruleError(errorCode, `cannot read ${kind} file ${JSON.stringify(path)}`, {
+      cause,
+    });
+  }
 }
 
 /**
@@ -87,21 +125,13 @@ export class TcpTransport implements Transport {
     return new Promise((resolve, reject) => {
       const useTls = this.endpoint.tls?.enabled === true;
       const socket = useTls
-        ? tls.connect({
-            host,
-            port,
-            ca: this.endpoint.tls?.ca,
-            cert: this.endpoint.tls?.cert,
-            key: this.endpoint.tls?.key,
-            rejectUnauthorized: this.endpoint.tls?.rejectUnauthorized ?? true,
-            servername: this.endpoint.tls?.serverName ?? host,
-          })
+        ? tls.connect({ host, port, ...resolveTlsConnectOptions(this.endpoint.tls, host) })
         : net.createConnection({ host, port });
       const timer = setTimeout(() => {
         cleanup();
         socket.destroy();
         reject(new Error(`connection to ${host}:${port} timed out`));
-      }, this.endpoint.connectTimeout);
+      }, this.endpoint.connect_timeout);
       const readyEvent = useTls ? 'secureConnect' : 'connect';
       const onReady = (): void => {
         cleanup();

@@ -28,5 +28,5 @@ sinks:
     signal: traces
     protocol: protobuf
     retry:
-      maxAttempts: 5
-      initialDelay: 200ms
+      max_attempts: 5
+      initial_backoff: 200ms

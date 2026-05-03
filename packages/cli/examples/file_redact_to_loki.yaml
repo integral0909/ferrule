@@ -10,8 +10,8 @@ sources:
   app_logs:
     type: file
     include: ['/var/log/myapp/*.log']
-    decoding: json
-    readFrom: end
+    decoding: { codec: json }
+    read_from: end
 
 transforms:
   redact:
@@ -39,5 +39,5 @@ sinks:
       max_size: 2GiB
       when_full: block
     retry:
-      maxAttempts: 10
-      maxDelay: 30s
+      max_attempts: 10
+      max_backoff: 30s

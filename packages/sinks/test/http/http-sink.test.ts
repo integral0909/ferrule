@@ -48,7 +48,7 @@ describe('http sink', () => {
     const options = httpSinkOptions.parse({
       url: server.url,
       framing: 'json_array',
-      codec: 'json',
+      encoding: { codec: 'json' },
     });
     const sink = await httpSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();
@@ -110,7 +110,7 @@ describe('http sink', () => {
     });
     const options = httpSinkOptions.parse({
       url: server.url,
-      retry: { maxAttempts: 2, initialDelay: 1, maxDelay: 5 },
+      retry: { max_attempts: 2, initial_backoff: 1, max_backoff: 5 },
     });
     const sink = await httpSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();
@@ -127,7 +127,7 @@ describe('http sink', () => {
     const options = httpSinkOptions.parse({
       url: server.url,
       headers: { 'x-team': 'observability' },
-      auth: { type: 'bearer', token: 'shh' },
+      auth: { strategy: 'bearer', token: 'shh' },
     });
     const sink = await httpSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();

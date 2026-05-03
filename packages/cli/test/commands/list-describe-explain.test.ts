@@ -45,7 +45,7 @@ describe('ferrule describe', () => {
     const code = await runCli(env);
     expect(code).toBe(EXIT_OK);
     expect(env.stdoutText()).toContain('demo_logs');
-    expect(env.stdoutText()).toContain('eventsPerSecond');
+    expect(env.stdoutText()).toContain('events_per_second');
   });
 
   it('prints JSON with the schema doc', async () => {

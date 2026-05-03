@@ -17,11 +17,11 @@ import { defineSource, type SourceContext } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
 
 const options = s.object({
-  intervalMs: s
+  interval: s
     .duration()
     .default(10_000)
     .describe('How often the current metrics snapshot is published.'),
-  namespaceOverride: s
+  namespace_override: s
     .string()
     .optional()
     .describe(
@@ -48,7 +48,7 @@ export const internalMetricsSource = defineSource<InternalMetricsOptions>({
   examples: [
     {
       title: 'Publish internal metrics every 15 seconds under a fixed namespace',
-      config: { intervalMs: '15s', namespaceOverride: 'ferrule' },
+      config: { interval: '15s', namespace_override: 'ferrule' },
     },
   ],
   build(opts) {
@@ -65,7 +65,7 @@ export const internalMetricsSource = defineSource<InternalMetricsOptions>({
 
         while (!ctx.signal.aborted) {
           try {
-            await ctx.clock.sleep(opts.intervalMs, ctx.signal);
+            await ctx.clock.sleep(opts.interval, ctx.signal);
           } catch {
             return;
           }
@@ -75,8 +75,8 @@ export const internalMetricsSource = defineSource<InternalMetricsOptions>({
           // implements `MetricsRecorder`. TypeScript already knows `snapshot` exists here from
           // the check above.
           let events = ctx.metrics.snapshot();
-          if (opts.namespaceOverride !== undefined) {
-            const namespace = opts.namespaceOverride;
+          if (opts.namespace_override !== undefined) {
+            const namespace = opts.namespace_override;
             events = events.map((event) => applyNamespaceOverride(event, namespace));
           }
           if (events.length === 0) continue;

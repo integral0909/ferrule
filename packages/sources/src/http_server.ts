@@ -29,8 +29,8 @@ import {
   type SourceContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { authSchema, decodingSchema, splitCodecOptions, tlsSchema } from './fragments.js';
 import {
-  authOptionsSchema,
   checkAuth,
   errorBody,
   loadTlsServerOptions,
@@ -41,7 +41,6 @@ import {
   retryAfterSeconds,
   sendEmpty,
   sendJson,
-  tlsOptionsSchema,
 } from './util/http.js';
 
 const options = s.object({
@@ -54,13 +53,11 @@ const options = s.object({
     .array(s.string().nonEmpty(), { minItems: 1, unique: true })
     .default(['/'])
     .describe('Request paths that accept event POSTs.'),
-  healthPath: s.string().default('/health').describe('Path that answers liveness checks with 200.'),
-  decoding: s
+  health_path: s
     .string()
-    .default('ndjson')
-    .describe('Codec name from the codec registry used to decode request bodies.')
-    .example('ndjson', 'json', 'logfmt', 'csv'),
-  decodingOptions: s.unknown().optional().describe('Options passed through to the codec decoder.'),
+    .default('/health')
+    .describe('Path that answers liveness checks with 200.'),
+  decoding: decodingSchema('ndjson'),
   framing: s
     .enum(['newline', 'whole'])
     .optional()
@@ -69,29 +66,29 @@ const options = s.object({
         'line-oriented codecs like ndjson/logfmt) or "whole" (the entire body is one frame, the ' +
         'default for document codecs like json/csv). Overrides the codec-based default.',
     ),
-  maxLineLength: s
+  max_line_length: s
     .byteSize()
     .default(1024 * 1024)
     .describe('Maximum length of one frame when framing is "newline".'),
-  maxBodyBytes: s
+  max_body_size: s
     .byteSize()
     .default(10 * 1024 * 1024)
     .describe('Maximum decompressed request body size. Larger bodies get 413.'),
-  maxCompressedBodyBytes: s
+  max_compressed_body_size: s
     .byteSize()
     .optional()
     .describe(
-      'Maximum request body size on the wire, before decompression. Defaults to maxBodyBytes.',
+      'Maximum request body size on the wire, before decompression. Defaults to max_body_size.',
     ),
-  maxConcurrentRequests: s
+  max_concurrent_requests: s
     .integer({ min: 1 })
     .default(1024)
     .describe('Requests processed at once. Excess requests get 429 immediately.'),
-  requestTimeoutMs: s
+  request_timeout: s
     .duration()
     .default(30_000)
     .describe('Time allowed to receive a full request before it is aborted.'),
-  backpressureTimeoutMs: s
+  backpressure_timeout: s
     .duration()
     .default(5_000)
     .describe(
@@ -99,26 +96,26 @@ const options = s.object({
         'up on that response and replies 503 with Retry-After (the events already handed to the ' +
         'output are not withdrawn — they may still be delivered after the response is sent).',
     ),
-  auth: authOptionsSchema(),
-  tls: tlsOptionsSchema(),
-  trustForwardedFor: s
+  auth: authSchema,
+  tls: tlsSchema,
+  trust_forwarded_for: s
     .boolean()
     .default(false)
     .describe('Take the client address from X-Forwarded-For instead of the socket peer.'),
   metadata: s
     .object({
-      remoteAddrField: s.string().default('http.remote_addr'),
-      pathField: s.string().default('http.path'),
-      queryField: s.string().default('http.query'),
+      remote_addr_field: s.string().default('http.remote_addr'),
+      path_field: s.string().default('http.path'),
+      query_field: s.string().default('http.query'),
       headers: s
         .array(s.string(), { unique: true })
         .default([])
         .describe('Header names copied to `http.headers.<lowercased name>`.'),
     })
     .default({
-      remoteAddrField: 'http.remote_addr',
-      pathField: 'http.path',
-      queryField: 'http.query',
+      remote_addr_field: 'http.remote_addr',
+      path_field: 'http.path',
+      query_field: 'http.query',
       headers: [],
     })
     .describe('Which request metadata is copied onto every decoded log event.'),
@@ -183,9 +180,9 @@ function applyMetadata(
 ): void {
   for (const event of events) {
     if (!isLogEvent(event)) continue;
-    if (fields.remoteAddr !== undefined) event.set(metadata.remoteAddrField, fields.remoteAddr);
-    event.set(metadata.pathField, fields.path);
-    if (fields.query !== '') event.set(metadata.queryField, fields.query);
+    if (fields.remoteAddr !== undefined) event.set(metadata.remote_addr_field, fields.remoteAddr);
+    event.set(metadata.path_field, fields.path);
+    if (fields.query !== '') event.set(metadata.query_field, fields.query);
     for (const [name, value] of fields.headers) event.set(`http.headers.${name}`, value);
   }
 }
@@ -206,23 +203,24 @@ export const httpServerSource = defineSource<HttpServerOptions>({
   type: 'http_server',
   description: 'Receives log, metric, or span events as HTTP POST request bodies.',
   options,
-  produces: (opts) => producesForCodec(opts.decoding),
+  produces: (opts) => producesForCodec(opts.decoding.codec),
   examples: [
     {
       title: 'Receive NDJSON logs with a bearer token',
       config: {
         address: '0.0.0.0:8080',
-        decoding: 'ndjson',
-        auth: { scheme: 'bearer', token: '${secret:TOKEN}' },
+        decoding: { codec: 'ndjson' },
+        auth: { strategy: 'bearer', token: '${secret:TOKEN}' },
       },
     },
   ],
   build(opts, _buildCtx): HttpServerSourceHandle {
     const codecs: CodecRegistry = defaultCodecs;
-    const decoder = codecs.createDecoder(opts.decoding, opts.decodingOptions);
-    const framing = opts.framing ?? defaultFraming(opts.decoding);
+    const [decodingCodec, decodingOptions] = splitCodecOptions(opts.decoding);
+    const decoder = codecs.createDecoder(decodingCodec, decodingOptions);
+    const framing = opts.framing ?? defaultFraming(decodingCodec);
     const acceptedPaths = new Set(opts.paths);
-    const maxCompressed = opts.maxCompressedBodyBytes ?? opts.maxBodyBytes;
+    const maxCompressed = opts.max_compressed_body_size ?? opts.max_body_size;
 
     let boundAddress: { host: string; port: number } | undefined;
 
@@ -239,8 +237,8 @@ export const httpServerSource = defineSource<HttpServerOptions>({
         opts.tls === undefined
           ? createHttpServer()
           : createHttpsServer(await loadTlsServerOptions(opts.tls));
-      server.requestTimeout = opts.requestTimeoutMs;
-      server.headersTimeout = Math.min(server.headersTimeout, Math.max(1, opts.requestTimeoutMs));
+      server.requestTimeout = opts.request_timeout;
+      server.headersTimeout = Math.min(server.headersTimeout, Math.max(1, opts.request_timeout));
 
       const sockets = new Set<Socket>();
       server.on('connection', (socket) => {
@@ -276,7 +274,7 @@ export const httpServerSource = defineSource<HttpServerOptions>({
           // open) must let it finish rather than cutting its body read short.
           body = await readLimitedBody(req, {
             encoding,
-            maxBytes: opts.maxBodyBytes,
+            maxBytes: opts.max_body_size,
             maxCompressedBytes: maxCompressed,
           });
         } catch (error) {
@@ -287,7 +285,7 @@ export const httpServerSource = defineSource<HttpServerOptions>({
         }
         let frames: Uint8Array[];
         try {
-          frames = frameBody(body, framing, opts.maxLineLength);
+          frames = frameBody(body, framing, opts.max_line_length);
         } catch (error) {
           return {
             status: 400,
@@ -320,7 +318,7 @@ export const httpServerSource = defineSource<HttpServerOptions>({
         applyMetadata(
           events,
           {
-            remoteAddr: remoteAddress(req, opts.trustForwardedFor),
+            remoteAddr: remoteAddress(req, opts.trust_forwarded_for),
             path: url.pathname,
             query: url.search.startsWith('?') ? url.search.slice(1) : url.search,
             headers: headerFields,
@@ -342,7 +340,7 @@ export const httpServerSource = defineSource<HttpServerOptions>({
         try {
           raceResult = await Promise.race([
             sendPromise.then((): 'sent' => 'sent'),
-            ctx.clock.sleep(opts.backpressureTimeoutMs).then((): 'timed_out' => 'timed_out'),
+            ctx.clock.sleep(opts.backpressure_timeout).then((): 'timed_out' => 'timed_out'),
           ]);
         } catch (error) {
           // `sendPromise` rejected outright (e.g. the pipeline force-finalized this batch during
@@ -365,7 +363,7 @@ export const httpServerSource = defineSource<HttpServerOptions>({
           return {
             status: 503,
             body: errorBody('E_BACKPRESSURE', 'the pipeline is applying backpressure; retry later'),
-            headers: { 'retry-after': String(retryAfterSeconds(opts.backpressureTimeoutMs)) },
+            headers: { 'retry-after': String(retryAfterSeconds(opts.backpressure_timeout)) },
           };
         }
 
@@ -393,7 +391,7 @@ export const httpServerSource = defineSource<HttpServerOptions>({
         requestsReceived.increment();
         try {
           const url = new URL(req.url ?? '/', 'http://placeholder');
-          if (req.method === 'GET' && url.pathname === opts.healthPath) {
+          if (req.method === 'GET' && url.pathname === opts.health_path) {
             sendJson(res, shuttingDown ? 503 : 200, {
               status: shuttingDown ? 'shutting_down' : 'ok',
             });
@@ -403,7 +401,7 @@ export const httpServerSource = defineSource<HttpServerOptions>({
             sendJson(res, 404, errorBody('E_NOT_FOUND', 'no such route'));
             return;
           }
-          if (activeRequests > opts.maxConcurrentRequests) {
+          if (activeRequests > opts.max_concurrent_requests) {
             requestsRejected.increment();
             sendJson(res, 429, errorBody('E_TOO_MANY_REQUESTS', 'too many concurrent requests'), {
               'retry-after': '1',

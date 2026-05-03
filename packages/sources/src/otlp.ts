@@ -3,7 +3,7 @@
  * Protocol over HTTP — https://opentelemetry.io/docs/specs/otlp/#otlphttp). Shares its HTTP
  * plumbing (bounded/decompressing body reads, auth, TLS, response helpers) with `http_server`
  * via `./util/http.js`; what is specific to this source is OTLP's fixed routing
- * (`<basePath>/logs|metrics|traces`), its two wire formats (protobuf and OTLP/JSON), and its
+ * (`<base_path>/logs|metrics|traces`), its two wire formats (protobuf and OTLP/JSON), and its
  * response conventions (an `Export<Signal>ServiceResponse` body on success, a
  * `google.rpc.Status`-shaped body on failure). Decoding is always delegated to
  * `@ferrule/codecs`'s OTLP decoders — this file never parses OTLP bytes itself.
@@ -35,15 +35,14 @@ import {
   type SourceContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { authSchema, tlsSchema } from './fragments.js';
 import {
-  authOptionsSchema,
   checkAuth,
   loadTlsServerOptions,
   parseContentEncoding,
   PayloadTooLargeError,
   readLimitedBody,
   retryAfterSeconds,
-  tlsOptionsSchema,
 } from './util/http.js';
 
 const options = s.object({
@@ -55,34 +54,37 @@ const options = s.object({
         'conventional OTLP/HTTP port.',
     )
     .example('0.0.0.0:4318'),
-  basePath: s
+  base_path: s
     .string()
     .nonEmpty()
     .default('/v1')
     .describe(
-      'Base path OTLP endpoints are mounted under: POSTs to "<basePath>/logs", ' +
-        '"<basePath>/metrics", and "<basePath>/traces" are accepted.',
+      'Base path OTLP endpoints are mounted under: POSTs to "<base_path>/logs", ' +
+        '"<base_path>/metrics", and "<base_path>/traces" are accepted.',
     ),
-  healthPath: s.string().default('/health').describe('Path that answers liveness checks with 200.'),
-  maxBodyBytes: s
+  health_path: s
+    .string()
+    .default('/health')
+    .describe('Path that answers liveness checks with 200.'),
+  max_body_size: s
     .byteSize()
     .default(10 * 1024 * 1024)
     .describe('Maximum decompressed request body size. Larger bodies get 413.'),
-  maxCompressedBodyBytes: s
+  max_compressed_body_size: s
     .byteSize()
     .optional()
     .describe(
-      'Maximum request body size on the wire, before decompression. Defaults to maxBodyBytes.',
+      'Maximum request body size on the wire, before decompression. Defaults to max_body_size.',
     ),
-  maxConcurrentRequests: s
+  max_concurrent_requests: s
     .integer({ min: 1 })
     .default(1024)
     .describe('Requests processed at once. Excess requests get 429 immediately.'),
-  requestTimeoutMs: s
+  request_timeout: s
     .duration()
     .default(30_000)
     .describe('Time allowed to receive a full request before it is aborted.'),
-  backpressureTimeoutMs: s
+  backpressure_timeout: s
     .duration()
     .default(5_000)
     .describe(
@@ -90,8 +92,8 @@ const options = s.object({
         'up on that response and replies 503 with Retry-After (the events already handed to the ' +
         'output are not withdrawn — they may still be delivered after the response is sent).',
     ),
-  auth: authOptionsSchema(),
-  tls: tlsOptionsSchema(),
+  auth: authSchema,
+  tls: tlsSchema,
 });
 
 export type OtlpOptions = Infer<typeof options>;
@@ -306,8 +308,8 @@ export const otlpSource = defineSource<OtlpOptions>({
     },
   ],
   build(opts, _buildCtx): OtlpSourceHandle {
-    const maxCompressed = opts.maxCompressedBodyBytes ?? opts.maxBodyBytes;
-    const base = opts.basePath.endsWith('/') ? opts.basePath.slice(0, -1) : opts.basePath;
+    const maxCompressed = opts.max_compressed_body_size ?? opts.max_body_size;
+    const base = opts.base_path.endsWith('/') ? opts.base_path.slice(0, -1) : opts.base_path;
     const routes: Record<string, OtlpSignal> = {
       [`${base}/logs`]: 'logs',
       [`${base}/metrics`]: 'metrics',
@@ -329,8 +331,8 @@ export const otlpSource = defineSource<OtlpOptions>({
         opts.tls === undefined
           ? createHttpServer()
           : createHttpsServer(await loadTlsServerOptions(opts.tls));
-      server.requestTimeout = opts.requestTimeoutMs;
-      server.headersTimeout = Math.min(server.headersTimeout, Math.max(1, opts.requestTimeoutMs));
+      server.requestTimeout = opts.request_timeout;
+      server.headersTimeout = Math.min(server.headersTimeout, Math.max(1, opts.request_timeout));
 
       const sockets = new Set<Socket>();
       server.on('connection', (socket) => {
@@ -383,7 +385,7 @@ export const otlpSource = defineSource<OtlpOptions>({
           // `onAbort`).
           body = await readLimitedBody(req, {
             encoding,
-            maxBytes: opts.maxBodyBytes,
+            maxBytes: opts.max_body_size,
             maxCompressedBytes: maxCompressed,
           });
         } catch (error) {
@@ -421,7 +423,7 @@ export const otlpSource = defineSource<OtlpOptions>({
         try {
           raceResult = await Promise.race([
             sendPromise.then((): 'sent' => 'sent'),
-            ctx.clock.sleep(opts.backpressureTimeoutMs).then((): 'timed_out' => 'timed_out'),
+            ctx.clock.sleep(opts.backpressure_timeout).then((): 'timed_out' => 'timed_out'),
           ]);
         } catch (error) {
           ctx.logger.warn('otlp: send failed', {
@@ -444,7 +446,7 @@ export const otlpSource = defineSource<OtlpOptions>({
             503,
             RpcCode.UNAVAILABLE,
             'the pipeline is applying backpressure; retry later',
-            { 'retry-after': String(retryAfterSeconds(opts.backpressureTimeoutMs)) },
+            { 'retry-after': String(retryAfterSeconds(opts.backpressure_timeout)) },
           );
           return;
         }
@@ -487,7 +489,7 @@ export const otlpSource = defineSource<OtlpOptions>({
         requestsReceived.increment();
         try {
           const url = new URL(req.url ?? '/', 'http://placeholder');
-          if (req.method === 'GET' && url.pathname === opts.healthPath) {
+          if (req.method === 'GET' && url.pathname === opts.health_path) {
             const body = jsonRpcStatus(0, shuttingDown ? 'shutting_down' : 'ok');
             writeResponse(res, shuttingDown ? 503 : 200, 'json', body);
             return;
@@ -503,7 +505,7 @@ export const otlpSource = defineSource<OtlpOptions>({
             });
             return;
           }
-          if (activeRequests > opts.maxConcurrentRequests) {
+          if (activeRequests > opts.max_concurrent_requests) {
             requestsRejected.increment();
             sendStatus(
               res,

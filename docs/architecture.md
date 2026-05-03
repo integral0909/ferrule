@@ -225,7 +225,7 @@ sources:
   app_logs:
     type: http
     address: 0.0.0.0:8080
-    decoding: json
+    decoding: { codec: json }
 
 transforms:
   shape:
@@ -242,6 +242,8 @@ sinks:
     endpoint: https://clickhouse.internal:8443
     table: logs
     auth:
+      strategy: basic
+      username: ferrule
       password: ${secret:CLICKHOUSE_PASSWORD}
     buffer:
       type: disk

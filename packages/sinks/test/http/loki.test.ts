@@ -80,12 +80,12 @@ describe('loki sink', () => {
     expect([...byLevel.keys()].sort()).toEqual(['error', 'info']);
   });
 
-  it('sorts entries within a stream ascending by timestamp when outOfOrder is "sort"', async () => {
+  it('sorts entries within a stream ascending by timestamp when out_of_order is "sort"', async () => {
     server = await startServer((_req, res) => res.end());
     const options = lokiSinkOptions.parse({
       url: server.url,
       labels: { job: 'x' },
-      timestampField: '.timestamp',
+      timestamp_field: '.timestamp',
     });
     const sink = await lokiSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();
@@ -102,12 +102,12 @@ describe('loki sink', () => {
     expect(body.streams[0]!.values.map(([, line]) => line)).toEqual(['early', 'late']);
   });
 
-  it('rejects events for a new stream once maxStreams is reached, without touching existing streams', async () => {
+  it('rejects events for a new stream once max_streams is reached, without touching existing streams', async () => {
     server = await startServer((_req, res) => res.end());
     const options = lokiSinkOptions.parse({
       url: server.url,
       labels: { level: '{{ level }}' },
-      maxStreams: 1,
+      max_streams: 1,
     });
     const sink = await lokiSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();
@@ -131,7 +131,7 @@ describe('loki sink', () => {
     const options = lokiSinkOptions.parse({
       url: server.url,
       labels: { job: 'x' },
-      retry: { maxAttempts: 1 },
+      retry: { max_attempts: 1 },
     });
     const sink = await lokiSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();

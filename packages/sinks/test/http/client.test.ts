@@ -45,7 +45,7 @@ describe('HttpClient — basic request/response', () => {
 describe('applyAuth', () => {
   it('basic: sets a base64 Authorization header', () => {
     const headers: Record<string, string> = {};
-    applyAuth(headers, { type: 'basic', username: 'alice', password: 'wonderland' });
+    applyAuth(headers, { strategy: 'basic', username: 'alice', password: 'wonderland' });
     expect(headers['authorization']).toBe(
       `Basic ${Buffer.from('alice:wonderland').toString('base64')}`,
     );
@@ -53,20 +53,20 @@ describe('applyAuth', () => {
 
   it('bearer: sets a Bearer Authorization header', () => {
     const headers: Record<string, string> = {};
-    applyAuth(headers, { type: 'bearer', token: 'tok123' });
+    applyAuth(headers, { strategy: 'bearer', token: 'tok123' });
     expect(headers['authorization']).toBe('Bearer tok123');
   });
 
   it('header: sets an arbitrary named header', () => {
     const headers: Record<string, string> = {};
-    applyAuth(headers, { type: 'header', name: 'X-Api-Key', value: 'secret' });
+    applyAuth(headers, { strategy: 'header', name: 'X-Api-Key', value: 'secret' });
     expect(headers['x-api-key']).toBe('secret');
   });
 
   it('none / undefined: does nothing', () => {
     const headers: Record<string, string> = {};
     applyAuth(headers, undefined);
-    applyAuth(headers, { type: 'none' });
+    applyAuth(headers, { strategy: 'none' });
     expect(headers).toEqual({});
   });
 });
@@ -76,7 +76,7 @@ describe('HttpClient — auth end to end', () => {
     server = await startServer((_req, res) => res.end('ok'));
     const client = new HttpClient({
       logger: logger(),
-      auth: { type: 'basic', username: 'u', password: 'p' },
+      auth: { strategy: 'basic', username: 'u', password: 'p' },
     });
     await client.request({ method: 'GET', url: server.url });
     expect(server.requests[0]!.headers['authorization']).toBe(
@@ -223,21 +223,21 @@ describe('resolveProxy', () => {
     const env = { HTTP_PROXY: 'http://from-env:8080' };
     const resolved = resolveProxy(
       new URL('http://example.com'),
-      { useEnv: true, url: 'http://explicit:9' },
+      { use_env: true, url: 'http://explicit:9' },
       env,
     );
     expect(resolved).toMatchObject({ hostname: 'explicit', port: 9 });
   });
 
-  it('useEnv: false ignores the environment entirely', () => {
+  it('use_env: false ignores the environment entirely', () => {
     const env = { HTTP_PROXY: 'http://from-env:8080' };
-    expect(resolveProxy(new URL('http://example.com'), { useEnv: false }, env)).toBeUndefined();
+    expect(resolveProxy(new URL('http://example.com'), { use_env: false }, env)).toBeUndefined();
   });
 
   it('extracts basic-auth credentials embedded in the proxy URL', () => {
     const resolved = resolveProxy(
       new URL('http://x.com'),
-      { useEnv: true, url: 'http://user:pass@proxy:8080' },
+      { use_env: true, url: 'http://user:pass@proxy:8080' },
       {},
     );
     expect(resolved?.auth).toEqual({ username: 'user', password: 'pass' });
@@ -249,7 +249,7 @@ describe('HttpClient — plain HTTP target through a forward proxy', () => {
     server = await startServer((_req, res) => res.end('via-proxy'));
     const client = new HttpClient({
       logger: logger(),
-      proxy: { useEnv: false, url: server.url },
+      proxy: { use_env: false, url: server.url },
     });
     const response = await client.request({
       method: 'GET',
@@ -276,7 +276,7 @@ describe('HttpClient — HTTPS target through a proxy (CONNECT tunnel failure pa
 
     const client = new HttpClient({
       logger: logger(),
-      proxy: { useEnv: false, url: `http://127.0.0.1:${port}` },
+      proxy: { use_env: false, url: `http://127.0.0.1:${port}` },
       timeoutMs: 2_000,
     });
     await expect(

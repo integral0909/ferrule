@@ -136,22 +136,22 @@ describe('prometheus_scrape: happy path', () => {
     finishAll(events);
   });
 
-  it('with honorLabels: true, preserves an existing instance label from the scraped body', async () => {
+  it('with honor_labels: true, preserves an existing instance label from the scraped body', async () => {
     const body = '# TYPE up gauge\nup{instance="custom-instance"} 1\n';
     const { url } = await makeServer(textResponder(body));
     const { harness } = await startTracked({
       targets: [{ url, job: 'my_job', instance: 'config-instance' }],
-      honorLabels: true,
+      honor_labels: true,
     });
     await waitUntil(() => harness.sent.length === 1);
     const events = harness.sent[0]!.events.filter(isMetricEvent);
     expect(events[0]!.tags.get('instance')).toBe('custom-instance');
-    // job was absent from the scraped body, so honorLabels still fills it in from config.
+    // job was absent from the scraped body, so honor_labels still fills it in from config.
     expect(events[0]!.tags.get('job')).toBe('my_job');
     finishAll(events);
   });
 
-  it('with honorLabels: false (default), overwrites an existing instance label from the body', async () => {
+  it('with honor_labels: false (default), overwrites an existing instance label from the body', async () => {
     const body = '# TYPE up gauge\nup{instance="custom-instance"} 1\n';
     const { url } = await makeServer(textResponder(body));
     const { harness } = await startTracked({
@@ -220,13 +220,13 @@ describe('prometheus_scrape: per-target failures', () => {
     );
   });
 
-  it('aborts a target that never responds after scrapeTimeoutMs', async () => {
+  it('aborts a target that never responds after scrape_timeout', async () => {
     const { url } = await makeServer((_req, _res) => {
       // Never calls res.end(): the request hangs until the client gives up.
     });
     const { harness } = await startTracked({
       targets: [{ url }],
-      scrapeTimeoutMs: 100,
+      scrape_timeout: 100,
     });
     await waitUntil(
       () => counterValue(harness, 'prometheus_scrape_failures_total', { target: url }) === 1,
@@ -279,7 +279,7 @@ describe('prometheus_scrape: interval loop', () => {
     });
     const { harness, runPromise } = await startTracked({
       targets: [{ url }],
-      intervalMs: 1000,
+      interval: 1000,
     });
 
     await waitUntil(() => harness.sent.length === 1);

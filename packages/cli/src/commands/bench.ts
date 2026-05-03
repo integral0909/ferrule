@@ -67,7 +67,12 @@ export const benchCommand: Command = {
     }
 
     const spec: TopologySpec = {
-      sources: { demo: { type: 'demo_logs', options: { format: 'json', eventsPerSecond } } },
+      sources: {
+        demo: {
+          type: 'demo_logs',
+          options: { format: 'json', events_per_second: eventsPerSecond },
+        },
+      },
       transforms:
         scriptSource !== undefined
           ? { xform: { type: 'script', options: { source: scriptSource }, inputs: ['demo'] } }

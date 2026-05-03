@@ -17,17 +17,12 @@ function baseOptions(overrides: Partial<SocketSinkOptions>): SocketSinkOptions {
     protocol: 'tcp',
     host: '127.0.0.1',
     port: 0,
-    encoding: 'json',
-    framing: 'newline',
-    lengthPrefixWidth: 'u32',
-    lengthPrefixEndianness: 'BE',
-    batchMaxEvents: 500,
-    batchMaxBytes: 1024 * 1024,
-    batchTimeout: 1_000,
-    maxDatagramBytes: 65_507,
-    connectTimeout: 2_000,
-    retryInitialDelay: 10,
-    retryMaxDelay: 50,
+    encoding: { codec: 'json' },
+    framing: { method: 'newline' },
+    batch: { max_events: 500, max_size: 1024 * 1024, timeout: 1_000 },
+    max_datagram_size: 65_507,
+    connect_timeout: 2_000,
+    retry: { initial_backoff: 10, max_backoff: 50 },
     ...overrides,
   };
 }
@@ -114,7 +109,7 @@ describe('socket sink (TCP)', () => {
     await new Promise<void>((r) => probe.close(() => r()));
 
     const sink = createSocketSink(
-      baseOptions({ protocol: 'tcp', port, retryInitialDelay: 5, retryMaxDelay: 20 }),
+      baseOptions({ protocol: 'tcp', port, retry: { initial_backoff: 5, max_backoff: 20 } }),
     );
     const ctx = createTestSinkContext();
     const event = LogEvent.fromMessage('delayed');
@@ -156,7 +151,9 @@ describe('socket sink (TCP)', () => {
 describe('socket sink (UDP)', () => {
   it('sends one datagram per event', async () => {
     const { port, received } = await startUdpServer();
-    const sink = createSocketSink(baseOptions({ protocol: 'udp', port, encoding: 'text' }));
+    const sink = createSocketSink(
+      baseOptions({ protocol: 'udp', port, encoding: { codec: 'text' } }),
+    );
     const ctx = createTestSinkContext();
     const event = LogEvent.fromMessage('hello-udp');
     const completion = withFinalizer(event);
@@ -174,7 +171,7 @@ describe('socket sink (UDP)', () => {
   it('rejects an oversize UDP datagram instead of sending it', async () => {
     const { port } = await startUdpServer();
     const sink = createSocketSink(
-      baseOptions({ protocol: 'udp', port, encoding: 'text', maxDatagramBytes: 4 }),
+      baseOptions({ protocol: 'udp', port, encoding: { codec: 'text' }, max_datagram_size: 4 }),
     );
     const ctx = createTestSinkContext();
     const event = LogEvent.fromMessage('this is way too long for the limit');

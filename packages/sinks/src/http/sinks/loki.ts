@@ -21,7 +21,7 @@ const LABEL_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 export const lokiSinkOptions = transportSchema.extend({
   /** Loki's base URL, e.g. `https://loki.internal:3100`. */
   url: s.url({ protocols: ['http', 'https'] }),
-  pushPath: s.string().default('/loki/api/v1/push'),
+  push_path: s.string().default('/loki/api/v1/push'),
   /** Sent as `X-Scope-OrgID` for multi-tenant Loki deployments. */
   tenant: s.string().optional(),
   /** Stream labels, as `name -> {{ field.path }}` templates. Label names must match
@@ -30,17 +30,17 @@ export const lokiSinkOptions = transportSchema.extend({
   /** Template for the log line. Defaults to `.message` (or the whole event as JSON if absent). */
   line: s.string().optional(),
   /** Field holding a `Timestamp` to use as the entry's time. Defaults to when Ferrule received it. */
-  timestampField: s.fieldPath().optional(),
+  timestamp_field: s.fieldPath().optional(),
   /** `sort` (default) sorts entries within a stream ascending by timestamp before sending, since
    * Loki (without out-of-order ingestion enabled) rejects a decreasing timestamp within a stream.
    * `passthrough` sends entries in arrival order and lets Loki apply its own policy. */
-  outOfOrder: s.enum(['sort', 'passthrough']).default('sort'),
+  out_of_order: s.enum(['sort', 'passthrough']).default('sort'),
   /** Caps the number of distinct label combinations (streams) this sink will track; events for a
    * new combination beyond the cap are rejected rather than accepted into an unbounded set of
    * streams. */
-  maxStreams: s.integer({ min: 1 }).default(10_000),
-  batch: batchSchema.optional(),
-  retry: retrySchema.optional(),
+  max_streams: s.integer({ min: 1 }).default(10_000),
+  batch: batchSchema,
+  retry: retrySchema,
   concurrency: concurrencySchema,
 });
 export type LokiSinkOptions = Infer<typeof lokiSinkOptions>;
@@ -57,6 +57,15 @@ export const lokiSink = defineSink<LokiSinkOptions>({
   description: 'Pushes log lines to a Loki-compatible push API, partitioned by label set.',
   options: lokiSinkOptions,
   accepts: ['log', 'metric', 'span'],
+  examples: [
+    {
+      title: 'Push logs to Loki, labeled by service and level',
+      config: {
+        url: 'https://loki.internal:3100',
+        labels: { service: '{{ service }}', level: '{{ level }}' },
+      },
+    },
+  ],
   build: (options, ctx) => {
     const labelTemplates = new Map<string, CompiledFieldTemplate>();
     for (const [name, template] of options.labels) {
@@ -70,19 +79,19 @@ export const lokiSink = defineSink<LokiSinkOptions>({
     }
     const lineTemplate =
       options.line !== undefined ? compileFieldTemplate(options.line) : undefined;
-    const timestampField = options.timestampField;
+    const timestampField = options.timestamp_field;
     const seenStreams = new Set<string>();
-    const pushUrl = new URL(options.pushPath, options.url).toString();
+    const pushUrl = new URL(options.push_path, options.url).toString();
 
     const client = new HttpClient({
       auth: options.auth,
       tls: options.tls,
       proxy: options.proxy,
       timeoutMs: options.timeout,
-      maxResponseBytes: options.maxResponseBytes,
+      maxResponseBytes: options.max_response_size,
       compression: options.compression,
       headers: options.headers,
-      maxSockets: options.maxSockets,
+      maxSockets: options.max_sockets,
       logger: ctx.logger,
     });
 
@@ -138,20 +147,20 @@ export const lokiSink = defineSink<LokiSinkOptions>({
       async run(sinkCtx) {
         try {
           await runBatchedSink<LokiPayload | undefined>(sinkCtx, {
-            ...(options.batch?.maxEvents !== undefined
-              ? { maxEvents: options.batch.maxEvents }
+            ...(options.batch?.max_events !== undefined
+              ? { maxEvents: options.batch.max_events }
               : {}),
-            ...(options.batch?.maxBytes !== undefined ? { maxBytes: options.batch.maxBytes } : {}),
+            ...(options.batch?.max_size !== undefined ? { maxBytes: options.batch.max_size } : {}),
             timeoutMs: options.batch?.timeout ?? 1_000,
             partitionKey: (event) => streamSignature(labelsFor(event)),
             encode: (events) => {
               const labels = labelsFor(events[0]!);
               const signature = streamSignature(labels);
               if (!seenStreams.has(signature)) {
-                if (seenStreams.size >= options.maxStreams) {
+                if (seenStreams.size >= options.max_streams) {
                   ctx.logger.warn('loki: label-cardinality limit reached; rejecting new stream', {
                     labels,
-                    limit: options.maxStreams,
+                    limit: options.max_streams,
                   });
                   for (const event of events) event.metadata.finalizers.finish('rejected');
                   return undefined;
@@ -162,7 +171,7 @@ export const lokiSink = defineSink<LokiSinkOptions>({
                 timestampNanos(event),
                 lineFor(event),
               ]);
-              if (options.outOfOrder === 'sort') {
+              if (options.out_of_order === 'sort') {
                 values.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
               }
               return { labels, values };

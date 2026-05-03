@@ -14,11 +14,11 @@ import { s, type Infer } from '@ferrule/schema';
 
 export const prometheusExporterSinkOptions = s.object({
   /** Listen address. Port `0` binds an OS-assigned ephemeral port (useful in tests). */
-  listenAddress: s.socketAddress(true),
+  listen_address: s.socketAddress(true),
   path: s.string().default('/metrics'),
   /** A series not observed for longer than this is dropped from the next scrape. */
-  staleBound: s.duration({ minMs: 1 }).default(5 * 60_000),
-  includeTimestamps: s.boolean().default(false),
+  stale_bound: s.duration({ minMs: 1 }).default(5 * 60_000),
+  include_timestamps: s.boolean().default(false),
 });
 export type PrometheusExporterSinkOptions = Infer<typeof prometheusExporterSinkOptions>;
 
@@ -94,6 +94,7 @@ export const prometheusExporterSink = defineSink<PrometheusExporterSinkOptions>(
   description: 'Serves the latest metric values as a Prometheus scrape endpoint.',
   options: prometheusExporterSinkOptions,
   accepts: ['metric'],
+  examples: [{ title: 'Serve /metrics on port 9102', config: { listen_address: '0.0.0.0:9102' } }],
   build: (options, ctx) => {
     const store = new SeriesStore();
     const scrapePath = options.path;
@@ -113,8 +114,8 @@ export const prometheusExporterSink = defineSink<PrometheusExporterSinkOptions>(
             return;
           }
           const nowMs = sinkCtx.clock.now().toMillis();
-          const text = encodePrometheusText(store.snapshot(nowMs, options.staleBound), {
-            includeTimestamps: options.includeTimestamps,
+          const text = encodePrometheusText(store.snapshot(nowMs, options.stale_bound), {
+            includeTimestamps: options.include_timestamps,
           });
           res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
           res.end(text);
@@ -122,13 +123,13 @@ export const prometheusExporterSink = defineSink<PrometheusExporterSinkOptions>(
 
         await new Promise<void>((resolve, reject) => {
           server.once('error', reject);
-          server.listen(options.listenAddress.port, options.listenAddress.host, () => resolve());
+          server.listen(options.listen_address.port, options.listen_address.host, () => resolve());
         });
         const bound = server.address();
         const boundPort =
-          typeof bound === 'object' && bound !== null ? bound.port : options.listenAddress.port;
+          typeof bound === 'object' && bound !== null ? bound.port : options.listen_address.port;
         ctx.logger.info('prometheus_exporter: listening', {
-          host: options.listenAddress.host,
+          host: options.listen_address.host,
           port: boundPort,
           path: scrapePath,
         });

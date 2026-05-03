@@ -3,7 +3,6 @@ import { stringifyValue } from '@ferrule/codecs';
 import {
   defineSink,
   runBatchedSink,
-  RetryPolicy,
   SinkError,
   type BuildContext,
   type Logger,
@@ -11,8 +10,8 @@ import {
   type SinkContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { batchSchema, buildRetryPolicy, retrySchema, tlsSchema } from '../fragments.js';
 import { getEventField } from '../stream/template.js';
-import { tlsOptionsSchema } from '../stream/wire-transport.js';
 import { encodeCopyCsvRow, encodeCopyTextRow } from './copy-format.js';
 import { PostgresError } from './errors.js';
 import { PgPool, type PgPoolOptions } from './pool.js';
@@ -34,8 +33,8 @@ export const postgresSinkOptionsSchema = s.object({
   database: s.string().nonEmpty(),
   user: s.string().nonEmpty(),
   password: s.string().secret().optional(),
-  applicationName: s.string().default('ferrule'),
-  tls: tlsOptionsSchema.optional(),
+  application_name: s.string().default('ferrule'),
+  tls: tlsSchema,
   /** Table name, optionally schema-qualified (`"public.events"`). Quoted automatically. */
   table: s.string().nonEmpty(),
   /** Column mapping: destination column name, source event field, and its coercion type. */
@@ -47,17 +46,16 @@ export const postgresSinkOptionsSchema = s.object({
     }),
     { minItems: 1 },
   ),
-  copyFormat: s.enum(['text', 'csv']).default('text'),
-  maxConnections: s.integer({ min: 1 }).default(5),
-  connectTimeout: s.duration().default(10_000),
-  batchMaxEvents: s.integer({ min: 1 }).default(1_000),
-  batchMaxBytes: s.byteSize().default(4 * 1024 * 1024),
-  batchTimeout: s.duration().default(1_000),
+  copy_format: s.enum(['text', 'csv']).default('text'),
+  max_connections: s.integer({ min: 1 }).default(5),
+  connect_timeout: s.duration().default(10_000),
+  /** Groups events into batches before running COPY. Default: 1000 events / 4MiB / 1s. */
+  batch: batchSchema,
   /** On a permanent (constraint/data) error, bisect the batch to isolate and reject only the bad
    * row(s) instead of the whole batch. Default `true`. */
-  bisectOnFailure: s.boolean().default(true),
-  retryInitialDelay: s.duration().default(250),
-  retryMaxDelay: s.duration().default(30_000),
+  bisect_on_failure: s.boolean().default(true),
+  /** Retry backoff for connection and COPY failures. Default 250ms/30s. */
+  retry: retrySchema,
 });
 
 export type PostgresSinkOptions = Infer<typeof postgresSinkOptionsSchema>;
@@ -74,7 +72,7 @@ export function quoteIdentifier(name: string): string {
 
 function buildCopySql(options: PostgresSinkOptions): string {
   const columns = options.columns.map((c) => quoteIdentifier(c.name)).join(', ');
-  const format = options.copyFormat === 'csv' ? 'CSV' : 'TEXT';
+  const format = options.copy_format === 'csv' ? 'CSV' : 'TEXT';
   return `COPY ${quoteIdentifier(options.table)} (${columns}) FROM STDIN WITH (FORMAT ${format})`;
 }
 
@@ -122,9 +120,9 @@ function buildPoolOptions(
     database: options.database,
     user: options.user,
     ...(options.password !== undefined ? { password: options.password } : {}),
-    applicationName: options.applicationName,
+    applicationName: options.application_name,
     ...(options.tls !== undefined ? { tls: options.tls } : {}),
-    connectTimeoutMs: options.connectTimeout,
+    connectTimeoutMs: options.connect_timeout,
     maxConnections: overrides.maxConnections,
     ...(overrides.onNotice !== undefined ? { onNotice: overrides.onNotice } : {}),
   };
@@ -135,7 +133,7 @@ function encodeRows(events: readonly Event[], options: PostgresSinkOptions): Buf
     options.columns.map((column) => coerceColumnValue(event, column)),
   );
   const text =
-    options.copyFormat === 'csv'
+    options.copy_format === 'csv'
       ? rows.map((row) => encodeCopyCsvRow(row)).join('')
       : rows.map((row) => encodeCopyTextRow(row)).join('');
   return Buffer.from(text, 'utf8');
@@ -159,7 +157,7 @@ async function copyWithBisection(
     return;
   } catch (error) {
     if (!(error instanceof PostgresError) || error.isRetryable) throw error;
-    if (!options.bisectOnFailure || events.length === 1) {
+    if (!options.bisect_on_failure || events.length === 1) {
       logger.warn('postgres sink rejected a batch after a permanent error', {
         sqlState: error.sqlState,
         message: error.message,
@@ -180,15 +178,15 @@ export function createPostgresSink(options: PostgresSinkOptions): Sink {
     async run(ctx: SinkContext): Promise<void> {
       const pool = new PgPool(
         buildPoolOptions(options, {
-          maxConnections: options.maxConnections,
+          maxConnections: options.max_connections,
           onNotice: (notice) => ctx.logger.debug('postgres notice', { message: notice.message }),
         }),
       );
       try {
         await runBatchedSink(ctx, {
-          maxEvents: options.batchMaxEvents,
-          maxBytes: options.batchMaxBytes,
-          timeoutMs: options.batchTimeout,
+          maxEvents: options.batch?.max_events ?? 1_000,
+          maxBytes: options.batch?.max_size ?? 4 * 1024 * 1024,
+          timeoutMs: options.batch?.timeout ?? 1_000,
           send: async (events: Event[]) => {
             try {
               await copyWithBisection(pool, sql, events, options, ctx.logger);
@@ -208,10 +206,7 @@ export function createPostgresSink(options: PostgresSinkOptions): Sink {
               );
             }
           },
-          retry: new RetryPolicy({
-            initialDelayMs: options.retryInitialDelay,
-            maxDelayMs: options.retryMaxDelay,
-          }),
+          retry: buildRetryPolicy(options.retry ?? { initial_backoff: 250, max_backoff: 30_000 }),
         });
       } finally {
         await pool.close();

@@ -3,6 +3,7 @@ import { LogEvent, MetricEvent, SpanEvent, Timestamp, type Event } from '@ferrul
 import { defaultCodecs } from '@ferrule/codecs';
 import { defineSink, FixedConcurrencyLimiter, runBatchedSink, type Clock } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { encodingSchema, splitCodecOptions } from '../../fragments.js';
 import { HttpClient, ensureSuccess } from '../client.js';
 import { contentTypeFor, frameChunks, type BatchFraming } from '../framing.js';
 import { batchSchema, concurrencySchema, retrySchema, transportSchemaNoAuth } from '../schema.js';
@@ -20,17 +21,18 @@ export const objectStorageSinkOptions = transportSchemaNoAuth.extend({
   region: s.string().default('us-east-1'),
   service: s.string().default('s3'),
   addressing: s.enum(['path', 'virtual']).default('path'),
-  accessKeyId: s.string().secret(),
-  secretAccessKey: s.string().secret(),
-  sessionToken: s.string().secret().optional(),
+  access_key_id: s.string().secret(),
+  secret_access_key: s.string().secret(),
+  session_token: s.string().secret().optional(),
   /** Whether the key template's time tokens use the batch-flush wall clock, or the first event's
    * own timestamp. */
-  timeSource: s.enum(['batch', 'event']).default('batch'),
-  codec: s.enum(['json', 'ndjson', 'text', 'logfmt']).default('ndjson'),
+  time_source: s.enum(['batch', 'event']).default('batch'),
+  /** Codec used to encode each event; see `@ferrule/codecs`' registry for the full set. */
+  encoding: encodingSchema('ndjson'),
   framing: s.enum(['ndjson', 'json_array', 'newline']).default('ndjson'),
-  contentType: s.string().optional(),
-  batch: batchSchema.optional(),
-  retry: retrySchema.optional(),
+  content_type: s.string().optional(),
+  batch: batchSchema,
+  retry: retrySchema,
   concurrency: concurrencySchema,
 });
 export type ObjectStorageSinkOptions = Infer<typeof objectStorageSinkOptions>;
@@ -72,11 +74,23 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
   description: 'Writes batches of events as objects to an S3-compatible store, SigV4-signed.',
   options: objectStorageSinkOptions,
   accepts: ['log', 'metric', 'span'],
+  examples: [
+    {
+      title: 'Write NDJSON objects to an S3 bucket',
+      config: {
+        endpoint: 'https://s3.us-east-1.amazonaws.com',
+        bucket: 'ferrule-events',
+        access_key_id: '${secret:AWS_ACCESS_KEY_ID}',
+        secret_access_key: '${secret:AWS_SECRET_ACCESS_KEY}',
+      },
+    },
+  ],
   build: (options, ctx) => {
     const endpoint = new URL(options.endpoint);
-    const encoder = defaultCodecs.createEncoder(options.codec);
+    const [codec, codecOptions] = splitCodecOptions(options.encoding);
+    const encoder = defaultCodecs.createEncoder(codec, codecOptions);
     const framing: BatchFraming = options.framing;
-    const contentType = options.contentType ?? contentTypeFor(framing);
+    const contentType = options.content_type ?? contentTypeFor(framing);
     const gzip = options.compression === 'gzip';
     const keyHasTemplate = /\{\{/.test(options.key);
 
@@ -84,15 +98,15 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
       tls: options.tls,
       proxy: options.proxy,
       timeoutMs: options.timeout,
-      maxResponseBytes: options.maxResponseBytes,
+      maxResponseBytes: options.max_response_size,
       compression: options.compression,
       headers: options.headers,
-      maxSockets: options.maxSockets,
+      maxSockets: options.max_sockets,
       logger: ctx.logger,
     });
 
     function renderKey(events: readonly Event[], clock: Clock): string {
-      const representative = options.timeSource === 'event' ? events[0]! : undefined;
+      const representative = options.time_source === 'event' ? events[0]! : undefined;
       const date = representative !== undefined ? eventTime(representative) : clockDate(clock);
       let key = formatTimePattern(options.key, date);
       if (keyHasTemplate) key = compileFieldTemplate(key).render(eventContext(events[0]!));
@@ -112,10 +126,10 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
       async run(sinkCtx) {
         try {
           await runBatchedSink<Encoded>(sinkCtx, {
-            ...(options.batch?.maxEvents !== undefined
-              ? { maxEvents: options.batch.maxEvents }
+            ...(options.batch?.max_events !== undefined
+              ? { maxEvents: options.batch.max_events }
               : {}),
-            ...(options.batch?.maxBytes !== undefined ? { maxBytes: options.batch.maxBytes } : {}),
+            ...(options.batch?.max_size !== undefined ? { maxBytes: options.batch.max_size } : {}),
             timeoutMs: options.batch?.timeout ?? 1_000,
             encode: (events) => ({
               key: renderKey(events, sinkCtx.clock),
@@ -136,10 +150,10 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
                 service: options.service,
                 date: sinkCtx.clock.now().toDate(),
                 credentials: {
-                  accessKeyId: options.accessKeyId,
-                  secretAccessKey: options.secretAccessKey,
-                  ...(options.sessionToken !== undefined
-                    ? { sessionToken: options.sessionToken }
+                  accessKeyId: options.access_key_id,
+                  secretAccessKey: options.secret_access_key,
+                  ...(options.session_token !== undefined
+                    ? { sessionToken: options.session_token }
                     : {}),
                 },
               });
@@ -149,8 +163,8 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
                 'x-amz-content-sha256': bodyHash,
                 authorization: signed.authorizationHeader,
               };
-              if (options.sessionToken !== undefined) {
-                headers['x-amz-security-token'] = options.sessionToken;
+              if (options.session_token !== undefined) {
+                headers['x-amz-security-token'] = options.session_token;
               }
               const response = await client.request({
                 method: 'PUT',

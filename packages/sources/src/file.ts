@@ -39,7 +39,7 @@
  *   advance past the errored region, silently losing it on the next restart. Concretely: an
  *   `'errored'` range permanently blocks that file's checkpoint from advancing any further for
  *   the rest of this run (matching the existing "an errored chunk is not retried mid-run, only on
- *   restart" contract) — the range queue for that file then only grows, up to `maxOutstandingChunks`
+ *   restart" contract) — the range queue for that file then only grows, up to `max_outstanding_chunks`
  *   ranges, at which point the reader stops reading further bytes from that file (backpressure)
  *   rather than growing the queue (and memory) without bound.
  */
@@ -58,6 +58,7 @@ import {
   type SourceContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { decodingSchema, splitCodecOptions } from './fragments.js';
 import { AtomicJsonStore, hashFingerprintBytes } from './util/checkpoint.js';
 import { compileGlob, globStaticPrefix, type CompiledGlob } from './util/glob.js';
 
@@ -66,20 +67,20 @@ const MAX_WALK_DEPTH = 32;
 
 const multilineSchema = s
   .object({
-    startPattern: s.regex().describe('A line matching this pattern begins a new logical event.'),
-    continuationPattern: s
+    start_pattern: s.regex().describe('A line matching this pattern begins a new logical event.'),
+    continuation_pattern: s
       .regex()
       .optional()
       .describe(
         'A line matching this pattern is appended to the current event instead of starting a ' +
-          'new one. If omitted, any line that does not match startPattern is treated as a ' +
+          'new one. If omitted, any line that does not match start_pattern is treated as a ' +
           'continuation (the common case: everything until the next start line belongs together).',
       ),
-    timeoutMs: s
+    timeout: s
       .duration()
       .default(1000)
       .describe('Flush the current aggregated event if no new line arrives within this long.'),
-    maxLines: s
+    max_lines: s
       .integer({ min: 1 })
       .default(500)
       .describe('Safety bound: force-flush an aggregated event after this many lines.'),
@@ -96,24 +97,24 @@ const options = s.object({
     .array(s.string())
     .default([])
     .describe('Glob patterns to exclude, even if matched by include.'),
-  readFrom: s
+  read_from: s
     .enum(['beginning', 'end'])
     .default('end')
     .describe('Where a newly discovered file (with no existing checkpoint) starts reading from.'),
-  pollIntervalMs: s
+  poll_interval: s
     .duration()
     .default(1000)
     .describe('How often the file set and file sizes are re-scanned.'),
-  maxOpenFiles: s.integer({ min: 1 }).default(64).describe('Maximum files tailed at once.'),
-  maxLineLength: s
+  max_open_files: s.integer({ min: 1 }).default(64).describe('Maximum files tailed at once.'),
+  max_line_length: s
     .byteSize()
     .default(1024 * 1024)
     .describe('Maximum line length. Longer lines are truncated (and counted) at this length.'),
-  maxReadBytesPerTick: s
+  max_read_size_per_tick: s
     .byteSize()
     .default(1024 * 1024)
     .describe('Maximum bytes read from one file per poll, so many active files stay responsive.'),
-  maxOutstandingChunks: s
+  max_outstanding_chunks: s
     .integer({ min: 1 })
     .default(64)
     .describe(
@@ -122,25 +123,21 @@ const options = s.object({
         'an errored chunk permanently blocks that file’s checkpoint from advancing again this ' +
         'run — bounds how much gets queued up (and re-read on restart) behind one.',
     ),
-  ignoreOlderThanMs: s
+  ignore_older_than: s
     .duration()
     .optional()
     .describe('Ignore files whose last-modified time is older than this when discovering.'),
-  fingerprintBytes: s
+  fingerprint_size: s
     .byteSize()
     .default(FINGERPRINT_BYTES)
     .describe('Bytes hashed at the start of a file to validate a resumed checkpoint.'),
-  decoding: s
-    .string()
-    .default('text')
-    .describe('Codec name from the codec registry used to decode each line.'),
-  decodingOptions: s.unknown().optional().describe('Options passed through to the codec decoder.'),
+  decoding: decodingSchema('text'),
   multiline: multilineSchema,
-  pathField: s
+  path_field: s
     .string()
     .default('file.path')
     .describe('Field each event is annotated with: the source file path.'),
-  hostField: s
+  host_field: s
     .string()
     .default('host')
     .describe('Field each event is annotated with: this machine’s hostname.'),
@@ -327,19 +324,24 @@ export const fileSource = defineSource<FileSourceOptions>({
   examples: [
     {
       title: 'Tail application logs',
-      config: { include: ['/var/log/myapp/*.log'], decoding: 'json', readFrom: 'end' },
+      config: {
+        include: ['/var/log/myapp/*.log'],
+        decoding: { codec: 'json' },
+        read_from: 'end',
+      },
     },
   ],
   build(opts: FileSourceOptions, buildCtx: BuildContext): FileSourceHandle {
     if (buildCtx.dataDir === undefined) {
       throw new FerruleError(
         'E_FILE_SOURCE_NO_DATA_DIR',
-        'the "file" source requires a pipeline data directory (settings.dataDir) to persist checkpoints',
+        'the "file" source requires a pipeline data directory (data_dir) to persist checkpoints',
       );
     }
     const dataDir = buildCtx.dataDir;
     const codecs: CodecRegistry = defaultCodecs;
-    const decoder: Decoder = codecs.createDecoder(opts.decoding, opts.decodingOptions);
+    const [decodingCodec, decodingOptions] = splitCodecOptions(opts.decoding);
+    const decoder: Decoder = codecs.createDecoder(decodingCodec, decodingOptions);
     const includeGlobs = opts.include.map((p) => compileGlob(p));
     const excludeGlobs = opts.exclude.map((p) => compileGlob(p));
     const host = hostname();
@@ -390,7 +392,7 @@ export const fileSource = defineSource<FileSourceOptions>({
       }
 
       async function discoverAndTrack(): Promise<void> {
-        if (tracked.size >= opts.maxOpenFiles) return;
+        if (tracked.size >= opts.max_open_files) return;
         let candidates: string[];
         try {
           candidates = await discoverFiles(opts.include, includeGlobs, excludeGlobs);
@@ -399,9 +401,9 @@ export const fileSource = defineSource<FileSourceOptions>({
           return;
         }
         for (const path of candidates) {
-          if (tracked.size >= opts.maxOpenFiles) {
-            ctx.logger.warn('file: maxOpenFiles reached; deferring newly discovered files', {
-              maxOpenFiles: opts.maxOpenFiles,
+          if (tracked.size >= opts.max_open_files) {
+            ctx.logger.warn('file: max_open_files reached; deferring newly discovered files', {
+              max_open_files: opts.max_open_files,
             });
             break;
           }
@@ -413,8 +415,8 @@ export const fileSource = defineSource<FileSourceOptions>({
           }
           if (!st.isFile()) continue;
           if (
-            opts.ignoreOlderThanMs !== undefined &&
-            Date.now() - st.mtimeMs > opts.ignoreOlderThanMs
+            opts.ignore_older_than !== undefined &&
+            Date.now() - st.mtimeMs > opts.ignore_older_than
           ) {
             continue;
           }
@@ -448,8 +450,8 @@ export const fileSource = defineSource<FileSourceOptions>({
               startOffset = Math.min(existing.offset, st.size);
             } else {
               ctx.logger.warn('file: checkpoint fingerprint mismatch; starting over', { path });
-              startOffset = opts.readFrom === 'beginning' ? 0 : st.size;
-              const fresh = await computeFingerprint(handle, st.size, opts.fingerprintBytes);
+              startOffset = opts.read_from === 'beginning' ? 0 : st.size;
+              const fresh = await computeFingerprint(handle, st.size, opts.fingerprint_size);
               checkpoints[key] = {
                 device: st.dev,
                 inode: st.ino,
@@ -462,8 +464,8 @@ export const fileSource = defineSource<FileSourceOptions>({
               checkpointsDirty = true;
             }
           } else {
-            startOffset = opts.readFrom === 'beginning' ? 0 : st.size;
-            const fresh = await computeFingerprint(handle, st.size, opts.fingerprintBytes);
+            startOffset = opts.read_from === 'beginning' ? 0 : st.size;
+            const fresh = await computeFingerprint(handle, st.size, opts.fingerprint_size);
             checkpoints[key] = {
               device: st.dev,
               inode: st.ino,
@@ -502,10 +504,10 @@ export const fileSource = defineSource<FileSourceOptions>({
 
       function classify(line: string): 'start' | 'continuation' | 'other' {
         if (multiline === undefined) return 'other';
-        if (multiline.startPattern.test(line)) return 'start';
+        if (multiline.start_pattern.test(line)) return 'start';
         if (
-          multiline.continuationPattern === undefined ||
-          multiline.continuationPattern.test(line)
+          multiline.continuation_pattern === undefined ||
+          multiline.continuation_pattern.test(line)
         ) {
           return 'continuation';
         }
@@ -543,7 +545,7 @@ export const fileSource = defineSource<FileSourceOptions>({
           } else if (kind === 'continuation' && entry.multilinePending !== undefined) {
             entry.multilinePending.lines.push(text);
             entry.multilinePending.lastLineAtMonoMs = nowMonoMs;
-            if (entry.multilinePending.lines.length >= multiline.maxLines) {
+            if (entry.multilinePending.lines.length >= multiline.max_lines) {
               const flushed = flushMultiline(entry);
               if (flushed !== undefined) {
                 out.push({ text: flushed.text, throughOffset: line.throughOffset });
@@ -574,7 +576,7 @@ export const fileSource = defineSource<FileSourceOptions>({
       ): { text: string; throughOffset: number } | undefined {
         const pending = entry.multilinePending;
         if (multiline === undefined || pending === undefined) return undefined;
-        if (nowMonoMs - pending.lastLineAtMonoMs < multiline.timeoutMs) return undefined;
+        if (nowMonoMs - pending.lastLineAtMonoMs < multiline.timeout) return undefined;
         // Nothing new arrived to anchor a throughOffset on; the pending lines already account for
         // all bytes read so far (entry.diskReadOffset), which is safe once nothing else is buffered.
         const flushed = flushMultiline(entry);
@@ -609,7 +611,7 @@ export const fileSource = defineSource<FileSourceOptions>({
           const fingerprint = await computeFingerprint(
             entry.handle,
             st.size,
-            opts.fingerprintBytes,
+            opts.fingerprint_size,
           );
           checkpoints[key] = {
             device: entry.device,
@@ -623,11 +625,11 @@ export const fileSource = defineSource<FileSourceOptions>({
           checkpointsDirty = true;
         }
 
-        if (entry.outstandingRanges.length >= opts.maxOutstandingChunks) {
+        if (entry.outstandingRanges.length >= opts.max_outstanding_chunks) {
           return; // backpressure: too many not-yet-resolved chunks; wait for one to resolve
         }
 
-        const toRead = Math.min(opts.maxReadBytesPerTick, st.size - entry.diskReadOffset);
+        const toRead = Math.min(opts.max_read_size_per_tick, st.size - entry.diskReadOffset);
         let chunk = new Uint8Array(0);
         if (toRead > 0) {
           const buf = Buffer.alloc(toRead);
@@ -642,7 +644,7 @@ export const fileSource = defineSource<FileSourceOptions>({
           entry.lineRemainder,
           entry.diskReadOffset - entry.lineRemainder.length - chunk.length,
           chunk,
-          opts.maxLineLength,
+          opts.max_line_length,
         );
         entry.lineRemainder = split.newRemainder;
 
@@ -662,8 +664,8 @@ export const fileSource = defineSource<FileSourceOptions>({
         }
         for (const event of events) {
           if (event instanceof LogEvent) {
-            event.set(opts.pathField, entry.path);
-            event.set(opts.hostField, host);
+            event.set(opts.path_field, entry.path);
+            event.set(opts.host_field, host);
           }
         }
 
@@ -786,7 +788,7 @@ export const fileSource = defineSource<FileSourceOptions>({
           const woke = new Promise<void>((resolve) => {
             wake = resolve;
           });
-          const timer = ctx.clock.sleep(opts.pollIntervalMs, ctx.signal).catch(() => undefined);
+          const timer = ctx.clock.sleep(opts.poll_interval, ctx.signal).catch(() => undefined);
           await Promise.race([woke, timer]);
           wake = undefined;
         }

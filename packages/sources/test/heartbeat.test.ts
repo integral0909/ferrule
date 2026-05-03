@@ -23,7 +23,7 @@ describe('heartbeat: declared shape', () => {
 
 describe('heartbeat: emission timing', () => {
   it('emits nothing before the first interval elapses', async () => {
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await heartbeatSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const runPromise = handle.run(harness.ctx);
@@ -37,7 +37,7 @@ describe('heartbeat: emission timing', () => {
   });
 
   it('emits exactly one event per interval tick', async () => {
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await heartbeatSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const runPromise = handle.run(harness.ctx);
@@ -60,7 +60,7 @@ describe('heartbeat: emission timing', () => {
 
 describe('heartbeat: event fields', () => {
   it("includes this host's hostname and a numeric uptime", async () => {
-    const opts = parse({ intervalMs: 1000, message: 'ping' });
+    const opts = parse({ interval: 1000, message: 'ping' });
     const handle = await heartbeatSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const runPromise = handle.run(harness.ctx);
@@ -85,7 +85,7 @@ describe('heartbeat: event fields', () => {
 
 describe('heartbeat: acknowledgements', () => {
   it('logs a warning when an event is not delivered', async () => {
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await heartbeatSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: true });
     const runPromise = handle.run(harness.ctx);
@@ -104,7 +104,7 @@ describe('heartbeat: acknowledgements', () => {
 
 describe('heartbeat: graceful shutdown', () => {
   it('stops emitting and lets run() resolve promptly once ctx.signal aborts', async () => {
-    const opts = parse({ intervalMs: 1000 });
+    const opts = parse({ interval: 1000 });
     const handle = await heartbeatSource.build(opts, buildCtx());
     const harness = createControllableSourceContext({ acknowledgements: false });
     const runPromise = handle.run(harness.ctx);

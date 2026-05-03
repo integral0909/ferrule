@@ -3,23 +3,29 @@ import { defaultCodecs, type CodecRegistry } from '@ferrule/codecs';
 import {
   defineSink,
   runBatchedSink,
-  RetryPolicy,
   SinkError,
   type BuildContext,
   type Sink,
   type SinkContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import {
+  batchSchema,
+  buildRetryPolicy,
+  encodingSchema,
+  retrySchema,
+  splitCodecOptions,
+  tlsSchema,
+} from '../fragments.js';
 import { compileTemplate, renderTemplate, type CompiledTemplate } from '../stream/template.js';
-import { tlsOptionsSchema } from '../stream/wire-transport.js';
 import { KafkaError } from './errors.js';
 import { KafkaProducer, type OutgoingRecord } from './producer.js';
 
 export const kafkaSinkOptionsSchema = s.object({
   /** Bootstrap broker addresses (`host:port`); metadata discovers the rest of the cluster. */
   brokers: s.array(s.socketAddress(), { minItems: 1 }),
-  clientId: s.string().default('ferrule'),
-  tls: tlsOptionsSchema.optional(),
+  client_id: s.string().default('ferrule'),
+  tls: tlsSchema,
   sasl: s
     .object({
       mechanism: s.enum(['PLAIN', 'SCRAM-SHA-256']),
@@ -33,20 +39,19 @@ export const kafkaSinkOptionsSchema = s.object({
   key: s.string().optional(),
   /** Header name -> value template. */
   headers: s.record(s.string()).optional(),
-  encoding: s.string().default('json'),
-  encodingOptions: s.unknown().optional(),
+  /** Codec used to encode each event. Default `json`. */
+  encoding: encodingSchema('json'),
   acks: s.enum(['0', '1', '-1']).default('-1'),
   compression: s.enum(['none', 'gzip']).default('none'),
   /** Partition strategy for unkeyed records. Default `sticky` (KIP-480). */
   partitioner: s.enum(['round_robin', 'sticky']).default('sticky'),
-  connectTimeout: s.duration().default(10_000),
-  requestTimeout: s.duration().default(30_000),
-  maxInFlightRequestsPerConnection: s.integer({ min: 1 }).default(5),
-  batchMaxEvents: s.integer({ min: 1 }).default(500),
-  batchMaxBytes: s.byteSize().default(1024 * 1024),
-  batchTimeout: s.duration().default(1_000),
-  retryInitialDelay: s.duration().default(250),
-  retryMaxDelay: s.duration().default(30_000),
+  connect_timeout: s.duration().default(10_000),
+  request_timeout: s.duration().default(30_000),
+  max_in_flight_requests_per_connection: s.integer({ min: 1 }).default(5),
+  /** Groups events into batches before producing them. Default: 500 events / 1MiB / 1s. */
+  batch: batchSchema,
+  /** Retry backoff for produce failures. Default 250ms/30s. */
+  retry: retrySchema,
 });
 
 export type KafkaSinkOptions = Infer<typeof kafkaSinkOptionsSchema>;
@@ -54,13 +59,13 @@ export type KafkaSinkOptions = Infer<typeof kafkaSinkOptionsSchema>;
 function buildProducer(options: KafkaSinkOptions): KafkaProducer {
   return new KafkaProducer({
     bootstrapBrokers: options.brokers,
-    clientId: options.clientId,
+    clientId: options.client_id,
     ...(options.tls !== undefined ? { tls: options.tls } : {}),
     ...(options.sasl !== undefined ? { sasl: options.sasl } : {}),
-    connectTimeoutMs: options.connectTimeout,
-    maxInFlightRequestsPerConnection: options.maxInFlightRequestsPerConnection,
+    connectTimeoutMs: options.connect_timeout,
+    maxInFlightRequestsPerConnection: options.max_in_flight_requests_per_connection,
     acks: Number(options.acks) as -1 | 0 | 1,
-    requestTimeoutMs: options.requestTimeout,
+    requestTimeoutMs: options.request_timeout,
     compression: options.compression,
     partitioner: options.partitioner,
   });
@@ -119,7 +124,8 @@ export function createKafkaSink(
   options: KafkaSinkOptions,
   codecs: CodecRegistry = defaultCodecs,
 ): Sink {
-  const encoder = codecs.createEncoder(options.encoding, options.encodingOptions);
+  const [codec, codecOptions] = splitCodecOptions(options.encoding);
+  const encoder = codecs.createEncoder(codec, codecOptions);
   const topicTemplate = compileTemplate(options.topic);
   const keyTemplate = options.key !== undefined ? compileTemplate(options.key) : undefined;
   const headerTemplates: (readonly [string, CompiledTemplate])[] =
@@ -140,9 +146,9 @@ export function createKafkaSink(
       );
       try {
         await runBatchedSink(ctx, {
-          maxEvents: options.batchMaxEvents,
-          maxBytes: options.batchMaxBytes,
-          timeoutMs: options.batchTimeout,
+          maxEvents: options.batch?.max_events ?? 500,
+          maxBytes: options.batch?.max_size ?? 1024 * 1024,
+          timeoutMs: options.batch?.timeout ?? 1_000,
           encode: encodeBatch,
           send: async (outgoing: OutgoingRecord[]) => {
             try {
@@ -163,10 +169,7 @@ export function createKafkaSink(
               );
             }
           },
-          retry: new RetryPolicy({
-            initialDelayMs: options.retryInitialDelay,
-            maxDelayMs: options.retryMaxDelay,
-          }),
+          retry: buildRetryPolicy(options.retry ?? { initial_backoff: 250, max_backoff: 30_000 }),
         });
       } finally {
         await producer.close();
@@ -193,7 +196,12 @@ export const kafkaSink = defineSink({
   examples: [
     {
       title: 'JSON events keyed by host',
-      config: { brokers: ['127.0.0.1:9092'], topic: 'logs', key: '{{ host }}', encoding: 'json' },
+      config: {
+        brokers: ['127.0.0.1:9092'],
+        topic: 'logs',
+        key: '{{ host }}',
+        encoding: { codec: 'json' },
+      },
     },
   ],
   build: (options: KafkaSinkOptions, _ctx: BuildContext) => createKafkaSink(options),

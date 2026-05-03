@@ -24,11 +24,11 @@ const udpOptions = s.object({
     .default({ host: '0.0.0.0', port: 8125 })
     .describe('UDP address to listen on. Port 0 binds an OS-assigned ephemeral port.')
     .example('0.0.0.0:8125'),
-  maxPacketBytes: s
+  max_packet_size: s
     .byteSize()
     .default(65_507)
     .describe('Maximum UDP datagram size accepted; larger datagrams are discarded.'),
-  maxInFlightSends: s
+  max_in_flight_sends: s
     .integer({ min: 1 })
     .default(256)
     .describe(
@@ -45,13 +45,13 @@ const tcpOptions = s.object({
     .default({ host: '0.0.0.0', port: 8125 })
     .describe('TCP address to listen on. Port 0 binds an OS-assigned ephemeral port.')
     .example('0.0.0.0:8125'),
-  maxConnections: s
+  max_connections: s
     .integer({ min: 1 })
     .default(1024)
     .describe(
       'Maximum simultaneous TCP connections; additional connections are closed immediately.',
     ),
-  maxLineLength: s
+  max_line_length: s
     .byteSize()
     .default(64 * 1024)
     .describe('Maximum length of one StatsD line read over TCP.'),
@@ -61,7 +61,7 @@ const options = s
   .object({
     udp: udpOptions.optional().describe('Enables the UDP listener.'),
     tcp: tcpOptions.optional().describe('Enables the TCP listener.'),
-    decodingOptions: s
+    decoding: s
       .unknown()
       .optional()
       .describe('Options passed through to the StatsD decoder (e.g. maxLines, maxTags).'),
@@ -142,19 +142,19 @@ function startUdp(
     socket.on('message', (msg: Buffer, rinfo: RemoteInfo) => {
       if (shuttingDown) return;
       metrics.udpPacketsTotal.increment();
-      if (msg.length > udpOpts.maxPacketBytes) {
+      if (msg.length > udpOpts.max_packet_size) {
         metrics.errors.increment();
-        ctx.logger.warn('statsd: udp datagram exceeds maxPacketBytes', {
+        ctx.logger.warn('statsd: udp datagram exceeds max_packet_size', {
           size: msg.length,
           from: `${rinfo.address}:${rinfo.port}`,
         });
         return;
       }
-      if (inFlight.size >= udpOpts.maxInFlightSends) {
+      if (inFlight.size >= udpOpts.max_in_flight_sends) {
         metrics.udpDroppedTotal.increment();
         ctx.logger.warn('statsd: dropping udp datagram; max in-flight sends reached', {
           from: `${rinfo.address}:${rinfo.port}`,
-          maxInFlightSends: udpOpts.maxInFlightSends,
+          max_in_flight_sends: udpOpts.max_in_flight_sends,
         });
         return;
       }
@@ -205,7 +205,7 @@ function startTcp(
         socket.destroy();
         return;
       }
-      if (sockets.size >= tcpOpts.maxConnections) {
+      if (sockets.size >= tcpOpts.max_connections) {
         metrics.tcpConnectionsRejectedTotal.increment();
         socket.destroy();
         return;
@@ -213,7 +213,7 @@ function startTcp(
       sockets.add(socket);
       metrics.tcpConnectionsTotal.increment();
       const framer = new NewlineFramer({
-        maxLineLength: tcpOpts.maxLineLength,
+        maxLineLength: tcpOpts.max_line_length,
         onOversize: 'error',
       });
       const peer = `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 0}`;
@@ -239,7 +239,7 @@ function startTcp(
         } catch (error) {
           if (!(error instanceof FerruleError)) throw error;
           metrics.errors.increment();
-          ctx.logger.warn('statsd: tcp line exceeds maxLineLength', {
+          ctx.logger.warn('statsd: tcp line exceeds max_line_length', {
             from: peer,
             error: error.message,
           });
@@ -315,7 +315,7 @@ export const statsdSource = defineSource<StatsdOptions>({
     },
   ],
   build(opts, _buildCtx): StatsdSourceHandle {
-    const decoder = defaultCodecs.createDecoder('statsd', opts.decodingOptions);
+    const decoder = defaultCodecs.createDecoder('statsd', opts.decoding);
 
     let udpBound: SocketAddress | undefined;
     let tcpBound: SocketAddress | undefined;

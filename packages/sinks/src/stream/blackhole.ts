@@ -3,7 +3,7 @@ import { s, type Infer } from '@ferrule/schema';
 
 export const blackholeSinkOptionsSchema = s.object({
   /** If set, logs a running event/byte count at this interval. Default: never logs. */
-  logInterval: s.duration().optional(),
+  log_interval: s.duration().optional(),
 });
 
 export type BlackholeSinkOptions = Infer<typeof blackholeSinkOptionsSchema>;
@@ -20,8 +20,8 @@ export function createBlackholeSink(options: BlackholeSinkOptions): Sink {
       let totalBytes = 0;
       const stopLogging = new AbortController();
       const logging =
-        options.logInterval !== undefined
-          ? logProgress(ctx, options.logInterval, () => totalEvents, stopLogging.signal)
+        options.log_interval !== undefined
+          ? logProgress(ctx, options.log_interval, () => totalEvents, stopLogging.signal)
           : undefined;
       try {
         for await (const batch of ctx.input) {
@@ -65,6 +65,6 @@ export const blackholeSink = defineSink({
   description: 'Discards every event; useful for benchmarking the rest of a pipeline.',
   options: blackholeSinkOptionsSchema,
   accepts: ['log', 'metric', 'span'],
-  examples: [{ title: 'Log throughput every 10s', config: { logInterval: '10s' } }],
+  examples: [{ title: 'Log throughput every 10s', config: { log_interval: '10s' } }],
   build: (options: BlackholeSinkOptions) => createBlackholeSink(options),
 });

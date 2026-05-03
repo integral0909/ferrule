@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -95,5 +95,88 @@ describe('ferrule validate', () => {
     const code = await runCli(env);
     expect(code).toBe(2);
     expect(env.stderrText()).toContain('config');
+  });
+
+  describe('components that need a data directory, with no data_dir configured', () => {
+    // Scoped to this command's own temp-dir prefix (not the broader `ferrule-` family other,
+    // concurrently-running test files use for their own fixtures) so this doesn't flake under
+    // parallel test-suite load.
+    async function tempEntries(): Promise<Set<string>> {
+      return new Set(
+        (await readdir(tmpdir())).filter((name) => name.startsWith('ferrule-validate-')),
+      );
+    }
+
+    it('--no-environment still passes, building the component against a disposable temp dir, and leaves nothing behind', async () => {
+      const file = await write(
+        'file-source.yaml',
+        [
+          'sources:',
+          '  in:',
+          '    type: file',
+          '    include: ["/nonexistent/**/*.log"]',
+          'sinks:',
+          '  out:',
+          '    type: console',
+          '    inputs: [in]',
+        ].join('\n'),
+      );
+      const before = await tempEntries();
+      const env = createFakeEnvironment({
+        argv: ['validate', '-c', file, '--no-environment'],
+      });
+      const code = await runCli(env);
+      expect(code).toBe(EXIT_OK);
+      expect(env.stdoutText()).toContain('valid:');
+      expect(env.stderrText()).not.toContain('data directory');
+      const after = await tempEntries();
+      // Nothing the command created under the OS temp root survives it.
+      expect([...after].filter((name) => !before.has(name))).toEqual([]);
+    });
+
+    it('the default (--environment) also builds successfully against a disposable temp dir when no data_dir is configured or overridden', async () => {
+      const file = await write(
+        'file-source-default.yaml',
+        [
+          'sources:',
+          '  in:',
+          '    type: file',
+          '    include: ["/nonexistent/**/*.log"]',
+          'sinks:',
+          '  out:',
+          '    type: console',
+          '    inputs: [in]',
+        ].join('\n'),
+      );
+      const before = await tempEntries();
+      const env = createFakeEnvironment({ argv: ['validate', '-c', file] });
+      const code = await runCli(env);
+      expect(code).toBe(EXIT_OK);
+      const after = await tempEntries();
+      expect([...after].filter((name) => !before.has(name))).toEqual([]);
+    });
+
+    it('an explicit data_dir (config or --data-dir) with --environment still uses (and creates) the real directory', async () => {
+      const dataDir = join(dir, 'real-data');
+      const file = await write(
+        'file-source-real.yaml',
+        [
+          `data_dir: ${dataDir}`,
+          'sources:',
+          '  in:',
+          '    type: file',
+          '    include: ["/nonexistent/**/*.log"]',
+          'sinks:',
+          '  out:',
+          '    type: console',
+          '    inputs: [in]',
+        ].join('\n'),
+      );
+      const env = createFakeEnvironment({ argv: ['validate', '-c', file] });
+      const code = await runCli(env);
+      expect(code).toBe(EXIT_OK);
+      const entries = await readdir(dataDir);
+      expect(entries).toContain('in');
+    });
   });
 });

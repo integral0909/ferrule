@@ -13,7 +13,7 @@ import type { TlsOptions as NodeTlsOptions } from 'node:tls';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import { FerruleError } from '@ferrule/core';
 import { isAbortError } from '@ferrule/runtime';
-import { s, type Infer } from '@ferrule/schema';
+import type { AuthOptions, TlsOptions } from '../fragments.js';
 
 // -------------------------------------------------------------------------------------------
 // Errors
@@ -160,38 +160,6 @@ export async function readLimitedBody(
 // Authentication
 // -------------------------------------------------------------------------------------------
 
-export const authOptionsSchema = () =>
-  s
-    .object({
-      scheme: s
-        .enum(['none', 'bearer', 'basic'])
-        .default('none')
-        .describe('Authentication required of clients: none, a bearer token, or HTTP Basic.'),
-      token: s
-        .string()
-        .secret()
-        .optional()
-        .describe('Required bearer token when scheme is "bearer".'),
-      username: s.string().optional().describe('Required username when scheme is "basic".'),
-      password: s
-        .string()
-        .secret()
-        .optional()
-        .describe('Required password when scheme is "basic".'),
-    })
-    .refine((v) => {
-      if (v.scheme === 'bearer') return typeof v.token === 'string' && v.token.length > 0;
-      if (v.scheme === 'basic') {
-        return (
-          typeof v.username === 'string' && v.username.length > 0 && typeof v.password === 'string'
-        );
-      }
-      return true;
-    }, 'auth.token is required when scheme is "bearer"; auth.username and auth.password are required when scheme is "basic"')
-    .default({ scheme: 'none' });
-
-export type AuthOptions = Infer<ReturnType<typeof authOptionsSchema>>;
-
 export type AuthResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly status: 401 | 403; readonly message: string };
@@ -210,11 +178,11 @@ function constantTimeEqual(a: string, b: string): boolean {
 /** Checks an `Authorization` header against configured `auth`. Never includes the presented or
  * expected credential in its result, so callers can put `message` straight into a response body. */
 export function checkAuth(headerValue: string | undefined, auth: AuthOptions): AuthResult {
-  if (auth.scheme === 'none') return { ok: true };
+  if (auth.strategy === 'none') return { ok: true };
   if (headerValue === undefined) {
     return { ok: false, status: 401, message: 'missing Authorization header' };
   }
-  if (auth.scheme === 'bearer') {
+  if (auth.strategy === 'bearer') {
     if (!headerValue.startsWith('Bearer ')) {
       return { ok: false, status: 401, message: 'expected a Bearer token' };
     }
@@ -246,39 +214,18 @@ export function checkAuth(headerValue: string | undefined, auth: AuthOptions): A
 // TLS
 // -------------------------------------------------------------------------------------------
 
-export const tlsOptionsSchema = () =>
-  s
-    .object({
-      certFile: s.string().describe('Path to a PEM certificate (or full chain) file.'),
-      keyFile: s.string().describe('Path to the PEM private key file.'),
-      caFile: s
-        .string()
-        .optional()
-        .describe('Path to a PEM CA bundle used to verify client certificates.'),
-      requestClientCert: s
-        .boolean()
-        .default(false)
-        .describe(
-          'Request a client certificate. With caFile set, an invalid certificate is rejected.',
-        ),
-    })
-    .optional()
-    .describe('Enables TLS. Omit to serve plain HTTP.');
-
-export type TlsOptions = Infer<ReturnType<typeof tlsOptionsSchema>>;
-
 /** Reads the certificate/key (and optional CA) files and builds Node `tls`/`https` server options. */
 export async function loadTlsServerOptions(
   options: NonNullable<TlsOptions>,
 ): Promise<NodeTlsOptions> {
   const [cert, key, ca] = await Promise.all([
-    readFile(options.certFile),
-    readFile(options.keyFile),
-    options.caFile === undefined ? Promise.resolve(undefined) : readFile(options.caFile),
+    readFile(options.cert_file),
+    readFile(options.key_file),
+    options.ca_file === undefined ? Promise.resolve(undefined) : readFile(options.ca_file),
   ]);
   const tlsOptions: NodeTlsOptions = { cert, key };
   if (ca !== undefined) tlsOptions.ca = ca;
-  if (options.requestClientCert) {
+  if (options.require_client_cert) {
     tlsOptions.requestCert = true;
     tlsOptions.rejectUnauthorized = ca !== undefined;
   }

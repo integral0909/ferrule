@@ -31,21 +31,18 @@ function baseOptions(
     port,
     database: 'db',
     user: 'u',
-    applicationName: 'ferrule-test',
+    application_name: 'ferrule-test',
     table: 'events',
     columns: [
       { name: 'id', field: ['id'], type: 'text' },
       { name: 'message', field: ['message'], type: 'text' },
     ],
-    copyFormat: 'text',
-    maxConnections: 3,
-    connectTimeout: 2_000,
-    batchMaxEvents: 100,
-    batchMaxBytes: 1024 * 1024,
-    batchTimeout: 200,
-    bisectOnFailure: true,
-    retryInitialDelay: 5,
-    retryMaxDelay: 20,
+    copy_format: 'text',
+    max_connections: 3,
+    connect_timeout: 2_000,
+    batch: { max_events: 100, max_size: 1024 * 1024, timeout: 200 },
+    bisect_on_failure: true,
+    retry: { initial_backoff: 5, max_backoff: 20 },
     ...overrides,
   };
 }
@@ -146,7 +143,7 @@ describe('postgres sink', () => {
       },
     });
     const port = await server.listen();
-    const sink = createPostgresSink(baseOptions(port, { batchMaxEvents: 10 }));
+    const sink = createPostgresSink(baseOptions(port, { batch: { max_events: 10, timeout: 200 } }));
     const ctx = createTestSinkContext();
     const events = [
       LogEvent.from({ id: '1', message: 'ok-1' }),
@@ -165,13 +162,13 @@ describe('postgres sink', () => {
     expect(statuses).toEqual(['delivered', 'delivered', 'rejected', 'delivered']);
   });
 
-  it('rejects the whole batch on a permanent error when bisectOnFailure is false', async () => {
+  it('rejects the whole batch on a permanent error when bisect_on_failure is false', async () => {
     server = new FakePostgresServer({
       auth: 'trust',
       onCopy: () => ({ ok: false, sqlState: '22P02', message: 'invalid input syntax' }),
     });
     const port = await server.listen();
-    const sink = createPostgresSink(baseOptions(port, { bisectOnFailure: false }));
+    const sink = createPostgresSink(baseOptions(port, { bisect_on_failure: false }));
     const ctx = createTestSinkContext();
     const events = [
       LogEvent.from({ id: '1', message: 'a' }),
@@ -198,7 +195,9 @@ describe('postgres sink', () => {
       },
     });
     const port = await server.listen();
-    const sink = createPostgresSink(baseOptions(port, { retryInitialDelay: 5, retryMaxDelay: 20 }));
+    const sink = createPostgresSink(
+      baseOptions(port, { retry: { initial_backoff: 5, max_backoff: 20 } }),
+    );
     const ctx = createTestSinkContext();
     const event = LogEvent.from({ id: '1', message: 'retry-me' });
     const completion = withFinalizer(event);

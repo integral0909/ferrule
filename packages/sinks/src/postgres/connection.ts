@@ -1,6 +1,8 @@
 import * as net from 'node:net';
 import * as tls from 'node:tls';
+import type { TlsOptions } from '../fragments.js';
 import { writeWithBackpressure } from '../stream/backpressure-write.js';
+import { resolveTlsConnectOptions } from '../stream/wire-transport.js';
 import {
   AuthCode,
   chooseSaslMechanism,
@@ -25,15 +27,6 @@ import {
   type BackendMessage,
 } from './wire.js';
 
-export interface PgTlsOptions {
-  enabled: boolean;
-  ca?: string;
-  cert?: string;
-  key?: string;
-  rejectUnauthorized?: boolean;
-  serverName?: string;
-}
-
 export interface PgConnectionOptions {
   host: string;
   port: number;
@@ -41,7 +34,7 @@ export interface PgConnectionOptions {
   user: string;
   password?: string;
   applicationName?: string;
-  tls?: PgTlsOptions;
+  tls?: TlsOptions;
   connectTimeoutMs?: number;
   maxMessageLength?: number;
   /** Extra `StartupMessage` parameters (e.g. `{ options: '-c statement_timeout=5000' }`). */
@@ -150,14 +143,9 @@ export class PgConnection {
       );
     }
     return new Promise((resolve, reject) => {
-      const tlsOptions = this.options.tls!;
       const socket = tls.connect({
         socket: raw,
-        ca: tlsOptions.ca,
-        cert: tlsOptions.cert,
-        key: tlsOptions.key,
-        rejectUnauthorized: tlsOptions.rejectUnauthorized ?? true,
-        servername: tlsOptions.serverName ?? this.options.host,
+        ...resolveTlsConnectOptions(this.options.tls, this.options.host, 'E_POSTGRES_TLS_FILE'),
       });
       const onSecure = (): void => {
         cleanup();

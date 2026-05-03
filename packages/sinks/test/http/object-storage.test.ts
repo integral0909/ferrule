@@ -15,7 +15,10 @@ afterEach(async () => {
   server = undefined;
 });
 
-const credentials = { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secretkeysecretkeysecretkey' };
+const credentials = {
+  access_key_id: 'AKIDEXAMPLE',
+  secret_access_key: 'secretkeysecretkeysecretkey',
+};
 
 describe('object_storage sink', () => {
   it('PUTs a batch to a path-style URL, signed with SigV4', async () => {
@@ -78,7 +81,7 @@ describe('object_storage sink', () => {
       endpoint: server.url,
       bucket: 'b',
       key: 'events',
-      batch: { maxEvents: 1 },
+      batch: { max_events: 1 },
       ...credentials,
     });
     const sink = await objectStorageSink.build(options, testBuildContext().ctx);
@@ -142,7 +145,7 @@ describe('object_storage sink', () => {
       endpoint: server.url,
       bucket: 'b',
       key: 'k',
-      sessionToken: 'the-token',
+      session_token: 'the-token',
       ...credentials,
     });
     const sink = await objectStorageSink.build(options, testBuildContext().ctx);

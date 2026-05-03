@@ -9,7 +9,7 @@ import { defineSource, type SourceContext } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
 
 const options = s.object({
-  intervalMs: s.duration().default(10_000).describe('How often to emit a heartbeat event.'),
+  interval: s.duration().default(10_000).describe('How often to emit a heartbeat event.'),
   message: s.string().default('heartbeat').describe("Text carried in the event's `message` field."),
 });
 
@@ -24,7 +24,7 @@ export const heartbeatSource = defineSource<HeartbeatOptions>({
   examples: [
     {
       title: 'A heartbeat every 30 seconds',
-      config: { intervalMs: '30s', message: 'still alive' },
+      config: { interval: '30s', message: 'still alive' },
     },
   ],
   build(opts) {
@@ -38,7 +38,7 @@ export const heartbeatSource = defineSource<HeartbeatOptions>({
             // Not tied to a timeout race, so `ctx.signal` is the right abort source here: a
             // heartbeat has no in-flight work to protect, unlike the backpressure races in
             // http_server.ts.
-            await ctx.clock.sleep(opts.intervalMs, ctx.signal);
+            await ctx.clock.sleep(opts.interval, ctx.signal);
           } catch {
             return;
           }

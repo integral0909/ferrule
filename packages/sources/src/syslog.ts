@@ -28,7 +28,8 @@ import {
   type SourceContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
-import { loadTlsServerOptions, tlsOptionsSchema } from './util/http.js';
+import { tlsSchema } from './fragments.js';
+import { loadTlsServerOptions } from './util/http.js';
 
 const tcpOptionsSchema = s.object({
   address: s
@@ -39,21 +40,21 @@ const tcpOptionsSchema = s.object({
         'OS-assigned ephemeral port.',
     )
     .example('0.0.0.0:601'),
-  tls: tlsOptionsSchema(),
-  maxConnections: s
+  tls: tlsSchema,
+  max_connections: s
     .integer({ min: 1 })
     .default(1024)
     .describe(
       'Maximum concurrent TCP connections. Additional connections are refused immediately.',
     ),
-  maxFrameLength: s
+  max_frame_length: s
     .byteSize()
     .default(1024 * 1024)
     .describe(
       'Maximum length of one syslog message, whether framed by RFC 6587 octet-counting or by ' +
         'the newline-delimited fallback used when a stream does not start with an octet count.',
     ),
-  idleTimeoutMs: s
+  idle_timeout: s
     .duration()
     .default(300_000)
     .describe('A connection that sends nothing for this long is closed, to bound resource usage.'),
@@ -65,7 +66,7 @@ const udpOptionsSchema = s.object({
     .default({ host: '0.0.0.0', port: 514 })
     .describe('UDP address to listen on for syslog datagrams, one message per datagram.')
     .example('0.0.0.0:514'),
-  maxPacketBytes: s
+  max_packet_size: s
     .byteSize()
     .default(64 * 1024)
     .describe(
@@ -73,7 +74,7 @@ const udpOptionsSchema = s.object({
         'the OS/protocol already bounds a single datagram, but this keeps a misbehaving sender ' +
         'from forcing large allocations.',
     ),
-  maxConcurrentSends: s
+  max_concurrent_sends: s
     .integer({ min: 1 })
     .default(256)
     .describe(
@@ -86,19 +87,19 @@ const udpOptionsSchema = s.object({
 
 const decodeErrorsSchema = s
   .object({
-    logLevel: s
+    log_level: s
       .enum(['debug', 'warn'])
       .default('debug')
       .describe('Log level used when a message fails to decode.'),
-    snippetBytes: s
-      .integer({ min: 0 })
+    snippet_size: s
+      .byteSize({ min: 0 })
       .default(200)
       .describe(
         'Bytes of a malformed message included (truncated) in the log line, so large payloads ' +
           'are never logged in full — only enough to identify what a sender is doing wrong.',
       ),
   })
-  .default({ logLevel: 'debug', snippetBytes: 200 })
+  .default({ log_level: 'debug', snippet_size: 200 })
   .describe(
     'A message that fails to decode is always counted (component_errors_total, ' +
       'component_discarded_events_total) and skipped rather than crashing its connection or the ' +
@@ -120,7 +121,7 @@ const options = s
         'Which syslog decoder to use. "auto" detects RFC 5424 vs RFC 3164 per message; pin it ' +
           'to skip detection when every sender uses the same format.',
       ),
-    decodeErrors: decodeErrorsSchema,
+    decode_errors: decodeErrorsSchema,
   })
   .refine(
     (v) => v.tcp !== undefined || v.udp !== undefined,
@@ -162,7 +163,7 @@ export const syslogSource = defineSource<SyslogOptions>({
       config: {
         tcp: {
           address: '0.0.0.0:6514',
-          tls: { certFile: '/etc/ferrule/cert.pem', keyFile: '/etc/ferrule/key.pem' },
+          tls: { cert_file: '/etc/ferrule/cert.pem', key_file: '/etc/ferrule/key.pem' },
         },
         format: 'rfc5424',
       },
@@ -190,7 +191,7 @@ export const syslogSource = defineSource<SyslogOptions>({
       const discardedCounter = ctx.metrics.counter(Metrics.discardedEvents);
 
       function snippet(bytes: Uint8Array): string {
-        const max = opts.decodeErrors.snippetBytes;
+        const max = opts.decode_errors.snippet_size;
         const slice = bytes.length > max ? bytes.subarray(0, max) : bytes;
         const text = Buffer.from(slice).toString('utf8');
         return bytes.length > max ? `${text}…` : text;
@@ -208,7 +209,7 @@ export const syslogSource = defineSource<SyslogOptions>({
           error: error instanceof Error ? error.message : String(error),
           snippet: snippet(bytes),
         };
-        if (opts.decodeErrors.logLevel === 'warn') {
+        if (opts.decode_errors.log_level === 'warn') {
           ctx.logger.warn('syslog: discarding a message that failed to decode', logFields);
         } else {
           ctx.logger.debug('syslog: discarding a message that failed to decode', logFields);
@@ -239,10 +240,10 @@ export const syslogSource = defineSource<SyslogOptions>({
         let shuttingDown = false;
 
         function handleConnection(socket: NetSocket): void {
-          if (activeConnections >= tcpOpts.maxConnections) {
+          if (activeConnections >= tcpOpts.max_connections) {
             connectionsRejected.increment();
             ctx.logger.warn('syslog: tcp connection limit reached, rejecting new connection', {
-              maxConnections: tcpOpts.maxConnections,
+              max_connections: tcpOpts.max_connections,
             });
             socket.destroy();
             return;
@@ -254,9 +255,9 @@ export const syslogSource = defineSource<SyslogOptions>({
           connections.add(state);
           const peerAddr = socket.remoteAddress;
           const peerPort = socket.remotePort;
-          const framer = new OctetCountingFramer({ maxFrameLength: tcpOpts.maxFrameLength });
+          const framer = new OctetCountingFramer({ maxFrameLength: tcpOpts.max_frame_length });
 
-          if (tcpOpts.idleTimeoutMs > 0) socket.setTimeout(tcpOpts.idleTimeoutMs);
+          if (tcpOpts.idle_timeout > 0) socket.setTimeout(tcpOpts.idle_timeout);
 
           socket.on('timeout', () => {
             ctx.logger.debug('syslog: tcp connection idle timeout, closing', {
@@ -475,11 +476,11 @@ export const syslogSource = defineSource<SyslogOptions>({
         // just move the OS's drop decision into this process's memory instead of avoiding it.
         socket.on('message', (msg: Buffer, rinfo: RemoteInfo) => {
           packetsTotal.increment();
-          if (msg.length > udpOpts.maxPacketBytes) {
+          if (msg.length > udpOpts.max_packet_size) {
             packetsOversize.increment();
-            ctx.logger.warn('syslog: udp datagram exceeds maxPacketBytes, dropping', {
+            ctx.logger.warn('syslog: udp datagram exceeds max_packet_size, dropping', {
               length: msg.length,
-              max: udpOpts.maxPacketBytes,
+              max: udpOpts.max_packet_size,
               peerAddr: rinfo.address,
               peerPort: rinfo.port,
             });
@@ -489,10 +490,10 @@ export const syslogSource = defineSource<SyslogOptions>({
             packetsDropped.increment();
             return;
           }
-          if (inFlight >= udpOpts.maxConcurrentSends) {
+          if (inFlight >= udpOpts.max_concurrent_sends) {
             packetsDropped.increment();
             ctx.logger.debug('syslog: udp backpressure limit reached, dropping datagram', {
-              maxConcurrentSends: udpOpts.maxConcurrentSends,
+              max_concurrent_sends: udpOpts.max_concurrent_sends,
             });
             return;
           }

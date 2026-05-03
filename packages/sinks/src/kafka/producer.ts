@@ -1,5 +1,5 @@
 import type { Event } from '@ferrule/core';
-import type { TlsOptions } from '../stream/wire-transport.js';
+import type { TlsOptions } from '../fragments.js';
 import { KafkaBrokerConnection } from './connection.js';
 import { KafkaError, KafkaProtocolError } from './errors.js';
 import { murmur2Partition, RoundRobinPartitioner, StickyPartitioner } from './murmur2.js';

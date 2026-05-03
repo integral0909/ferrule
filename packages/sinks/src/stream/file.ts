@@ -6,6 +6,7 @@ import { FerruleError, type Event } from '@ferrule/core';
 import { defaultCodecs, type CodecRegistry } from '@ferrule/codecs';
 import { defineSink, type BuildContext, type Sink, type SinkContext } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { encodingSchema, framingSchema, splitCodecOptions } from '../fragments.js';
 import { writeWithBackpressure } from './backpressure-write.js';
 import { frameBytes, type FramingMode } from './frame-writer.js';
 import { containsUnsafeSegment, resolveWithinBase } from './safe-path.js';
@@ -13,46 +14,40 @@ import { compileTemplate, renderTemplate, type CompiledTemplate } from './templa
 
 export const fileSinkOptionsSchema = s.object({
   /** Directory every rendered path must stay inside. Created if missing. */
-  baseDir: s.string().nonEmpty(),
-  /** Path template relative to `baseDir`. Supports `{{ field.path }}` and strftime specifiers
+  base_dir: s.string().nonEmpty(),
+  /** Path template relative to `base_dir`. Supports `{{ field.path }}` and strftime specifiers
    * (`%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%j`), e.g. `"{{ host }}/%Y-%m-%d.log"`. */
   path: s.string().nonEmpty(),
   /** Codec used to encode each event. Default `json`. */
-  encoding: s.string().default('json'),
-  encodingOptions: s.unknown().optional(),
-  framing: s.enum(['newline', 'length_prefixed', 'octet_counting']).default('newline'),
-  lengthPrefixWidth: s.enum(['u16', 'u32']).default('u32'),
-  lengthPrefixEndianness: s.enum(['BE', 'LE']).default('BE'),
+  encoding: encodingSchema('json'),
+  framing: framingSchema,
   /** Gzip-compress each file's contents as it is written. Default `false`. */
   gzip: s.boolean().default(false),
   /** Maximum simultaneously open files; least-recently-used ones are closed first. Default 64. */
-  maxOpenFiles: s.integer({ min: 1 }).default(64),
+  max_open_files: s.integer({ min: 1 }).default(64),
   /** Close a file handle after it has not been written to for this long. Default 30s. */
-  idleClose: s.duration().default(30_000),
+  idle_close: s.duration().default(30_000),
   /** Roll over to a new file once the current one reaches this size (post-compression, if
    * `gzip` is set). Default: no size-based rotation. */
-  rotateBytes: s.byteSize().optional(),
+  rotate_size: s.byteSize().optional(),
   /** Roll over to a new file once the current one has been open this long. Default: no
    * age-based rotation. */
-  rotateAge: s.duration().optional(),
+  rotate_age: s.duration().optional(),
   /** `always` fsyncs after every write, `interval` fsyncs periodically, `none` never explicitly
    * syncs. Default `none`. */
   fsync: s.enum(['always', 'interval', 'none']).default('none'),
   /** Interval between fsyncs when `fsync` is `interval`. Default 1s. */
-  fsyncInterval: s.duration().default(1_000),
+  fsync_interval: s.duration().default(1_000),
 });
 
 export type FileSinkOptions = Infer<typeof fileSinkOptionsSchema>;
 
 function framingModeOf(options: FileSinkOptions): FramingMode {
-  if (options.framing === 'length_prefixed') {
-    return {
-      kind: 'length_prefixed',
-      width: options.lengthPrefixWidth,
-      endianness: options.lengthPrefixEndianness,
-    };
+  const framing = options.framing;
+  if (framing.method === 'length_prefixed') {
+    return { kind: 'length_prefixed', width: framing.width, endianness: framing.endianness };
   }
-  if (options.framing === 'octet_counting') return { kind: 'octet_counting' };
+  if (framing.method === 'octet_counting') return { kind: 'octet_counting' };
   return { kind: 'newline' };
 }
 
@@ -103,8 +98,9 @@ export class FileSinkWriter {
   ) {
     this.pathTemplate = compileTemplate(options.path);
     this.framing = framingModeOf(options);
-    this.encoder = codecs.createEncoder(options.encoding, options.encodingOptions);
-    this.baseDir = nodePath.resolve(options.baseDir);
+    const [codec, codecOptions] = splitCodecOptions(options.encoding);
+    this.encoder = codecs.createEncoder(codec, codecOptions);
+    this.baseDir = nodePath.resolve(options.base_dir);
   }
 
   async start(): Promise<void> {
@@ -127,7 +123,7 @@ export class FileSinkWriter {
     try {
       resolvedBase = resolveWithinBase(this.baseDir, relative);
     } catch (error) {
-      this.ctx.logger.warn('file sink rejected an event whose path escapes baseDir', {
+      this.ctx.logger.warn('file sink rejected an event whose path escapes base_dir', {
         rendered: relative,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -192,11 +188,11 @@ export class FileSinkWriter {
   }
 
   private shouldRotate(file: OpenFile, incomingBytes: number): boolean {
-    const { rotateBytes, rotateAge } = this.options;
+    const { rotate_size: rotateSize, rotate_age: rotateAge } = this.options;
     if (
-      rotateBytes !== undefined &&
+      rotateSize !== undefined &&
       file.bytesWritten > 0 &&
-      file.bytesWritten + incomingBytes > rotateBytes
+      file.bytesWritten + incomingBytes > rotateSize
     ) {
       return true;
     }
@@ -209,11 +205,11 @@ export class FileSinkWriter {
   /** Finds the first generation index (starting at 0) that is not already at or past the
    * configured size limit, so restarting the process resumes rotation correctly. */
   private async resumeIndex(basePath: string): Promise<number> {
-    if (this.options.rotateBytes === undefined) return 0;
+    if (this.options.rotate_size === undefined) return 0;
     let index = 0;
     for (;;) {
       const stat = await fsp.stat(rotatedPhysicalPath(basePath, index)).catch(() => undefined);
-      if (stat === undefined || stat.size < this.options.rotateBytes) return index;
+      if (stat === undefined || stat.size < this.options.rotate_size) return index;
       index++;
     }
   }
@@ -251,7 +247,7 @@ export class FileSinkWriter {
     const nowMono = this.ctx.clock.monotonic();
     if (
       this.options.fsync === 'interval' &&
-      nowMono - file.lastFsyncAtMono < this.options.fsyncInterval
+      nowMono - file.lastFsyncAtMono < this.options.fsync_interval
     ) {
       return;
     }
@@ -260,7 +256,7 @@ export class FileSinkWriter {
   }
 
   private async enforceOpenFileCap(): Promise<void> {
-    while (this.open.size > this.options.maxOpenFiles) {
+    while (this.open.size > this.options.max_open_files) {
       const oldestKey = this.open.keys().next().value;
       if (oldestKey === undefined) return;
       const victim = this.open.get(oldestKey);
@@ -274,7 +270,7 @@ export class FileSinkWriter {
     const nowMono = this.ctx.clock.monotonic();
     const idleKeys: string[] = [];
     for (const [key, file] of this.open) {
-      if (nowMono - file.lastUsedAtMono >= this.options.idleClose) idleKeys.push(key);
+      if (nowMono - file.lastUsedAtMono >= this.options.idle_close) idleKeys.push(key);
     }
     for (const key of idleKeys) {
       const file = this.open.get(key);
@@ -358,7 +354,7 @@ export function createFileSink(
     async run(ctx: SinkContext): Promise<void> {
       const writer = new FileSinkWriter(options, ctx, codecs);
       await writer.start();
-      const idleLoopInterval = Math.max(1, Math.min(options.idleClose, 5_000));
+      const idleLoopInterval = Math.max(1, Math.min(options.idle_close, 5_000));
       // The idle-close loop must stop as soon as the main loop below does, even if that happens
       // before `ctx.signal` fires (input can end slightly ahead of the abort in some shutdown
       // orderings), so it is driven by its own controller rather than `ctx.signal` directly.
@@ -380,11 +376,11 @@ export function createFileSink(
     },
     async healthcheck(): Promise<void> {
       await fsp
-        .mkdir(nodePath.resolve(options.baseDir), { recursive: true })
+        .mkdir(nodePath.resolve(options.base_dir), { recursive: true })
         .catch((error: unknown) => {
           throw new FerruleError(
             'E_FILE_SINK_BASEDIR',
-            `cannot create base directory ${options.baseDir}: ${String(error)}`,
+            `cannot create base directory ${options.base_dir}: ${String(error)}`,
           );
         });
     },
@@ -401,7 +397,7 @@ export const fileSink = defineSink({
   examples: [
     {
       title: 'One gzip-compressed file per host per day',
-      config: { baseDir: '/var/log/ferrule', path: '{{ host }}/%Y-%m-%d.log.gz', gzip: true },
+      config: { base_dir: '/var/log/ferrule', path: '{{ host }}/%Y-%m-%d.log.gz', gzip: true },
     },
   ],
   build: (options: FileSinkOptions, _ctx: BuildContext) => createFileSink(options),

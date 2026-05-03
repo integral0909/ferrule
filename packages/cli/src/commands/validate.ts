@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { withGlobalFlags } from '../args.js';
 import type { Command } from '../command.js';
 import {
@@ -16,10 +19,26 @@ import { writeLine } from '../output.js';
 import { buildTopology, type TopologySpec } from '@ferrule/runtime';
 import type { LoadedConfig } from '@ferrule/config';
 
-function withoutDataDir(spec: TopologySpec): TopologySpec {
-  if (spec.settings?.dataDir === undefined) return spec;
-  const { dataDir: _dataDir, ...rest } = spec.settings;
-  return { ...spec, settings: rest };
+/**
+ * When there is no real `dataDir` to exercise (either because `--no-environment` was requested,
+ * or because neither the config nor `--data-dir` supplied one), substitutes a disposable temp
+ * directory so components that need *some* data directory to build (e.g. the `file` source's
+ * checkpoint store) can still build and run their real validation logic — without ever touching a
+ * real, user-visible path. Returns the possibly-substituted spec plus a cleanup callback that
+ * removes the temp directory, if one was created.
+ */
+async function specWithDisposableDataDir(
+  spec: TopologySpec,
+  skipEnvironment: boolean,
+): Promise<{ readonly spec: TopologySpec; readonly cleanup: () => Promise<void> }> {
+  if (!skipEnvironment && spec.settings?.dataDir !== undefined) {
+    return { spec, cleanup: () => Promise.resolve() };
+  }
+  const dataDir = await mkdtemp(join(tmpdir(), 'ferrule-validate-'));
+  return {
+    spec: { ...spec, settings: { ...spec.settings, dataDir } },
+    cleanup: () => rm(dataDir, { recursive: true, force: true }),
+  };
 }
 
 export const validateCommand: Command = {
@@ -89,54 +108,61 @@ export const validateCommand: Command = {
       throw error;
     }
 
-    let spec = toCliTopologySpec(config, topologyOverridesFromFlags(args, ctx.env.cwd));
-    if (skipEnvironment) spec = withoutDataDir(spec);
-    const result = await buildTopology(spec, registry);
+    const rawSpec = toCliTopologySpec(config, topologyOverridesFromFlags(args, ctx.env.cwd));
+    const { spec, cleanup } = await specWithDisposableDataDir(rawSpec, skipEnvironment);
+    try {
+      const result = await buildTopology(spec, registry);
 
-    if (!result.ok) {
+      if (!result.ok) {
+        if (asJson) {
+          writeLine(
+            ctx.env.stdout,
+            JSON.stringify({ errors: result.errors, warnings: result.warnings }, null, 2),
+          );
+        } else {
+          writeLine(
+            ctx.env.stderr,
+            await renderTopologyIssuesText(result.errors, config, ctx.color),
+          );
+          if (result.warnings.length > 0) {
+            writeLine(ctx.env.stderr, '');
+            writeLine(
+              ctx.env.stderr,
+              await renderTopologyIssuesText(result.warnings, config, ctx.color),
+            );
+          }
+        }
+        return EXIT_CONFIG_ERROR;
+      }
+
       if (asJson) {
         writeLine(
           ctx.env.stdout,
-          JSON.stringify({ errors: result.errors, warnings: result.warnings }, null, 2),
+          JSON.stringify(
+            {
+              ok: true,
+              warnings: result.warnings,
+              components: [...result.topology.components.keys()],
+            },
+            null,
+            2,
+          ),
         );
       } else {
-        writeLine(ctx.env.stderr, await renderTopologyIssuesText(result.errors, config, ctx.color));
         if (result.warnings.length > 0) {
-          writeLine(ctx.env.stderr, '');
           writeLine(
-            ctx.env.stderr,
+            ctx.env.stdout,
             await renderTopologyIssuesText(result.warnings, config, ctx.color),
           );
         }
-      }
-      return EXIT_CONFIG_ERROR;
-    }
-
-    if (asJson) {
-      writeLine(
-        ctx.env.stdout,
-        JSON.stringify(
-          {
-            ok: true,
-            warnings: result.warnings,
-            components: [...result.topology.components.keys()],
-          },
-          null,
-          2,
-        ),
-      );
-    } else {
-      if (result.warnings.length > 0) {
         writeLine(
           ctx.env.stdout,
-          await renderTopologyIssuesText(result.warnings, config, ctx.color),
+          `valid: ${result.topology.components.size} component(s), 0 error(s), ${result.warnings.length} warning(s)`,
         );
       }
-      writeLine(
-        ctx.env.stdout,
-        `valid: ${result.topology.components.size} component(s), 0 error(s), ${result.warnings.length} warning(s)`,
-      );
+      return EXIT_OK;
+    } finally {
+      await cleanup();
     }
-    return EXIT_OK;
   },
 };

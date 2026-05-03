@@ -14,20 +14,17 @@ function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {
 function baseOptions(port: number, overrides: Partial<KafkaSinkOptions> = {}): KafkaSinkOptions {
   return {
     brokers: [{ host: '127.0.0.1', port }],
-    clientId: 'ferrule-test',
+    client_id: 'ferrule-test',
     topic: 'events',
-    encoding: 'json',
+    encoding: { codec: 'json' },
     acks: '-1',
     compression: 'none',
     partitioner: 'sticky',
-    connectTimeout: 2_000,
-    requestTimeout: 5_000,
-    maxInFlightRequestsPerConnection: 5,
-    batchMaxEvents: 100,
-    batchMaxBytes: 1024 * 1024,
-    batchTimeout: 100,
-    retryInitialDelay: 5,
-    retryMaxDelay: 20,
+    connect_timeout: 2_000,
+    request_timeout: 5_000,
+    max_in_flight_requests_per_connection: 5,
+    batch: { max_events: 100, max_size: 1024 * 1024, timeout: 100 },
+    retry: { initial_backoff: 5, max_backoff: 20 },
     ...overrides,
   };
 }
@@ -62,7 +59,11 @@ describe('kafka sink', () => {
     broker = new FakeKafkaBroker({ partitionCounts: { 'logs-web': 4 } });
     const port = await broker.listen();
     const sink = createKafkaSink(
-      baseOptions(port, { topic: 'logs-{{ service }}', key: '{{ host }}', encoding: 'text' }),
+      baseOptions(port, {
+        topic: 'logs-{{ service }}',
+        key: '{{ host }}',
+        encoding: { codec: 'text' },
+      }),
     );
     const ctx = createTestSinkContext();
     const event = LogEvent.from({ service: 'web', host: 'h1', message: 'hi' });
@@ -83,7 +84,10 @@ describe('kafka sink', () => {
     broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
     const port = await broker.listen();
     const sink = createKafkaSink(
-      baseOptions(port, { headers: new Map([['x-service', '{{ service }}']]), encoding: 'text' }),
+      baseOptions(port, {
+        headers: new Map([['x-service', '{{ service }}']]),
+        encoding: { codec: 'text' },
+      }),
     );
     const ctx = createTestSinkContext();
     const event = LogEvent.from({ service: 'api', message: 'x' });
@@ -146,7 +150,9 @@ describe('kafka sink', () => {
       },
     });
     const port = await broker.listen();
-    const sink = createKafkaSink(baseOptions(port, { retryInitialDelay: 5, retryMaxDelay: 20 }));
+    const sink = createKafkaSink(
+      baseOptions(port, { retry: { initial_backoff: 5, max_backoff: 20 } }),
+    );
     const ctx = createTestSinkContext();
     const event = LogEvent.fromMessage('retry-me');
     const completion = withFinalizer(event);

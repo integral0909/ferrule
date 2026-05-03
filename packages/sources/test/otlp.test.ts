@@ -295,8 +295,8 @@ describe('otlp: gzip and size limits', () => {
     expect(events[0]!.get('message')).toBe('hello from otlp');
   });
 
-  it('responds 413 for a body exceeding maxBodyBytes', async () => {
-    const { baseUrl } = await startTracked({ address: '127.0.0.1:0', maxBodyBytes: 8 });
+  it('responds 413 for a body exceeding max_body_size', async () => {
+    const { baseUrl } = await startTracked({ address: '127.0.0.1:0', max_body_size: 8 });
     const body = Buffer.from(
       encodeExportLogsServiceRequest([LogEvent.fromMessage('x'.repeat(1000))]),
     );
@@ -313,7 +313,7 @@ describe('otlp: authentication', () => {
   it('rejects a missing bearer token with 401 and accepts a correct one', async () => {
     const { harness, baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      auth: { scheme: 'bearer', token: 'secret-token' },
+      auth: { strategy: 'bearer', token: 'secret-token' },
     });
     const body = Buffer.from(encodeExportLogsServiceRequest([sampleLogEvent()]));
     const unauthorized = await fetch(`${baseUrl}/v1/logs`, {
@@ -340,7 +340,7 @@ describe('otlp: backpressure and acknowledgement outcomes', () => {
   it('responds 503 with Retry-After once the backpressure timeout elapses', async () => {
     const parsed = otlpSource.options.parse({
       address: '127.0.0.1:0',
-      backpressureTimeoutMs: 200,
+      backpressure_timeout: 200,
     });
     const handle = (await otlpSource.build(parsed, buildCtx())) as OtlpSourceHandle;
     const harness = createControllableSourceContext();
@@ -412,10 +412,10 @@ describe('otlp: backpressure and acknowledgement outcomes', () => {
     expect(harness.sent).toHaveLength(1);
   });
 
-  it('rejects requests over maxConcurrentRequests with 429', async () => {
+  it('rejects requests over max_concurrent_requests with 429', async () => {
     const { harness, baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      maxConcurrentRequests: 1,
+      max_concurrent_requests: 1,
     });
     harness.blockSends();
     const body = Buffer.from(encodeExportLogsServiceRequest([sampleLogEvent()]));
@@ -492,10 +492,10 @@ describe('otlp: routing', () => {
     expect(response.headers.get('allow')).toBe('POST');
   });
 
-  it('honours a configured basePath', async () => {
+  it('honours a configured base_path', async () => {
     const { harness, baseUrl } = await startTracked({
       address: '127.0.0.1:0',
-      basePath: '/otlp',
+      base_path: '/otlp',
     });
     const body = Buffer.from(encodeExportLogsServiceRequest([sampleLogEvent()]));
     const responsePromise = fetch(`${baseUrl}/otlp/logs`, {

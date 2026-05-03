@@ -1,7 +1,8 @@
 import * as net from 'node:net';
 import * as tls from 'node:tls';
+import type { TlsOptions } from '../fragments.js';
 import { writeWithBackpressure } from '../stream/backpressure-write.js';
-import { type TlsOptions } from '../stream/wire-transport.js';
+import { resolveTlsConnectOptions } from '../stream/wire-transport.js';
 import { KafkaWriter } from './primitives.js';
 import {
   ApiKey,
@@ -252,11 +253,7 @@ function negotiateTls(
   return new Promise((resolve, reject) => {
     const socket = tls.connect({
       socket: raw,
-      ca: tlsOptions.ca,
-      cert: tlsOptions.cert,
-      key: tlsOptions.key,
-      rejectUnauthorized: tlsOptions.rejectUnauthorized,
-      servername: tlsOptions.serverName ?? host,
+      ...resolveTlsConnectOptions(tlsOptions, host, 'E_KAFKA_TLS_FILE'),
     });
     const onSecure = (): void => {
       cleanup();

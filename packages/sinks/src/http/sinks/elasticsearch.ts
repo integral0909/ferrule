@@ -27,13 +27,13 @@ export const elasticsearchSinkOptions = transportSchema.extend({
    * per event (so one bulk request can span several resolved index names). */
   index: s.string().nonEmpty(),
   /** Field supplying the document `_id`. Omit to let Elasticsearch assign one. */
-  idField: s.fieldPath().optional(),
+  id_field: s.fieldPath().optional(),
   action: s.enum(['index', 'create']).default('index'),
   /** Data-stream mode: forces the `create` action (data streams reject `index`) and treats
    * `index` as the data stream name. */
-  dataStream: s.boolean().default(false),
-  batch: batchSchema.optional(),
-  retry: retrySchema.optional(),
+  data_stream: s.boolean().default(false),
+  batch: batchSchema,
+  retry: retrySchema,
   concurrency: concurrencySchema,
 });
 export type ElasticsearchSinkOptions = Infer<typeof elasticsearchSinkOptions>;
@@ -85,9 +85,15 @@ export const elasticsearchSink = defineSink<ElasticsearchSinkOptions>({
   description: 'Writes events to Elasticsearch via the bulk API, one status per event.',
   options: elasticsearchSinkOptions,
   accepts: ['log', 'metric', 'span'],
+  examples: [
+    {
+      title: 'Daily indices',
+      config: { url: 'https://es.internal:9200', index: 'logs-%Y.%m.%d' },
+    },
+  ],
   build: (options, ctx) => {
     const indexTemplate: CompiledFieldTemplate = compileFieldTemplate(options.index);
-    const action = options.dataStream ? 'create' : options.action;
+    const action = options.data_stream ? 'create' : options.action;
     const bulkUrl = new URL('/_bulk', options.url).toString();
 
     const client = new HttpClient({
@@ -95,10 +101,10 @@ export const elasticsearchSink = defineSink<ElasticsearchSinkOptions>({
       tls: options.tls,
       proxy: options.proxy,
       timeoutMs: options.timeout,
-      maxResponseBytes: options.maxResponseBytes,
+      maxResponseBytes: options.max_response_size,
       compression: options.compression,
       headers: options.headers,
-      maxSockets: options.maxSockets,
+      maxSockets: options.max_sockets,
       logger: ctx.logger,
     });
 
@@ -108,8 +114,8 @@ export const elasticsearchSink = defineSink<ElasticsearchSinkOptions>({
     }
 
     function resolveId(event: Event): string | undefined {
-      if (options.idField === undefined || !(event instanceof LogEvent)) return undefined;
-      const value = event.get(options.idField);
+      if (options.id_field === undefined || !(event instanceof LogEvent)) return undefined;
+      const value = event.get(options.id_field);
       return value === undefined ? undefined : stringifyValue(value);
     }
 
@@ -130,10 +136,10 @@ export const elasticsearchSink = defineSink<ElasticsearchSinkOptions>({
       async run(sinkCtx) {
         try {
           await runBatchedSink<Encoded>(sinkCtx, {
-            ...(options.batch?.maxEvents !== undefined
-              ? { maxEvents: options.batch.maxEvents }
+            ...(options.batch?.max_events !== undefined
+              ? { maxEvents: options.batch.max_events }
               : {}),
-            ...(options.batch?.maxBytes !== undefined ? { maxBytes: options.batch.maxBytes } : {}),
+            ...(options.batch?.max_size !== undefined ? { maxBytes: options.batch.max_size } : {}),
             timeoutMs: options.batch?.timeout ?? 1_000,
             encode: (events) => encode(events, clockDate(sinkCtx.clock)),
             send: async (payload) => {

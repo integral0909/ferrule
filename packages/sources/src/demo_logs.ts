@@ -5,11 +5,13 @@
  * syslog lines (`syslog`); `format: 'all'` round-robins through all four, deterministically, by
  * event index.
  *
- * Output is fully deterministic for a given `seed` and `count`: a small seeded PRNG
- * (mulberry32) drives every random choice, and event timestamps are derived from a fixed epoch
- * plus the event's index rather than from wall-clock time, so two separate runs produce
- * byte-for-byte identical events. This makes the source useful as a reproducible test fixture,
- * not just a demo.
+ * Random field values are always driven by a small seeded PRNG (mulberry32), so the same `seed`
+ * always produces the same sequence of field choices. Event *timestamps*, however, default to
+ * real wall-clock time (`ctx.clock.now()`) at the moment generation starts, then advance forward
+ * at the configured `events_per_second` rate — this is what a "demo" source should do by default.
+ * For byte-for-byte reproducible output (e.g. as a test fixture), set both `seed` and
+ * `start_time`: with a fixed start instant and a fixed seed, two separate runs produce identical
+ * events.
  */
 import { BatchNotifier, LogEvent, Timestamp, type Event } from '@ferrule/core';
 import { decodeSyslogAuto } from '@ferrule/codecs';
@@ -28,7 +30,7 @@ const options = s.object({
         'apache_combined, json, and syslog in that order, deterministically by event index.',
     )
     .example('json', 'apache_combined', 'all'),
-  eventsPerSecond: s
+  events_per_second: s
     .integer({ min: 1 })
     .default(10)
     .describe(
@@ -39,13 +41,38 @@ const options = s.object({
     .integer({ min: 0 })
     .default(1)
     .describe(
-      'Seed for the internal PRNG (mulberry32). The same seed and count always produce ' +
-        'byte-for-byte identical output, regardless of eventsPerSecond or real elapsed time.',
+      'Seed for the internal PRNG (mulberry32) that drives field choices. Combined with a fixed ' +
+        'start_time, the same seed and count always produce byte-for-byte identical output, ' +
+        'regardless of events_per_second or real elapsed time.',
     ),
   count: s
     .integer({ min: 1 })
     .optional()
     .describe('Stop after emitting this many events. Omit to run until shutdown.'),
+  start_time: s
+    .string()
+    .transform((value, ctx) => {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return ctx.report(
+          'invalid_format',
+          `invalid start_time ${JSON.stringify(value)}`,
+          'use an RFC 3339 timestamp like "2024-01-01T00:00:00Z"',
+        );
+      }
+      return Timestamp.fromDate(date);
+    })
+    // .optional() must come after .transform(): the object schema only recognises a field as
+    // optional (skippable when absent from input) via the outermost schema's own type, and
+    // .transform() always returns a plain (non-optional) wrapper. Placed here, .optional()
+    // short-circuits an absent value to `undefined` before the transform ever runs, so the
+    // transform itself only ever sees a real string.
+    .optional()
+    .describe(
+      'Fixed start instant for deterministic output, used together with seed in tests. ' +
+        'Omit to start at the current clock time (ctx.clock.now()).',
+    )
+    .example('2024-01-01T00:00:00Z'),
 });
 
 export type DemoLogsOptions = Infer<typeof options>;
@@ -135,14 +162,6 @@ const MONTH_ABBR = [
   'Dec',
 ];
 
-/** Fixed base instant events are generated from; real wall-clock time is never read, so output
- * stays reproducible across runs. Each event advances one second past the previous one. */
-const BASE_TIMESTAMP = Timestamp.fromMillis(Date.UTC(2024, 0, 1, 0, 0, 0));
-
-function timestampForIndex(index: number): Timestamp {
-  return BASE_TIMESTAMP.add(BigInt(index) * 1_000_000_000n);
-}
-
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
@@ -188,8 +207,12 @@ function generateSyslogLine(rng: () => number, ts: Timestamp): string {
   );
 }
 
-function generateEvent(rng: () => number, format: DemoLogFormat, index: number): Event {
-  const ts = timestampForIndex(index);
+function generateEvent(
+  rng: () => number,
+  format: DemoLogFormat,
+  index: number,
+  ts: Timestamp,
+): Event {
   switch (format) {
     case 'apache_common':
       return LogEvent.fromMessage(generateApacheLine(rng, ts, false));
@@ -219,8 +242,8 @@ function formatForIndex(configured: DemoLogFormat | 'all', index: number): DemoL
 }
 
 /** Events generated together, once per tick, before pacing sleeps until the next one. Fixed
- * rather than derived from `eventsPerSecond` so pacing stays simple: exactly one batch, sized
- * `eventsPerSecond`, is produced per wall-clock (well, `ctx.clock`) second. */
+ * rather than derived from `events_per_second` so pacing stays simple: exactly one batch, sized
+ * `events_per_second`, is produced per wall-clock (well, `ctx.clock`) second. */
 const TICK_MS = 1000;
 
 export const demoLogsSource = defineSource<DemoLogsOptions>({
@@ -234,11 +257,17 @@ export const demoLogsSource = defineSource<DemoLogsOptions>({
   examples: [
     {
       title: 'A steady trickle of synthetic JSON app logs',
-      config: { format: 'json', eventsPerSecond: 5 },
+      config: { format: 'json', events_per_second: 5 },
     },
     {
       title: 'A fixed, reproducible fixture of 1000 mixed-format events',
-      config: { format: 'all', seed: 42, count: 1000, eventsPerSecond: 1000 },
+      config: {
+        format: 'all',
+        seed: 42,
+        count: 1000,
+        events_per_second: 1000,
+        start_time: '2024-01-01T00:00:00Z',
+      },
     },
   ],
   build(opts) {
@@ -248,20 +277,27 @@ export const demoLogsSource = defineSource<DemoLogsOptions>({
         const rng = mulberry32(opts.seed);
         const generated = ctx.metrics.counter('demo_logs_events_generated_total');
         let emitted = 0;
+        const base = opts.start_time ?? ctx.clock.now();
+        let tick = 0;
 
         while (!ctx.signal.aborted) {
           if (opts.count !== undefined && emitted >= opts.count) return;
           const batchSize =
             opts.count === undefined
-              ? opts.eventsPerSecond
-              : Math.min(opts.eventsPerSecond, opts.count - emitted);
+              ? opts.events_per_second
+              : Math.min(opts.events_per_second, opts.count - emitted);
 
           const events: Event[] = [];
           for (let i = 0; i < batchSize; i++) {
-            events.push(generateEvent(rng, formatForIndex(opts.format, emitted), emitted));
+            const tickStartNs = BigInt(tick) * 1_000_000_000n;
+            const withinTickNs =
+              batchSize > 0 ? (BigInt(i) * 1_000_000_000n) / BigInt(batchSize) : 0n;
+            const ts = base.add(tickStartNs + withinTickNs);
+            events.push(generateEvent(rng, formatForIndex(opts.format, emitted), emitted, ts));
             emitted++;
           }
           generated.increment(events.length);
+          tick++;
 
           const batch = new BatchNotifier();
           for (const event of events) event.metadata.finalizers.add(batch.createFinalizer());

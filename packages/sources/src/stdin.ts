@@ -12,18 +12,11 @@ import { BatchNotifier, type EventKind } from '@ferrule/core';
 import { decodeFrames, defaultCodecs, NewlineFramer, type CodecRegistry } from '@ferrule/codecs';
 import { defineSource, Metrics, type SourceContext, type SourceDefinition } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { decodingSchema, splitCodecOptions } from './fragments.js';
 
 const options = s.object({
-  decoding: s
-    .string()
-    .default('ndjson')
-    .describe(
-      'Codec name from the codec registry used to decode each line read from stdin. Defaults ' +
-        'to "ndjson" (one JSON object per line); use "text" for freeform unstructured lines.',
-    )
-    .example('ndjson', 'text', 'logfmt'),
-  decodingOptions: s.unknown().optional().describe('Options passed through to the codec decoder.'),
-  maxLineLength: s
+  decoding: decodingSchema('ndjson'),
+  max_line_length: s
     .byteSize()
     .default(1024 * 1024)
     .describe('Maximum length of one line read from stdin.'),
@@ -64,11 +57,11 @@ export function createStdinSource(
     type: 'stdin',
     description: 'Reads newline-framed, codec-decoded records from standard input.',
     options,
-    produces: (opts) => producesForCodec(opts.decoding),
+    produces: (opts) => producesForCodec(opts.decoding.codec),
     examples: [
       {
         title: 'Pipe NDJSON logs from a file into Ferrule',
-        config: { decoding: 'ndjson' },
+        config: { decoding: { codec: 'ndjson' } },
       },
     ],
     build(opts) {
@@ -76,9 +69,10 @@ export function createStdinSource(
         async run(ctx: SourceContext): Promise<void> {
           if (ctx.signal.aborted) return;
           const codecs: CodecRegistry = defaultCodecs;
-          const decoder = codecs.createDecoder(opts.decoding, opts.decodingOptions);
+          const [decodingCodec, decodingOptions] = splitCodecOptions(opts.decoding);
+          const decoder = codecs.createDecoder(decodingCodec, decodingOptions);
           const framer = new NewlineFramer({
-            maxLineLength: opts.maxLineLength,
+            maxLineLength: opts.max_line_length,
             onOversize: 'error',
           });
           const decodeErrors = ctx.metrics.counter(Metrics.errors);

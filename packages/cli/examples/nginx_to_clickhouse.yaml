@@ -12,8 +12,8 @@ sources:
   nginx_access:
     type: file
     include: ['/var/log/nginx/access.log']
-    decoding: text
-    readFrom: end
+    decoding: { codec: text }
+    read_from: end
 
 transforms:
   parse_nginx:
@@ -43,7 +43,7 @@ sinks:
     database: telemetry
     table: nginx_logs
     batch:
-      maxEvents: 5000
+      max_events: 5000
       timeout: 2s
     retry:
-      maxAttempts: 5
+      max_attempts: 5

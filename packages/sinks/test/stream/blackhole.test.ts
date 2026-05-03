@@ -29,8 +29,8 @@ describe('blackhole sink', () => {
     for (const c of completions) await expect(c).resolves.toBe('delivered');
   });
 
-  it('logs progress periodically when logInterval is set, driven by the manual clock', async () => {
-    const sink = createBlackholeSink({ logInterval: 1000 });
+  it('logs progress periodically when log_interval is set, driven by the manual clock', async () => {
+    const sink = createBlackholeSink({ log_interval: 1000 });
     const harness = createTestSinkContext();
 
     const running = sink.run(harness.ctx);

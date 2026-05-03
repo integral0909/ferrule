@@ -20,5 +20,5 @@ sinks:
   prom_out:
     type: prometheus_exporter
     inputs: [rollup]
-    listenAddress: 0.0.0.0:9102
-    staleBound: 5m
+    listen_address: 0.0.0.0:9102
+    stale_bound: 5m

@@ -49,11 +49,11 @@ const options = s.object({
   targets: s
     .array(targetSchema, { minItems: 1 })
     .describe('Endpoints polled for Prometheus text exposition metrics.'),
-  intervalMs: s
+  interval: s
     .duration()
     .default(15_000)
     .describe('Time between the start of one scrape round and the next.'),
-  scrapeTimeoutMs: s
+  scrape_timeout: s
     .duration()
     .default(10_000)
     .describe('Per-target request timeout. A target that does not respond in time is aborted.'),
@@ -61,7 +61,7 @@ const options = s.object({
     .integer({ min: 1 })
     .default(8)
     .describe('Maximum number of targets scraped in parallel within one round.'),
-  honorLabels: s
+  honor_labels: s
     .boolean()
     .default(false)
     .describe(
@@ -69,7 +69,7 @@ const options = s.object({
         'overwrite any same-named label already present on a scraped metric. When true, a label ' +
         'already present on the scraped metric is left alone and only missing labels are filled in.',
     ),
-  decodingOptions: s
+  decoding: s
     .unknown()
     .optional()
     .describe('Options passed through to the Prometheus text decoder.'),
@@ -159,7 +159,7 @@ async function scrapeOne(
 
   let body: string;
   try {
-    body = await scrapeHttp(target.url, opts.scrapeTimeoutMs);
+    body = await scrapeHttp(target.url, opts.scrape_timeout);
   } catch (error) {
     failures.increment();
     ctx.logger.warn('prometheus_scrape: scrape failed', {
@@ -183,7 +183,7 @@ async function scrapeOne(
   }
 
   const metricEvents = events.filter(isMetricEvent);
-  applyTargetLabels(metricEvents, target, opts.honorLabels);
+  applyTargetLabels(metricEvents, target, opts.honor_labels);
 
   if (metricEvents.length > 0) {
     const batch = new BatchNotifier();
@@ -243,7 +243,7 @@ export const prometheusScrapeSource = defineSource<PrometheusScrapeOptions>({
     },
   ],
   build(opts, _buildCtx): Source {
-    const decoder = defaultCodecs.createDecoder('prometheus_text', opts.decodingOptions);
+    const decoder = defaultCodecs.createDecoder('prometheus_text', opts.decoding);
     const resolvedTargets = opts.targets.map(resolveTarget);
 
     async function run(ctx: SourceContext): Promise<void> {
@@ -253,7 +253,7 @@ export const prometheusScrapeSource = defineSource<PrometheusScrapeOptions>({
         await runRound(ctx, resolvedTargets, opts, decoder);
         if (ctx.signal.aborted) break;
         try {
-          await ctx.clock.sleep(opts.intervalMs, ctx.signal);
+          await ctx.clock.sleep(opts.interval, ctx.signal);
         } catch {
           break;
         }

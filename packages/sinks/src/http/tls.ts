@@ -9,6 +9,7 @@ export interface ResolvedTls {
   readonly cert?: Buffer;
   readonly key?: Buffer;
   readonly rejectUnauthorized: boolean;
+  readonly servername?: string;
 }
 
 /**
@@ -17,7 +18,7 @@ export interface ResolvedTls {
  * since it defeats TLS entirely.
  */
 export function resolveTls(options: TlsOptions | undefined, logger: Logger): ResolvedTls {
-  const verify = options?.verify ?? true;
+  const verify = options?.verify_certificate ?? true;
   if (!verify) {
     logger.warn(
       'TLS certificate verification is DISABLED for this sink; connections are not authenticated ' +
@@ -27,13 +28,14 @@ export function resolveTls(options: TlsOptions | undefined, logger: Logger): Res
   const resolved: ResolvedTls = { rejectUnauthorized: verify };
   return {
     ...resolved,
-    ...(options?.caFile !== undefined ? { ca: readCertFile(options.caFile, 'CA') } : {}),
-    ...(options?.certFile !== undefined
-      ? { cert: readCertFile(options.certFile, 'client certificate') }
+    ...(options?.ca_file !== undefined ? { ca: readCertFile(options.ca_file, 'CA') } : {}),
+    ...(options?.cert_file !== undefined
+      ? { cert: readCertFile(options.cert_file, 'client certificate') }
       : {}),
-    ...(options?.keyFile !== undefined
-      ? { key: readCertFile(options.keyFile, 'client private key') }
+    ...(options?.key_file !== undefined
+      ? { key: readCertFile(options.key_file, 'client private key') }
       : {}),
+    ...(options?.server_name !== undefined ? { servername: options.server_name } : {}),
   };
 }
 

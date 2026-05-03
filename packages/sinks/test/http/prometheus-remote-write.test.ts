@@ -108,7 +108,7 @@ describe('prometheus_remote_write sink', () => {
     server = await startCapturingServer();
     const options = prometheusRemoteWriteSinkOptions.parse({
       url: server.url,
-      batch: { maxEvents: 1 },
+      batch: { max_events: 1 },
     });
     const sink = await prometheusRemoteWriteSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();

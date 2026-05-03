@@ -43,7 +43,7 @@ async function startFileSource(dataDir: string, rawOptions: RawOptions, acknowle
   const handle = (await fileSource.build(parsed, buildCtx(dataDir))) as FileSourceHandle;
   const harness = createControllableSourceContext({ acknowledgements, dataDir });
   const runPromise = handle.run(harness.ctx);
-  return { handle, harness, runPromise, pollIntervalMs: parsed.pollIntervalMs };
+  return { handle, harness, runPromise, poll_interval: parsed.poll_interval };
 }
 
 function messages(harness: Harness): string[] {
@@ -99,9 +99,9 @@ async function waitForNextBatch(
 /** Waits until the source's poll loop is genuinely idle (blocked on its between-polls sleep),
  * acknowledging any sends along the way so a multi-file tick can actually finish. Then advances
  * the clock by exactly one poll interval to deterministically trigger the next tick. */
-async function nextPoll(harness: Harness, pollIntervalMs: number): Promise<void> {
+async function nextPoll(harness: Harness, poll_interval: number): Promise<void> {
   await pump(harness, () => harness.clock.pendingCount > 0);
-  await harness.clock.advance(pollIntervalMs);
+  await harness.clock.advance(poll_interval);
 }
 
 /** Drains the source cleanly: acknowledges everything (including anything the in-flight tick
@@ -144,8 +144,8 @@ describe('file: happy path', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await pump(harness, () => messages(harness).length >= 2);
     expect(messages(harness).sort()).toEqual(['line one', 'line two']);
@@ -158,16 +158,16 @@ describe('file: happy path', () => {
     const logFile = join(logDir, 'app.log');
     await writeFile(logFile, 'old line\n');
 
-    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+    const { harness, runPromise, poll_interval } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      pollIntervalMs: 50,
+      poll_interval: 50,
     });
     // Let discovery run at least once so the file is tracked from its current end before we
     // append anything new.
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
 
     await appendLine(logFile, 'new line');
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await pump(harness, () => messages(harness).length >= 1);
     expect(messages(harness)).toEqual(['new line']);
     await stop(harness, runPromise);
@@ -179,19 +179,19 @@ describe('file: happy path', () => {
     const logFile = join(logDir, 'app.log');
     await writeFile(logFile, '');
 
-    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+    const { harness, runPromise, poll_interval } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
 
     await appendLine(logFile, 'first');
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await pump(harness, () => messages(harness).includes('first'));
 
     await appendLine(logFile, 'second');
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await pump(harness, () => messages(harness).includes('second'));
 
     expect(messages(harness)).toEqual(['first', 'second']);
@@ -204,14 +204,14 @@ describe('file: happy path', () => {
     await writeFile(join(logDir, 'app.log'), 'keep me\n');
     await writeFile(join(logDir, 'app.debug.log'), 'skip me\n');
 
-    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+    const { harness, runPromise, poll_interval } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
       exclude: [join(logDir, '*.debug.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await pump(harness, () => messages(harness).length >= 1);
-    await nextPoll(harness, pollIntervalMs); // give the excluded file a chance to (wrongly) appear
+    await nextPoll(harness, poll_interval); // give the excluded file a chance to (wrongly) appear
     await pump(harness, () => true);
     expect(messages(harness)).toEqual(['keep me']);
     await stop(harness, runPromise);
@@ -225,8 +225,8 @@ describe('file: happy path', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '**', '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await pump(harness, () => messages(harness).length >= 1);
     expect(messages(harness)).toEqual(['deep line']);
@@ -243,9 +243,9 @@ describe('file: decode errors and bounds', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      decoding: 'json',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      decoding: { codec: 'json' },
+      poll_interval: 50,
     });
     await pump(harness, () => messages(harness).length >= 2);
     expect(messages(harness).sort()).toEqual(['good1', 'good2']);
@@ -261,9 +261,9 @@ describe('file: decode errors and bounds', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      maxLineLength: 10,
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      max_line_length: 10,
+      poll_interval: 50,
     });
     await pump(harness, () => messages(harness).length >= 2);
     const msgs = messages(harness);
@@ -272,7 +272,7 @@ describe('file: decode errors and bounds', () => {
     await stop(harness, runPromise);
   });
 
-  it('respects maxOpenFiles', async () => {
+  it('respects max_open_files', async () => {
     const dataDir = await tempDir();
     const logDir = await tempDir();
     await writeFile(join(logDir, 'a.log'), 'a\n');
@@ -281,9 +281,9 @@ describe('file: decode errors and bounds', () => {
 
     const { handle, harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      maxOpenFiles: 2,
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      max_open_files: 2,
+      poll_interval: 50,
     });
     await pump(harness, () => messages(harness).length >= 2);
     expect(handle.trackedPaths().length).toBeLessThanOrEqual(2);
@@ -306,9 +306,9 @@ describe('file: multiline aggregation', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
-      multiline: { startPattern: '^\\d{4}-\\d{2}-\\d{2}', timeoutMs: 100, maxLines: 50 },
+      read_from: 'beginning',
+      poll_interval: 50,
+      multiline: { start_pattern: '^\\d{4}-\\d{2}-\\d{2}', timeout: 100, max_lines: 50 },
     });
     // The first event ("boom" + 2 continuation lines) flushes as soon as the second start line
     // is seen; the second event only flushes on a timeout, since nothing follows it.
@@ -330,21 +330,21 @@ describe('file: rotation and truncation', () => {
     const logFile = join(logDir, 'app.log');
     await writeFile(logFile, '');
 
-    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+    const { harness, runPromise, poll_interval } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await appendLine(logFile, 'before rotation');
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await pump(harness, () => messages(harness).includes('before rotation'));
 
     // rename+create rotation
     await rename(logFile, join(logDir, 'app.log.1'));
     await writeFile(logFile, '');
     await appendLine(logFile, 'after rotation');
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await pump(harness, () => messages(harness).includes('after rotation'));
 
     expect(messages(harness)).toEqual(['before rotation', 'after rotation']);
@@ -357,20 +357,20 @@ describe('file: rotation and truncation', () => {
     const logFile = join(logDir, 'app.log');
     await writeFile(logFile, '');
 
-    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+    const { harness, runPromise, poll_interval } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await appendLine(logFile, 'line one');
     await appendLine(logFile, 'line two');
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await pump(harness, () => messages(harness).length >= 2);
 
     await truncate(logFile, 0);
     await appendLine(logFile, 'after truncate');
-    await nextPoll(harness, pollIntervalMs);
+    await nextPoll(harness, poll_interval);
     await pump(harness, () => messages(harness).includes('after truncate'));
 
     expect(messages(harness)).toEqual(['line one', 'line two', 'after truncate']);
@@ -387,8 +387,8 @@ describe('file: checkpoints and acknowledgements', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await waitForNextBatch(harness, 0);
     ackAll(harness, 'errored');
@@ -407,8 +407,8 @@ describe('file: checkpoints and acknowledgements', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await waitForNextBatch(harness, 0);
     ackAll(harness, 'rejected');
@@ -427,8 +427,8 @@ describe('file: checkpoints and acknowledgements', () => {
     // "Run 1": read both lines, acknowledge them, then stop (simulating a clean shutdown).
     const run1 = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await pump(run1.harness, () => messages(run1.harness).length >= 2);
     await stop(run1.harness, run1.runPromise);
@@ -442,8 +442,8 @@ describe('file: checkpoints and acknowledgements', () => {
     // "Run 2": a fresh build (a real restart would also be a fresh process), same dataDir.
     const run2 = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await pump(run2.harness, () => messages(run2.harness).includes('line three'));
     // Only the new line — not a re-delivery of the two already-acknowledged ones.
@@ -459,7 +459,7 @@ describe('file: checkpoints and acknowledgements', () => {
 
     const { harness, runPromise } = await startFileSource(
       dataDir,
-      { include: [join(logDir, '*.log')], readFrom: 'beginning', pollIntervalMs: 50 },
+      { include: [join(logDir, '*.log')], read_from: 'beginning', poll_interval: 50 },
       false,
     );
     await waitForNextBatch(harness, 0); // no ack needed — the source must not be waiting on one
@@ -480,10 +480,10 @@ describe('file: checkpoints and acknowledgements', () => {
     const logFile = join(logDir, 'app.log');
     await writeFile(logFile, 'line one\n');
 
-    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+    const { harness, runPromise, poll_interval } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
 
     await waitForNextBatch(harness, 0);
@@ -494,7 +494,7 @@ describe('file: checkpoints and acknowledgements', () => {
 
     await appendLine(logFile, 'line two');
     while (harness.clock.pendingCount === 0) await yieldToEventLoop();
-    await harness.clock.advance(pollIntervalMs);
+    await harness.clock.advance(poll_interval);
 
     await waitForNextBatch(harness, 1);
     expect(messages(harness)).toEqual(['line one', 'line two']);
@@ -509,31 +509,31 @@ describe('file: checkpoints and acknowledgements', () => {
     expect(Object.values(checkpoint)[0]?.offset).toBe(0);
   });
 
-  it('backpressures a file once maxOutstandingChunks unacknowledged chunks are queued', async () => {
+  it('backpressures a file once max_outstanding_chunks unacknowledged chunks are queued', async () => {
     const dataDir = await tempDir();
     const logDir = await tempDir();
     const logFile = join(logDir, 'app.log');
     await writeFile(logFile, 'line one\n');
 
-    const { harness, runPromise, pollIntervalMs } = await startFileSource(dataDir, {
+    const { harness, runPromise, poll_interval } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
-      maxOutstandingChunks: 2,
+      read_from: 'beginning',
+      poll_interval: 50,
+      max_outstanding_chunks: 2,
     });
 
     // Fill the two outstanding slots without acknowledging either.
     await waitForNextBatch(harness, 0);
     await appendLine(logFile, 'line two');
     while (harness.clock.pendingCount === 0) await yieldToEventLoop();
-    await harness.clock.advance(pollIntervalMs);
+    await harness.clock.advance(poll_interval);
     await waitForNextBatch(harness, 1);
 
     // A third chunk's worth of data arrives, but the file is backpressured: it must not be read
     // (and so not sent) while both outstanding slots are still unacknowledged.
     await appendLine(logFile, 'line three');
     while (harness.clock.pendingCount === 0) await yieldToEventLoop();
-    await harness.clock.advance(pollIntervalMs);
+    await harness.clock.advance(poll_interval);
     for (let i = 0; i < 20; i++) await yieldToEventLoop();
     expect(harness.sent).toHaveLength(2);
 
@@ -542,7 +542,7 @@ describe('file: checkpoints and acknowledgements', () => {
     await yieldToEventLoop();
     await yieldToEventLoop();
     while (harness.clock.pendingCount === 0) await yieldToEventLoop();
-    await harness.clock.advance(pollIntervalMs);
+    await harness.clock.advance(poll_interval);
     await waitForNextBatch(harness, 2);
     expect(messages(harness)).toEqual(['line one', 'line two', 'line three']);
 
@@ -559,8 +559,8 @@ describe('file: backpressure and shutdown', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     harness.blockSends();
     await waitForNextBatch(harness, 0);
@@ -577,8 +577,8 @@ describe('file: backpressure and shutdown', () => {
 
     const { harness, runPromise } = await startFileSource(dataDir, {
       include: [join(logDir, '*.log')],
-      readFrom: 'beginning',
-      pollIntervalMs: 50,
+      read_from: 'beginning',
+      poll_interval: 50,
     });
     await pump(harness, () => messages(harness).length >= 1);
     await stop(harness, runPromise);

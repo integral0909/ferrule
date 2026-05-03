@@ -9,7 +9,7 @@ sources:
   demo:
     type: demo_logs
     format: json
-    eventsPerSecond: 10
+    events_per_second: 10
 
 transforms:
   drop_debug:

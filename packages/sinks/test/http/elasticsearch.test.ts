@@ -81,7 +81,7 @@ describe('elasticsearch sink', () => {
     expect(action.index._index).toBe('logs-2024.06.01-api');
   });
 
-  it('sets _id from the configured idField', async () => {
+  it('sets _id from the configured id_field', async () => {
     server = await startServer((_req, res) => {
       res.writeHead(200);
       res.end(JSON.stringify({ errors: false, items: [{ index: { status: 200 } }] }));
@@ -89,7 +89,7 @@ describe('elasticsearch sink', () => {
     const options = elasticsearchSinkOptions.parse({
       url: server.url,
       index: 'logs',
-      idField: '.id',
+      id_field: '.id',
     });
     const sink = await elasticsearchSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();
@@ -109,7 +109,7 @@ describe('elasticsearch sink', () => {
     const options = elasticsearchSinkOptions.parse({
       url: server.url,
       index: 'logs-ds',
-      dataStream: true,
+      data_stream: true,
     });
     const sink = await elasticsearchSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();
@@ -162,7 +162,7 @@ describe('elasticsearch sink', () => {
     const options = elasticsearchSinkOptions.parse({
       url: server.url,
       index: 'logs',
-      retry: { maxAttempts: 1 },
+      retry: { max_attempts: 1 },
     });
     const sink = await elasticsearchSink.build(options, testBuildContext().ctx);
     const harness = createTestSinkContext();

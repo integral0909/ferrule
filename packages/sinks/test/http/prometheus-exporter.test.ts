@@ -24,7 +24,7 @@ async function listenAndGetPort(
 describe('prometheus_exporter sink', () => {
   it('serves an ephemeral port and returns 404 for anything but GET <path>', async () => {
     const buildCtx = testBuildContext();
-    const options = prometheusExporterSinkOptions.parse({ listenAddress: '127.0.0.1:0' });
+    const options = prometheusExporterSinkOptions.parse({ listen_address: '127.0.0.1:0' });
     const sink = await prometheusExporterSink.build(options, buildCtx.ctx);
     const harness = createTestSinkContext();
     const { run, port } = await listenAndGetPort(sink, harness.ctx, buildCtx.logs);
@@ -39,7 +39,7 @@ describe('prometheus_exporter sink', () => {
 
   it('serves the latest absolute gauge value and accumulates an incremental counter', async () => {
     const buildCtx = testBuildContext();
-    const options = prometheusExporterSinkOptions.parse({ listenAddress: '127.0.0.1:0' });
+    const options = prometheusExporterSinkOptions.parse({ listen_address: '127.0.0.1:0' });
     const sink = await prometheusExporterSink.build(options, buildCtx.ctx);
     const harness = createTestSinkContext();
     const { run, port } = await listenAndGetPort(sink, harness.ctx, buildCtx.logs);
@@ -71,8 +71,8 @@ describe('prometheus_exporter sink', () => {
   it('expires a series once it has not been observed within the staleness bound', async () => {
     const buildCtx = testBuildContext();
     const options = prometheusExporterSinkOptions.parse({
-      listenAddress: '127.0.0.1:0',
-      staleBound: 1_000,
+      listen_address: '127.0.0.1:0',
+      stale_bound: 1_000,
     });
     const sink = await prometheusExporterSink.build(options, buildCtx.ctx);
     const harness = createTestSinkContext();

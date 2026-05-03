@@ -21,10 +21,8 @@ function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {
 function baseOptions(overrides: Partial<ConsoleSinkOptions> = {}): ConsoleSinkOptions {
   return {
     stream: 'stdout',
-    encoding: 'json',
-    framing: 'newline',
-    lengthPrefixWidth: 'u32',
-    lengthPrefixEndianness: 'BE',
+    encoding: { codec: 'json' },
+    framing: { method: 'newline' },
     ...overrides,
   };
 }
@@ -57,7 +55,7 @@ describe('console sink', () => {
     const target = new PassThrough({ highWaterMark: 1 });
     // Pause the stream so its internal buffer fills up and write() starts returning false.
     target.pause();
-    const sink = createConsoleSink(baseOptions({ encoding: 'text' }), target);
+    const sink = createConsoleSink(baseOptions({ encoding: { codec: 'text' } }), target);
     const harness = createTestSinkContext();
 
     const events = Array.from({ length: 50 }, (_, i) => LogEvent.fromMessage('x'.repeat(200) + i));
@@ -95,7 +93,11 @@ describe('console sink', () => {
     const registry = new CodecRegistry().register(throwing);
     const target = new PassThrough();
     target.resume();
-    const sink = createConsoleSink(baseOptions({ encoding: 'throwing' }), target, registry);
+    const sink = createConsoleSink(
+      baseOptions({ encoding: { codec: 'throwing' } }),
+      target,
+      registry,
+    );
     const harness = createTestSinkContext();
 
     const good = LogEvent.fromMessage('fine');
@@ -117,7 +119,10 @@ describe('console sink', () => {
     const chunks: Buffer[] = [];
     target.on('data', (chunk: Buffer) => chunks.push(chunk));
     const sink = createConsoleSink(
-      baseOptions({ framing: 'length_prefixed', lengthPrefixWidth: 'u16', encoding: 'text' }),
+      baseOptions({
+        framing: { method: 'length_prefixed', width: 'u16', endianness: 'BE' },
+        encoding: { codec: 'text' },
+      }),
       target,
       defaultCodecs,
     );

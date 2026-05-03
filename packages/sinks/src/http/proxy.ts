@@ -15,7 +15,7 @@ export interface ResolvedProxy {
 /**
  * Resolves the proxy (if any) that should be used to reach `target`, following the conventional
  * `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` environment variables (and their lowercase forms) unless
- * an explicit `options.url` overrides them, or `options.useEnv` is `false`.
+ * an explicit `options.url` overrides them, or `options.use_env` is `false`.
  */
 export function resolveProxy(
   target: URL,
@@ -23,7 +23,7 @@ export function resolveProxy(
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedProxy | undefined {
   if (options?.url !== undefined) return toResolvedProxy(new URL(options.url));
-  if (options?.useEnv === false) return undefined;
+  if (options?.use_env === false) return undefined;
   const noProxy = env['NO_PROXY'] ?? env['no_proxy'] ?? '';
   if (matchesNoProxy(target.hostname, noProxy)) return undefined;
   const raw =
@@ -121,7 +121,7 @@ export class TunnelingHttpsAgent extends HttpsAgent {
       proxySocket.removeListener('error', fail);
       const tlsSocket = tlsConnect({
         socket: proxySocket,
-        servername: targetHost,
+        servername: this.tls.servername ?? targetHost,
         ca: this.tls.ca,
         cert: this.tls.cert,
         key: this.tls.key,

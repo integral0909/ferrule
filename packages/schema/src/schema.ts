@@ -144,6 +144,14 @@ export abstract class Schema<Out> {
     return this.meta.secret === true;
   }
 
+  /**
+   * Whether an object field using this schema may be omitted. True for optional and defaulted
+   * schemas, and for refinements or transforms wrapped around them.
+   */
+  get acceptsMissing(): boolean {
+    return false;
+  }
+
   get description(): string | undefined {
     return this.meta.description;
   }
@@ -190,6 +198,10 @@ export class OptionalSchema<T> extends Schema<T | undefined> {
     super();
   }
 
+  override get acceptsMissing(): boolean {
+    return true;
+  }
+
   check(input: unknown, ctx: ParseContext): Result<T | undefined> {
     return input === undefined ? undefined : this.inner.check(input, ctx);
   }
@@ -209,6 +221,10 @@ export class DefaultSchema<T> extends Schema<T> {
     readonly defaultValue: T,
   ) {
     super();
+  }
+
+  override get acceptsMissing(): boolean {
+    return true;
   }
 
   check(input: unknown, ctx: ParseContext): Result<T> {
@@ -233,10 +249,18 @@ class EffectsSchema<In, Out> extends Schema<Out> {
     this.meta = { ...(inner as EffectsSchema<unknown, In>).meta };
   }
 
+  override get acceptsMissing(): boolean {
+    return this.inner.acceptsMissing;
+  }
+
   check(input: unknown, ctx: ParseContext): Result<Out> {
     const before = ctx.issues.length;
     const value = this.inner.check(input, ctx);
     if (value === INVALID || ctx.issues.length > before) return INVALID;
+    // A missing optional value stays missing: refinements and transforms apply to present values.
+    if (value === undefined && input === undefined && this.inner.acceptsMissing) {
+      return undefined as Out;
+    }
     return this.effect(value, ctx);
   }
 
@@ -506,7 +530,7 @@ export class ArraySchema<T> extends Schema<T[]> {
 export type Shape = Record<string, Schema<unknown>>;
 
 type OptionalKeys<S extends Shape> = {
-  [K in keyof S]: S[K] extends OptionalSchema<unknown> ? K : never;
+  [K in keyof S]: undefined extends Infer<S[K]> ? K : never;
 }[keyof S];
 type RequiredKeys<S extends Shape> = Exclude<keyof S, OptionalKeys<S>>;
 type Simplify<T> = { [K in keyof T]: T[K] } & {};
@@ -544,11 +568,7 @@ export class ObjectSchema<S extends Shape> extends Schema<ObjectOutput<S>> {
     for (const key of Object.keys(this.shape)) {
       const schema = this.shape[key]!;
       const raw = Object.hasOwn(input, key) ? input[key] : undefined;
-      if (
-        raw === undefined &&
-        !(schema instanceof OptionalSchema) &&
-        !(schema instanceof DefaultSchema)
-      ) {
+      if (raw === undefined && !schema.acceptsMissing) {
         ctx.at(key, () => ctx.report('required', 'is required'));
         failed = true;
         continue;

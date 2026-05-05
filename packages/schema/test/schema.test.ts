@@ -393,3 +393,39 @@ describe('suggestion helpers', () => {
     expect(formatIssuePath(['headers', 'x.y'])).toBe('headers["x.y"]');
   });
 });
+
+describe('optional fields wrapped in refinements and transforms', () => {
+  const schema = s.object({
+    at: s
+      .string()
+      .optional()
+      .transform((v) => (v === undefined ? undefined : v.toUpperCase())),
+    even: s
+      .integer()
+      .optional()
+      .refine((n) => n === undefined || n % 2 === 0, 'must be even')
+      .transform((n) => n),
+    port: s
+      .integer()
+      .default(80)
+      .refine((n) => n > 0, 'must be positive'),
+  });
+
+  it('stay optional at runtime and in the inferred type', () => {
+    expectTypeOf<Infer<typeof schema>>().toEqualTypeOf<{
+      at?: string;
+      even?: number;
+      port: number;
+    }>();
+    expect(schema.parse({})).toEqual({ port: 80 });
+    expect(schema.parse({ at: 'x', even: 4 })).toEqual({ at: 'X', even: 4, port: 80 });
+    expect(issues(schema.safeParse({ even: 3 }))).toEqual(['even: must be even']);
+    expect(schema.shape.at.acceptsMissing).toBe(true);
+    expect(s.string().transform((v) => v).acceptsMissing).toBe(false);
+  });
+
+  it('still require a transformed field that is not optional', () => {
+    const required = s.object({ name: s.string().transform((v) => v.trim()) });
+    expect(issues(required.safeParse({}))).toEqual(['name: is required']);
+  });
+});

@@ -340,8 +340,9 @@ export function formatCommandHelp(spec: CommandSpec): string {
   if (spec.positionals !== undefined && spec.positionals.length > 0) {
     lines.push('');
     lines.push('Arguments:');
+    const width = Math.max(20, ...spec.positionals.map((p) => p.name.length + 2));
     for (const p of spec.positionals) {
-      lines.push(`  ${p.name.padEnd(20)}${p.description}`);
+      lines.push(`  ${p.name.padEnd(width)}${p.description}`);
     }
   }
 
@@ -349,6 +350,8 @@ export function formatCommandHelp(spec: CommandSpec): string {
   if (visibleFlags.length > 0) {
     lines.push('');
     lines.push('Options:');
+    // Size the column to the longest flag so descriptions never run into it.
+    const width = Math.max(28, ...visibleFlags.map((f) => flagUsageToken(f).length + 2));
     for (const flag of visibleFlags) {
       const short = flag.short !== undefined ? `-${flag.short}, ` : '    ';
       const token = flagUsageToken(flag);
@@ -357,7 +360,7 @@ export function formatCommandHelp(spec: CommandSpec): string {
           ? ` (one of: ${flag.enumValues.join(', ')})`
           : '';
       const defaultNote = flag.default !== undefined ? ` [default: ${String(flag.default)}]` : '';
-      lines.push(`  ${short}${token.padEnd(28)}${flag.description}${extra}${defaultNote}`);
+      lines.push(`  ${short}${token.padEnd(width)}${flag.description}${extra}${defaultNote}`);
     }
   }
 

@@ -74,7 +74,7 @@ export const validateCommand: Command = {
         type: 'boolean',
         negatable: true,
         description:
-          'Run checks that touch the environment (creating data directories). Default true.',
+          'Run checks that touch the environment (creating data directories); disable with --no-environment.',
         default: true,
       },
       { name: 'json', type: 'boolean', description: 'Print diagnostics as machine-readable JSON.' },
@@ -85,7 +85,7 @@ export const validateCommand: Command = {
   async run(ctx, args) {
     const registry = buildDefaultRegistry();
     const paths = configPathsFromFlags(args, ctx.env.cwd);
-    const secretBackend = secretBackendFromFlags(args);
+    const secretBackend = secretBackendFromFlags(args, ctx.env.env);
     const skipEnvironment = args.flags.get('environment') === false;
     const asJson = args.flags.get('json') === true;
 

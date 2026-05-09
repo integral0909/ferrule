@@ -24,15 +24,21 @@ export interface SecretFlagOptions {
   readonly secretsEnvPrefix?: string;
 }
 
-/** Reads `--secrets-dir`/`--secrets-env-prefix` and builds the corresponding `SecretBackend`. */
-export function secretBackendFromFlags(args: ParsedArgs): SecretBackend | undefined {
+/**
+ * Reads `--secrets-dir`/`--secrets-env-prefix` and builds the corresponding `SecretBackend`.
+ * Environment secrets are read from `env`, the CLI's environment, not the process's directly.
+ */
+export function secretBackendFromFlags(
+  args: ParsedArgs,
+  env: Readonly<Record<string, string | undefined>>,
+): SecretBackend | undefined {
   const dir = flagString(args, 'secrets-dir');
   const prefix = flagString(args, 'secrets-env-prefix');
   if (dir !== undefined && prefix !== undefined) {
     throw new UsageError('--secrets-dir and --secrets-env-prefix cannot both be given');
   }
   if (dir !== undefined) return new FileSecretBackend(dir);
-  if (prefix !== undefined) return new EnvSecretBackend(prefix);
+  if (prefix !== undefined) return new EnvSecretBackend(prefix, env);
   return undefined;
 }
 

@@ -139,7 +139,7 @@ export const runCommand: Command = {
   async run(ctx, args) {
     const registry = buildDefaultRegistry();
     const paths = configPathsFromFlags(args, ctx.env.cwd);
-    const secretBackend = secretBackendFromFlags(args);
+    const secretBackend = secretBackendFromFlags(args, ctx.env.env);
     const overrides = topologyOverridesFromFlags(args, ctx.env.cwd);
 
     let config: LoadedConfig;

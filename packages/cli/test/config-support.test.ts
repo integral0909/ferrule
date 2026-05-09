@@ -33,22 +33,22 @@ function parse(argv: string[]) {
 
 describe('secretBackendFromFlags', () => {
   it('returns undefined when neither flag is given', () => {
-    expect(secretBackendFromFlags(parse([]))).toBeUndefined();
+    expect(secretBackendFromFlags(parse([]), {})).toBeUndefined();
   });
 
   it('builds a FileSecretBackend for --secrets-dir', () => {
-    const backend = secretBackendFromFlags(parse(['--secrets-dir', '/tmp/secrets']));
+    const backend = secretBackendFromFlags(parse(['--secrets-dir', '/tmp/secrets']), {});
     expect(backend).toBeInstanceOf(FileSecretBackend);
   });
 
   it('builds an EnvSecretBackend for --secrets-env-prefix', () => {
-    const backend = secretBackendFromFlags(parse(['--secrets-env-prefix', 'FERRULE_']));
+    const backend = secretBackendFromFlags(parse(['--secrets-env-prefix', 'FERRULE_']), {});
     expect(backend).toBeInstanceOf(EnvSecretBackend);
   });
 
   it('rejects both flags being given at once', () => {
     expect(() =>
-      secretBackendFromFlags(parse(['--secrets-dir', 'x', '--secrets-env-prefix', 'y'])),
+      secretBackendFromFlags(parse(['--secrets-dir', 'x', '--secrets-env-prefix', 'y']), {}),
     ).toThrow(UsageError);
   });
 });

@@ -101,19 +101,32 @@ export function editDistance(a: string, b: string): number {
 }
 
 /**
- * The closest candidate within a distance proportional to the word's length, if any. Words
- * shorter than three characters get no suggestion; at that length almost everything is close.
+ * The closest candidate within a distance proportional to the word's length, or failing that a
+ * candidate that extends the word (`http` → `http_server`). Words shorter than three characters
+ * get no suggestion; at that length almost everything is close.
  */
 export function closestMatch(word: string, candidates: Iterable<string>): string | undefined {
   if (word.length < 3) return undefined;
+  const lower = word.toLowerCase();
+  const list = [...candidates];
   let best: string | undefined;
   let bestDistance = Math.max(1, Math.floor(word.length / 3)) + 1;
-  for (const candidate of candidates) {
-    const d = editDistance(word.toLowerCase(), candidate.toLowerCase());
+  for (const candidate of list) {
+    const d = editDistance(lower, candidate.toLowerCase());
     if (d < bestDistance) {
       best = candidate;
       bestDistance = d;
     }
   }
-  return best;
+  if (best !== undefined) return best;
+  // A shortened name (`http` for `http_server`) is a common typo that edit distance misses:
+  // fall back to the shortest candidate that extends the word at a word boundary.
+  let prefixed: string | undefined;
+  for (const candidate of list) {
+    const c = candidate.toLowerCase();
+    if (c.startsWith(lower) && /[_\-.]/.test(c.charAt(lower.length))) {
+      if (prefixed === undefined || candidate.length < prefixed.length) prefixed = candidate;
+    }
+  }
+  return prefixed;
 }

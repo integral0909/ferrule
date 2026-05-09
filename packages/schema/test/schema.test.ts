@@ -383,6 +383,8 @@ describe('suggestion helpers', () => {
     expect(editDistance('', 'abc')).toBe(3);
     expect(editDistance('prot', 'port')).toBe(1);
     expect(closestMatch('rw', ['r', 'w'])).toBeUndefined();
+    expect(closestMatch('http', ['http_server', 'otlp', 'http_client_long'])).toBe('http_server');
+    expect(closestMatch('file', ['filesystem'])).toBeUndefined();
     expect(closestMatch('adress', ['address', 'port'])).toBe('address');
     expect(closestMatch('zzz', ['address', 'port'])).toBeUndefined();
   });

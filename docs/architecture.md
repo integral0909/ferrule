@@ -221,9 +221,11 @@ source text → lexer → parser → AST → resolver → type checker → optim
 Pipelines are declared in YAML (JSON is also accepted):
 
 ```yaml
+data_dir: /var/lib/ferrule
+
 sources:
   app_logs:
-    type: http
+    type: http_server
     address: 0.0.0.0:8080
     decoding: { codec: json }
 
@@ -239,7 +241,8 @@ sinks:
   store:
     type: clickhouse
     inputs: [shape]
-    endpoint: https://clickhouse.internal:8443
+    url: https://clickhouse.internal:8443
+    database: telemetry
     table: logs
     auth:
       strategy: basic

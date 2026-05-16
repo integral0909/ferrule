@@ -5,19 +5,18 @@
  * this is what CI runs to catch a component whose docs weren't regenerated after a schema
  * change).
  *
- * Runnable directly: `node --experimental-strip-types scripts/generate-component-docs.ts`. It
- * imports the built `dist/` output of `@ferrule/sources`/`@ferrule/operators`/`@ferrule/sinks`/
- * `@ferrule/runtime`/`@ferrule/schema`/`@ferrule/config` by relative path (rather than by package
- * name) since this script isn't itself a workspace package with those as declared dependencies —
- * run `pnpm exec tsc -b` first (both `docs:generate` and `docs:check` do this themselves).
+ * Runnable directly: `node --experimental-strip-types tools/generate-component-docs.ts`.
+ * `tools/` is a private workspace package: type-checking resolves `@ferrule/*` to package
+ * sources, while running it uses the built `dist/` output, so run `pnpm exec tsc -b` first
+ * (both `docs:generate` and `docs:check` do this themselves).
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as prettier from 'prettier';
-import { builtinOperators } from '../packages/operators/dist/index.js';
-import { builtinSinks } from '../packages/sinks/dist/index.js';
-import { builtinSources } from '../packages/sources/dist/index.js';
+import { builtinOperators } from '@ferrule/operators';
+import { builtinSinks } from '@ferrule/sinks';
+import { builtinSources } from '@ferrule/sources';
 // This file (unlike the packages above) is run directly as TypeScript source, not compiled
 // output, so the sibling import needs the real `.ts` extension Node's type-stripping resolves.
 import { renderComponentsDoc } from './component-docs.ts';

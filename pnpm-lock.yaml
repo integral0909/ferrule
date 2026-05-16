@@ -221,6 +221,27 @@ importers:
         specifier: workspace:*
         version: link:../script
 
+  tools:
+    dependencies:
+      '@ferrule/config':
+        specifier: workspace:*
+        version: link:../packages/config
+      '@ferrule/operators':
+        specifier: workspace:*
+        version: link:../packages/operators
+      '@ferrule/runtime':
+        specifier: workspace:*
+        version: link:../packages/runtime
+      '@ferrule/schema':
+        specifier: workspace:*
+        version: link:../packages/schema
+      '@ferrule/sinks':
+        specifier: workspace:*
+        version: link:../packages/sinks
+      '@ferrule/sources':
+        specifier: workspace:*
+        version: link:../packages/sources
+
 packages:
 
   '@ampproject/remapping@2.3.0':

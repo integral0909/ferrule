@@ -20,15 +20,15 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "typecheck": "tsc -b && tsc -p tsconfig.tests.json",
+    "typecheck": "tsc -b && tsc -p tsconfig.tests.json && tsc -p tools/tsconfig.json",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "docs:generate": "tsc -b && node --experimental-strip-types scripts/generate-component-docs.ts",
-    "docs:check": "tsc -b && node --experimental-strip-types scripts/generate-component-docs.ts --check",
+    "docs:generate": "tsc -b && node --experimental-strip-types tools/generate-component-docs.ts",
+    "docs:check": "tsc -b && node --experimental-strip-types tools/generate-component-docs.ts --check",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test"
   },
   "devDependencies": {

@@ -25,6 +25,14 @@ runs the same steps on Linux, macOS, and Windows.
 - **Tests live next to their package** in `packages/<name>/test`. Property-based tests
   (`fast-check`) are expected for parsers, codecs, and anything with an inverse.
 
+## Generated documentation
+
+`docs/reference/components.md` is generated from every built-in component's option schema and
+examples. After changing a component's options, description, or examples, run
+`pnpm run docs:generate` and commit the result; CI runs `pnpm run docs:check` and fails if the
+file is out of date. Component options use `snake_case`, and a test in `packages/cli` enforces
+this along with valid examples for every component.
+
 ## Commit messages
 
 Use the imperative mood and a short subject line (≤ 72 characters), for example

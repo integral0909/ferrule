@@ -1,0 +1,16 @@
+{
+  "name": "@ferrule/tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Repository maintenance scripts for Ferrule (not published).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@ferrule/config": "workspace:*",
+    "@ferrule/operators": "workspace:*",
+    "@ferrule/runtime": "workspace:*",
+    "@ferrule/schema": "workspace:*",
+    "@ferrule/sinks": "workspace:*",
+    "@ferrule/sources": "workspace:*"
+  }
+}

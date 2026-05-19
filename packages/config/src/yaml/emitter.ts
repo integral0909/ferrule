@@ -110,6 +110,8 @@ function needsQuoting(text: string): boolean {
   if (PLAIN_UNSAFE_START.test(text)) return true;
   if (text.includes(': ') || text.endsWith(':') || text.includes(' #')) return true;
   if (text === '---' || text === '...') return true;
+  // A plain `<<` key would read back as a merge key.
+  if (text === '<<') return true;
   // Anything the core schema would resolve to something other than this exact string (a
   // number, a boolean, null) must be quoted so it reads back as a string.
   return resolveCoreScalar(text) !== text;

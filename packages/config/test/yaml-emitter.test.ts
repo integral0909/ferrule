@@ -57,6 +57,11 @@ describe('emitYaml', () => {
     expect(emitYaml({ a: 'key: value' })).toBe('a: "key: value"\n');
   });
 
+  it('quotes a "<<" key so it does not read back as a merge key', () => {
+    expect(emitYaml({ '<<': 0 })).toBe('"<<": 0\n');
+    expect(roundTrip({ '<<': 0 })).toEqual({ '<<': 0 });
+  });
+
   it('escapes control characters in double-quoted output', () => {
     expect(emitYaml({ a: 'line1\nline2' })).toBe('a: "line1\\nline2"\n');
   });

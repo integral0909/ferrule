@@ -224,6 +224,11 @@ describe('anchors, aliases, and merge keys', () => {
   it('rejects a merge value that is not a mapping or a sequence of mappings', () => {
     expect(() => parse('a:\n  <<: 1\n')).toThrowError(YamlSyntaxError);
   });
+
+  it('treats a quoted "<<" as an ordinary key, not a merge key', () => {
+    expect(parse('"<<": 0\n')).toEqual({ '<<': 0 });
+    expect(parse("a:\n  '<<': x\n")).toEqual({ a: { '<<': 'x' } });
+  });
 });
 
 describe('explicit tags', () => {

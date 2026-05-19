@@ -314,7 +314,8 @@ class YamlParser {
       }
 
       const keyText = String(key.value);
-      if (keyText === '<<') {
+      // Only a plain `<<` is a merge key; a quoted "<<" is an ordinary string key.
+      if (keyText === '<<' && key.style === 'plain') {
         this.collectMergeSources(value, mergeSources);
         continue;
       }

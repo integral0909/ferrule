@@ -94,7 +94,8 @@ export function createTestServer(): TestServer {
   }
 
   async function waitFor(predicate: (m: RpcMessage) => boolean): Promise<RpcMessage> {
-    for (let i = 0; i < 1000; i++) {
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
       const found = received.find(predicate);
       if (found !== undefined) return found;
       await new Promise((resolve) => setImmediate(resolve));

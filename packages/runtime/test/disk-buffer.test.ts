@@ -110,8 +110,9 @@ describe('disk buffer factory', () => {
   });
 });
 
-async function waitFor(condition: () => boolean, attempts = 200): Promise<void> {
-  for (let i = 0; i < attempts && !condition(); i++) {
+async function waitFor(condition: () => boolean, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   expect(condition()).toBe(true);

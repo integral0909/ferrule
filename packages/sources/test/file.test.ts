@@ -73,8 +73,11 @@ async function yieldToEventLoop(): Promise<void> {
  * `ackAll` + one-shot wait race ahead of files that haven't sent anything yet. Pumping keeps
  * acknowledging as *new* sends appear so the source's per-file sequence can actually complete.
  */
-async function pump(harness: Harness, condition: () => boolean, maxRounds = 1000): Promise<void> {
-  for (let i = 0; i < maxRounds; i++) {
+async function pump(harness: Harness, condition: () => boolean, timeoutMs = 4000): Promise<void> {
+  // Bounded by wall-clock time rather than event-loop turns: file I/O runs on the libuv thread
+  // pool and can take many turns to complete on a busy CI runner.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     ackAll(harness);
     if (condition()) return;
     await yieldToEventLoop();
@@ -87,9 +90,10 @@ async function pump(harness: Harness, condition: () => boolean, maxRounds = 1000
 async function waitForNextBatch(
   harness: Harness,
   fromIndex: number,
-  maxRounds = 1000,
+  timeoutMs = 4000,
 ): Promise<void> {
-  for (let i = 0; i < maxRounds; i++) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     if (harness.sent.length > fromIndex) return;
     await yieldToEventLoop();
   }
@@ -109,7 +113,8 @@ async function nextPoll(harness: Harness, poll_interval: number): Promise<void> 
 async function stop(harness: Harness, runPromise: Promise<void>): Promise<void> {
   harness.releaseSends();
   harness.abort();
-  for (let i = 0; i < 1000; i++) {
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline) {
     ackAll(harness);
     let settled = false;
     await Promise.race([

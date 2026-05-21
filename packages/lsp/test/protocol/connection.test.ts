@@ -38,7 +38,8 @@ function harness() {
   }
 
   async function waitFor(predicate: (m: DecodedMessage) => boolean): Promise<DecodedMessage> {
-    for (let i = 0; i < 500; i++) {
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
       const found = received.find(predicate);
       if (found !== undefined) return found;
       await new Promise((resolve) => setImmediate(resolve));

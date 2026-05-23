@@ -1,5 +1,7 @@
 import { createSocket as createDgramSocket, type Socket as DgramSocket } from 'node:dgram';
 import { connect as netConnect, type Socket as NetSocket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isLogEvent } from '@ferrule/core';
@@ -227,8 +229,8 @@ describe('syslog: tcp TLS', () => {
   it('decodes a syslog message received over a real TLS handshake', async () => {
     const { certPem, keyPem } = generateSelfSignedCert('127.0.0.1');
     const fs = await import('node:fs/promises');
-    const certFile = `${process.env['TMPDIR'] ?? '/tmp'}/ferrule-syslog-test-cert-${process.pid}.pem`;
-    const keyFile = `${process.env['TMPDIR'] ?? '/tmp'}/ferrule-syslog-test-key-${process.pid}.pem`;
+    const certFile = join(tmpdir(), `ferrule-syslog-test-cert-${process.pid}.pem`);
+    const keyFile = join(tmpdir(), `ferrule-syslog-test-key-${process.pid}.pem`);
     await fs.writeFile(certFile, certPem);
     await fs.writeFile(keyFile, keyPem);
     try {

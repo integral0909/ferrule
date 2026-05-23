@@ -95,26 +95,31 @@ describe('object_storage sink', () => {
     expect(server.requests[0]!.url).not.toBe(server.requests[1]!.url);
   });
 
-  it('uses virtual-hosted addressing when configured', async () => {
-    server = await startServer((_req, res) => res.end());
-    // `*.localhost` resolves to the loopback address per RFC 6761, so `my-bucket.localhost`
-    // reaches the same server bound to 127.0.0.1 — used here to observe the virtual-hosted
-    // `Host` header end to end without needing real DNS for an arbitrary bucket subdomain.
-    const options = objectStorageSinkOptions.parse({
-      endpoint: `http://localhost:${server.port}`,
-      bucket: 'my-bucket',
-      key: 'k',
-      addressing: 'virtual',
-      ...credentials,
-    });
-    const sink = await objectStorageSink.build(options, testBuildContext().ctx);
-    const harness = createTestSinkContext();
-    const run = sink.run(harness.ctx);
-    await harness.feed([LogEvent.fromMessage('x')]);
-    harness.close();
-    await run;
-    expect(server.requests[0]!.headers['host']).toBe(`my-bucket.localhost:${server.port}`);
-  });
+  // Windows' resolver does not map `*.localhost` subdomains to loopback, so this end-to-end
+  // check only runs where RFC 6761 resolution is available.
+  it.skipIf(process.platform === 'win32')(
+    'uses virtual-hosted addressing when configured',
+    async () => {
+      server = await startServer((_req, res) => res.end());
+      // `*.localhost` resolves to the loopback address per RFC 6761, so `my-bucket.localhost`
+      // reaches the same server bound to 127.0.0.1 — used here to observe the virtual-hosted
+      // `Host` header end to end without needing real DNS for an arbitrary bucket subdomain.
+      const options = objectStorageSinkOptions.parse({
+        endpoint: `http://localhost:${server.port}`,
+        bucket: 'my-bucket',
+        key: 'k',
+        addressing: 'virtual',
+        ...credentials,
+      });
+      const sink = await objectStorageSink.build(options, testBuildContext().ctx);
+      const harness = createTestSinkContext();
+      const run = sink.run(harness.ctx);
+      await harness.feed([LogEvent.fromMessage('x')]);
+      harness.close();
+      await run;
+      expect(server.requests[0]!.headers['host']).toBe(`my-bucket.localhost:${server.port}`);
+    },
+  );
 
   it('gzip-compresses the object body and appends .gz to the key', async () => {
     server = await startServer((_req, res) => res.end());

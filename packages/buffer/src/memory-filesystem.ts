@@ -1,4 +1,4 @@
-import { dirname } from 'node:path';
+import { posix } from 'node:path';
 import { FileSystemFaultError } from './errors.js';
 import type { FileHandle, FileStat, FileSystem, OpenMode } from './filesystem.js';
 
@@ -71,6 +71,16 @@ function fsError(code: string, message: string): NodeJS.ErrnoException {
   return err;
 }
 
+/**
+ * Normalizes a path to the POSIX form this file system stores. Callers build paths with the
+ * platform's `node:path`, so on Windows they arrive with backslashes (`\\buf\\ledger.json`);
+ * the in-memory namespace is the same on every platform.
+ */
+function toPosix(path: string): string {
+  const normalized = posix.normalize(path.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/'));
+  return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+}
+
 function enoent(path: string): NodeJS.ErrnoException {
   return fsError('ENOENT', `ENOENT: no such file or directory, '${path}'`);
 }
@@ -119,7 +129,7 @@ export class InMemoryFileSystem implements FileSystem {
   injectFault(rule: FaultRule): void {
     this.faults.push({
       op: rule.op,
-      path: rule.path,
+      path: rule.path === undefined ? undefined : toPosix(rule.path),
       remaining: rule.times ?? 1,
       error: rule.error,
     });
@@ -178,6 +188,7 @@ export class InMemoryFileSystem implements FileSystem {
   // --- FileSystem --------------------------------------------------------------------------
 
   async open(path: string, mode: OpenMode): Promise<FileHandle> {
+    path = toPosix(path);
     this.checkFault('open', path);
     await tick();
     const existingKind = this.entries.get(path);
@@ -191,7 +202,7 @@ export class InMemoryFileSystem implements FileSystem {
     }
 
     if (existingKind === undefined) {
-      const parent = dirname(path);
+      const parent = posix.dirname(path);
       if (!this.entries.has(parent)) throw enoent(path);
       const stored: StoredFile = { bytes: new Uint8Array(0), durableLength: 0 };
       this.entries.set(path, 'file');
@@ -210,6 +221,7 @@ export class InMemoryFileSystem implements FileSystem {
 
   /** @internal used by {@link MemoryFileHandle} */
   requireFile(path: string): StoredFile {
+    path = toPosix(path);
     const file = this.files.get(path);
     if (file === undefined) throw enoent(path);
     return file;
@@ -222,10 +234,12 @@ export class InMemoryFileSystem implements FileSystem {
 
   /** @internal used by {@link MemoryFileHandle} */
   fault(op: FsOperation, path: string): void {
+    path = toPosix(path);
     this.checkFault(op, path);
   }
 
   async mkdir(path: string, recursive = false): Promise<void> {
+    path = toPosix(path);
     this.checkFault('mkdir', path);
     await tick();
     const existing = this.entries.get(path);
@@ -235,7 +249,7 @@ export class InMemoryFileSystem implements FileSystem {
     }
     if (existing === 'file') throw eexist(path);
 
-    const parent = dirname(path);
+    const parent = posix.dirname(path);
     if (parent !== path && !this.entries.has(parent)) {
       if (!recursive) throw enoent(parent);
       await this.mkdir(parent, true);
@@ -245,6 +259,7 @@ export class InMemoryFileSystem implements FileSystem {
   }
 
   async readdir(path: string): Promise<string[]> {
+    path = toPosix(path);
     this.checkFault('readdir', path);
     await tick();
     if (this.entries.get(path) !== 'dir') {
@@ -252,7 +267,7 @@ export class InMemoryFileSystem implements FileSystem {
     }
     const names: string[] = [];
     for (const entryPath of this.entries.keys()) {
-      if (entryPath === '/' || dirname(entryPath) !== path) continue;
+      if (entryPath === '/' || posix.dirname(entryPath) !== path) continue;
       names.push(entryPath.slice(path.length + (path.endsWith('/') ? 0 : 1)));
     }
     names.sort();
@@ -260,6 +275,8 @@ export class InMemoryFileSystem implements FileSystem {
   }
 
   async rename(from: string, to: string): Promise<void> {
+    from = toPosix(from);
+    to = toPosix(to);
     this.checkFault('rename', from);
     await tick();
     const fromKind = this.entries.get(from);
@@ -275,14 +292,14 @@ export class InMemoryFileSystem implements FileSystem {
     else this.files.delete(to);
 
     this.pending.push({
-      dirPath: dirname(from),
+      dirPath: posix.dirname(from),
       undo: () => {
         this.entries.set(from, fromKind);
         if (fromFile !== undefined) this.files.set(from, fromFile);
       },
     });
     this.pending.push({
-      dirPath: dirname(to),
+      dirPath: posix.dirname(to),
       undo: () => {
         if (toPrevKind === undefined) {
           this.entries.delete(to);
@@ -297,6 +314,7 @@ export class InMemoryFileSystem implements FileSystem {
   }
 
   async unlink(path: string): Promise<void> {
+    path = toPosix(path);
     this.checkFault('unlink', path);
     await tick();
     const kind = this.entries.get(path);
@@ -306,7 +324,7 @@ export class InMemoryFileSystem implements FileSystem {
     this.entries.delete(path);
     this.files.delete(path);
     this.pending.push({
-      dirPath: dirname(path),
+      dirPath: posix.dirname(path),
       undo: () => {
         this.entries.set(path, kind);
         if (file !== undefined) this.files.set(path, file);
@@ -315,6 +333,7 @@ export class InMemoryFileSystem implements FileSystem {
   }
 
   async stat(path: string): Promise<FileStat> {
+    path = toPosix(path);
     this.checkFault('stat', path);
     await tick();
     const kind = this.entries.get(path);
@@ -324,12 +343,14 @@ export class InMemoryFileSystem implements FileSystem {
   }
 
   async exists(path: string): Promise<boolean> {
+    path = toPosix(path);
     this.checkFault('exists', path);
     await tick();
     return this.entries.has(path);
   }
 
   async fsyncDir(path: string): Promise<void> {
+    path = toPosix(path);
     this.checkFault('fsyncDir', path);
     await tick();
     if (this.entries.get(path) !== 'dir') return;

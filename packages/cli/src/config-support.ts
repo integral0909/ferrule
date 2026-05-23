@@ -1,5 +1,5 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { isFerruleError } from '@ferrule/core';
 import {
   ConfigError,
@@ -158,7 +158,7 @@ export async function expandConfigPathsForWatch(paths: readonly string[]): Promi
     if (info.isDirectory()) {
       const entries = await readdir(p);
       const matched = entries.filter((e) => /\.(ya?ml|json)$/i.test(e)).sort();
-      for (const e of matched) files.push(`${p}/${e}`);
+      for (const e of matched) files.push(join(p, e));
     } else {
       files.push(p);
     }

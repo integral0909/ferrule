@@ -9,7 +9,9 @@ function messagesOf(list: readonly unknown[]): string[] {
   return list.map((e) => (e as LogEvent).get('message') as string);
 }
 
-describe('DiskBuffer against the real filesystem', () => {
+// Real fsync/rename/unlink calls: fast locally, but Windows CI runners can take several seconds
+// for the segment-rollover test's 50 write/ack cycles.
+describe('DiskBuffer against the real filesystem', { timeout: 30_000 }, () => {
   let dir: string;
 
   beforeEach(async () => {

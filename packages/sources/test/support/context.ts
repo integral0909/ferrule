@@ -99,11 +99,12 @@ export function createControllableSourceContext(
   };
 }
 
-/** Polls `condition` with no real delay between checks, up to `retries` times. Deterministic
- * enough for waiting on another async task to reach a synchronization point (e.g. "the request
- * handler has called `output.send`") without a fixed sleep. */
-export async function waitUntil(condition: () => boolean, retries = 2000): Promise<void> {
-  for (let i = 0; i < retries; i++) {
+/** Polls `condition` with no real delay between checks, for up to `timeoutMs` of wall-clock
+ * time. Deterministic enough for waiting on another async task to reach a synchronization point
+ * (e.g. "the request handler has called `output.send`") without a fixed sleep. */
+export async function waitUntil(condition: () => boolean, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     if (condition()) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }

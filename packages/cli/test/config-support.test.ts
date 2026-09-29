@@ -56,7 +56,7 @@ describe('secretBackendFromFlags', () => {
 describe('configPathsFromFlags', () => {
   it('resolves relative paths against cwd', () => {
     const paths = configPathsFromFlags(parse(['-c', 'a.yaml', '-c', 'b.yaml']), '/work/dir');
-    expect(paths).toEqual(['/work/dir/a.yaml', '/work/dir/b.yaml']);
+    expect(paths).toEqual([resolve('/work/dir', 'a.yaml'), resolve('/work/dir', 'b.yaml')]);
   });
 
   it('leaves absolute paths untouched', () => {

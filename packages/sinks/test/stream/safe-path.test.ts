@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   containsUnsafeSegment,
@@ -39,7 +40,9 @@ describe('containsUnsafeSegment', () => {
 
 describe('resolveWithinBase', () => {
   it('resolves an ordinary relative path under the base directory', () => {
-    expect(resolveWithinBase('/data/logs', 'host-1/app.log')).toBe('/data/logs/host-1/app.log');
+    expect(resolveWithinBase('/data/logs', 'host-1/app.log')).toBe(
+      resolve('/data/logs/host-1/app.log'),
+    );
   });
 
   it('throws PathEscapeError for a path that escapes the base directory', () => {
@@ -51,6 +54,6 @@ describe('resolveWithinBase', () => {
   });
 
   it('allows a path that merely touches the base directory boundary via a safe subpath', () => {
-    expect(resolveWithinBase('/data/logs', 'a/b/../c')).toBe('/data/logs/a/c');
+    expect(resolveWithinBase('/data/logs', 'a/b/../c')).toBe(resolve('/data/logs/a/c'));
   });
 });

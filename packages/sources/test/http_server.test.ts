@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isLogEvent, type LogEvent } from '@ferrule/core';
@@ -332,8 +334,8 @@ describe('http_server: TLS', () => {
   it('serves over HTTPS with a configured certificate', async () => {
     const { certPem, keyPem } = generateSelfSignedCert('127.0.0.1');
     const fs = await import('node:fs/promises');
-    const certFile = `${process.env['TMPDIR'] ?? '/tmp'}/ferrule-http-server-test-cert-${process.pid}.pem`;
-    const keyFile = `${process.env['TMPDIR'] ?? '/tmp'}/ferrule-http-server-test-key-${process.pid}.pem`;
+    const certFile = join(tmpdir(), `ferrule-http-server-test-cert-${process.pid}.pem`);
+    const keyFile = join(tmpdir(), `ferrule-http-server-test-key-${process.pid}.pem`);
     await fs.writeFile(certFile, certPem);
     await fs.writeFile(keyFile, keyPem);
     try {

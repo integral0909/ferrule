@@ -66,9 +66,9 @@ export class TransformContractError extends FerruleError {
       'E_TRANSFORM_CONTRACT',
       reason === 'missing'
         ? `transform ${JSON.stringify(componentId)} implements neither process() nor ` +
-          'processAsync(); a transform must implement exactly one'
+            'processAsync(); a transform must implement exactly one'
         : `transform ${JSON.stringify(componentId)} implements both process() and ` +
-          'processAsync(); a transform must implement exactly one',
+            'processAsync(); a transform must implement exactly one',
     );
     this.name = 'TransformContractError';
   }

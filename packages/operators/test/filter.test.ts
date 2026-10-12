@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { LogEvent } from '@ferrule/core';
 import { FerruleError } from '@ferrule/core';
 import { filterTransform } from '@ferrule/operators';
-import { buildTransform, logEvent, sealedBatch } from './helpers.js';
+import { buildTransform, counterMetric, logEvent, sealedBatch, spanEvent } from './helpers.js';
 
 describe('filter', () => {
   it('keeps events for which the condition is true', async () => {
@@ -98,5 +98,40 @@ describe('filter', () => {
 
   it('has no declared output ports', () => {
     expect(filterTransform.outputs).toBeUndefined();
+  });
+});
+
+describe("filter: event_kind: 'span'", () => {
+  it('drops health-check spans by attribute (ferrule/ferrule#13 acceptance example)', async () => {
+    const { transform, harness } = await buildTransform(filterTransform, {
+      event_kind: 'span',
+      condition: '.attributes.http_route != "/healthz"',
+    });
+    const healthz = spanEvent({ attributes: { http_route: '/healthz' } });
+    const checkout = spanEvent({ attributes: { http_route: '/checkout' } });
+    const batch = sealedBatch([healthz]);
+    transform.process([healthz, checkout], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.event).toBe(checkout);
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
+  it('a type error in a span condition is a build-time compile error', async () => {
+    await expect(
+      buildTransform(filterTransform, { event_kind: 'span', condition: '.name < 1' }),
+    ).rejects.toBeInstanceOf(FerruleError);
+  });
+
+  it("log and metric events pass through unchanged when event_kind is 'span'", async () => {
+    const { transform, harness } = await buildTransform(filterTransform, {
+      event_kind: 'span',
+      condition: 'true',
+    });
+    const log = logEvent({});
+    const metric = counterMetric('requests', 1);
+    transform.process([log, metric], harness.out);
+    expect(harness.pushed).toHaveLength(2);
+    expect(harness.pushed[0]!.event).toBe(log);
+    expect(harness.pushed[1]!.event).toBe(metric);
   });
 });

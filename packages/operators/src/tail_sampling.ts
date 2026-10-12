@@ -6,10 +6,12 @@ import {
   type TransformContext,
   type TransformOutput,
 } from '@ferrule/runtime';
+import { spanEventSchema, spanEventToView, type CompiledProgram } from '@ferrule/script';
 import { conditionSchema, evaluateCondition, type ConditionSpec } from './util/condition.js';
 import { getEventField } from './util/fields.js';
 import { hashBytes, unitInterval } from './util/hash.js';
 import { LruCache } from './util/lru.js';
+import { compileConditionSource } from './util/scriptCompile.js';
 import { refillRatePerMs, TokenBucket } from './util/token-bucket.js';
 
 /**
@@ -26,6 +28,15 @@ import { refillRatePerMs, TokenBucket } from './util/token-bucket.js';
  * traces when the *total* buffered size crosses the limit; `max_traces` LRU-evicts the
  * least-recently-active trace (also via an early decision) once too many are open at once. None
  * of these lose spans — they only decide earlier than `quiet_period`/`decision_wait` would have.
+ *
+ * The `script` policy evaluates a Ferrule Script boolean expression against the span view
+ * (`@ferrule/script`'s `spanEventSchema`/`span/view.ts` — see `docs/language/design.md`'s "Span
+ * events") for each span in scope, compiled once at build time like `filter`/`route`'s
+ * `condition`; a trace is sampled if the expression matches any one of them (or just the root
+ * span, with `scope: root`). It sits alongside the other, declarative policies (`attribute`'s
+ * fixed field-condition tree) rather than replacing them — a pipeline can mix both in the same
+ * `and`/`or`/`not` tree, reaching for `script` only when a policy needs real expressions
+ * (arithmetic, regexes, multiple attributes combined) that `attribute` cannot express.
  */
 
 const policyBase = () => ({});
@@ -43,6 +54,12 @@ function tailSamplingPolicySchemaImpl(): Schema<TailSamplingPolicy> {
       }),
       attribute: s.object({
         condition: conditionSchema().describe('e.g. { type: "attributes.http.status_code" }'),
+        scope: s.enum(['root', 'any'] as const).default('any'),
+      }),
+      script: s.object({
+        condition: s
+          .string({ minLength: 1 })
+          .describe('a Ferrule Script boolean expression, evaluated against the span view'),
         scope: s.enum(['root', 'any'] as const).default('any'),
       }),
       rate_limit: s.object({
@@ -64,6 +81,7 @@ export type TailSamplingPolicy =
       readonly condition: ConditionSpec;
       readonly scope: 'root' | 'any';
     }
+  | { readonly type: 'script'; readonly condition: string; readonly scope: 'root' | 'any' }
   | { readonly type: 'rate_limit'; readonly spans_per_second: number }
   | { readonly type: 'and'; readonly policies: readonly TailSamplingPolicy[] }
   | { readonly type: 'or'; readonly policies: readonly TailSamplingPolicy[] }
@@ -114,10 +132,50 @@ function spanAccessor(span: SpanEvent) {
     getEventField(span, path);
 }
 
+/**
+ * Walks a policy tree collecting every `script` leaf's compiled program, keyed by the policy
+ * object itself — the same `TailSamplingOptions.policies` tree persists unchanged for the life of
+ * the transform, so looking a program back up by its policy's identity (in {@link evaluatePolicy})
+ * is as reliable as a parallel, shape-mirroring structure would be, without needing one. Compiled
+ * once at build time, like `filter`/`route`'s `condition`, so a syntax or type error is reported
+ * during validation rather than on the first span that reaches it.
+ */
+function collectScriptPrograms(
+  policies: readonly TailSamplingPolicy[],
+  into: Map<TailSamplingPolicy, CompiledProgram> = new Map(),
+): ReadonlyMap<TailSamplingPolicy, CompiledProgram> {
+  for (const policy of policies) {
+    switch (policy.type) {
+      case 'script':
+        into.set(
+          policy,
+          compileConditionSource(policy.condition, false, '<tail_sampling script policy>', {
+            inputSchema: spanEventSchema(),
+          }),
+        );
+        break;
+      case 'and':
+      case 'or':
+        collectScriptPrograms(policy.policies, into);
+        break;
+      case 'not':
+        collectScriptPrograms([policy.policy], into);
+        break;
+      default:
+        break;
+    }
+  }
+  return into;
+}
+
 function evaluatePolicy(
   policy: TailSamplingPolicy,
   trace: TraceState,
-  env: { rateLimiter: TokenBucket; nowMs: number },
+  env: {
+    rateLimiter: TokenBucket;
+    nowMs: number;
+    scriptPrograms: ReadonlyMap<TailSamplingPolicy, CompiledProgram>;
+  },
 ): boolean {
   switch (policy.type) {
     case 'status_error':
@@ -131,6 +189,12 @@ function evaluatePolicy(
     case 'attribute': {
       const spans = policy.scope === 'root' ? trace.spans.filter((s) => s.isRoot) : trace.spans;
       return spans.some((span) => evaluateCondition(policy.condition, spanAccessor(span)));
+    }
+    case 'script': {
+      const program = env.scriptPrograms.get(policy);
+      if (program === undefined) return false; // unreachable: collectScriptPrograms covers every policy
+      const spans = policy.scope === 'root' ? trace.spans.filter((s) => s.isRoot) : trace.spans;
+      return spans.some((span) => program.run(spanEventToView(span)).kind === 'continue');
     }
     case 'rate_limit':
       return env.rateLimiter.tryRemove(trace.spans.length, env.nowMs);
@@ -158,6 +222,7 @@ export const tailSamplingTransform = defineTransform<TailSamplingOptions>({
         policies: [
           { type: 'status_error' },
           { type: 'latency', threshold: '500ms', scope: 'any' },
+          { type: 'script', condition: '.attributes.http_route == "/checkout"' },
           { type: 'probabilistic', rate: 0.05 },
         ],
       },
@@ -169,6 +234,9 @@ export const tailSamplingTransform = defineTransform<TailSamplingOptions>({
     // harmless) otherwise.
     const rateLimitCapacity = findRateLimitCapacity(options.policies) || 1;
     let rateLimiter!: TokenBucket;
+    // Every `script` policy's compiled program, collected once so a compile error surfaces now,
+    // not on the first span that reaches it.
+    const scriptPrograms = collectScriptPrograms(options.policies);
 
     const decisionCache = new LruCache<boolean>({ maxSize: options.decision_cache_size });
     let totalBytes = 0;
@@ -177,7 +245,9 @@ export const tailSamplingTransform = defineTransform<TailSamplingOptions>({
     const decide = (trace: TraceState): boolean => {
       if (options.policies.length === 0) return true;
       const nowMs = ctx.clock.monotonic();
-      return options.policies.some((p) => evaluatePolicy(p, trace, { rateLimiter, nowMs }));
+      return options.policies.some((p) =>
+        evaluatePolicy(p, trace, { rateLimiter, nowMs, scriptPrograms }),
+      );
     };
 
     const decideAndFlush = (trace: TraceState, out: TransformOutput): void => {

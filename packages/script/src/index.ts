@@ -250,6 +250,17 @@ export {
 } from './metric/schema.js';
 export { applyViewToMetric, metricEventToView } from './metric/view.js';
 
+// ---- span event view ----------------------------------------------------------------------
+
+export {
+  SPAN_ANNOTATION_SHAPE,
+  SPAN_LINK_SHAPE,
+  SPAN_STATUS_SHAPE,
+  spanEventSchema,
+  spanReadonlyPaths,
+} from './span/schema.js';
+export { applyViewToSpan, spanEventToView } from './span/view.js';
+
 export {
   impl,
   ImplementationRegistry,

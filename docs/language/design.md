@@ -135,8 +135,8 @@ Everything above describes a program's view of a **log** event: `.field` paths o
 mostly-`any` object (§3). A **metric** event (`@ferrule/core`'s `MetricEvent`) has a different,
 fixed shape instead — a name, a namespace, a set of string tags, an incremental/absolute kind, and
 a value whose structure depends on the metric's type (counter, gauge, set, distribution,
-histogram, or summary). The `script` component's `metrics: true` option checks and runs a program
-against this view instead of a log's; see `packages/operators/src/script.ts`.
+histogram, or summary). The `script` component's `event_kind: metric` option checks and runs a
+program against this view instead of a log's; see `packages/operators/src/script.ts`.
 
 | Path             | Type                                                 | Present for        |
 | ---------------- | ---------------------------------------------------- | ------------------ |
@@ -193,3 +193,62 @@ not abort the event either.
 
 A program that reads and writes none of these fields leaves the metric's value bit-identical, for
 every one of the six value types.
+
+## 9. Span events
+
+A **span** event (`@ferrule/core`'s `SpanEvent`) is one span of a distributed trace: an
+identified, timed operation with a status, attributes, a resource, and a record of what happened
+during it (annotations, links to other spans). Like the metric view (§8), the span view is flat —
+every field below is a top-level `.path`, not reached through a chain mirroring `SpanEvent`'s own
+shape. The `script` component's `event_kind: span` option checks and runs a program against this
+view; `filter`/`route`'s `event_kind: span` and `tail_sampling`'s `script` policy type check a
+_condition_ (a single expression, not a full program) against it instead — see
+`packages/operators/src/script.ts`, `filter.ts`, `route.ts`, and `tail_sampling.ts`.
+
+| Path              | Type                                                                                                             | Read-only |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------- | --------- |
+| `.trace_id`       | `string` (hex)                                                                                                   | yes       |
+| `.span_id`        | `string` (hex)                                                                                                   | yes       |
+| `.parent_span_id` | `string \| null` (hex)                                                                                           | yes       |
+| `.trace_state`    | `string \| null`                                                                                                 |           |
+| `.name`           | `string`                                                                                                         |           |
+| `.kind`           | `string` (`"unspecified"`/`"internal"`/`"server"`/`"client"`/`"producer"`/`"consumer"`)                          |           |
+| `.start_time`     | `timestamp`                                                                                                      |           |
+| `.end_time`       | `timestamp`                                                                                                      |           |
+| `.duration`       | `int` (nanoseconds), derived from `.start_time`/`.end_time`                                                      | yes       |
+| `.status`         | `object { code: string, message: string \| null }`                                                               |           |
+| `.attributes`     | `object { ..any }`                                                                                               |           |
+| `.resource`       | `object { ..any }`                                                                                               |           |
+| `.annotations`    | `array<object { name: string, time: timestamp, attributes: object { ..any } }>`                                  | yes       |
+| `.links`          | `array<object { trace_id: string, span_id: string, trace_state: string \| null, attributes: object { ..any } }>` | yes       |
+
+Trace/span identifiers are hex strings, matching `SpanEvent.traceIdHex`/`spanIdHex`; they, the
+derived `.duration`, and `.annotations`/`.links` (a record of what already happened) are
+read-only — a program can branch on them but never rewrite them. The checker rejects a write
+through _any_ path starting with a read-only field, not just a bare reassignment, so
+`.annotations[0].name = "x"` is a compile-time error exactly like `.annotations = []`:
+
+```ferrule-span-error
+.annotations = []
+```
+
+```ferrule-span-error
+.duration = 0
+```
+
+`.attributes`/`.resource` are open objects — any key, any value an OTLP attribute can hold (a
+null, bool, int, float, string, byte string, timestamp, or an array/object nesting the same) —
+and `.status.code` is validated to be `"unset"`, `"ok"`, or `"error"` once the program finishes
+running, the same "checker is best-effort, write-back is the real enforcement" split §8 already
+documents for a metric's `.tags`/`.kind`:
+
+```ferrule-span
+if .attributes.http_route == "/healthz" {
+  drop
+}
+.status.code = "ok"
+```
+
+A program that reads and writes none of these fields leaves the span bit-identical. `.scope` (the
+span's `InstrumentationScope`) is not exposed in this view, a documented, currently unimplemented
+follow-up alongside §8's "not narrowed to `.value_type`" gap.

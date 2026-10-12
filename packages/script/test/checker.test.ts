@@ -1,6 +1,7 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
+  arrayType,
   check,
   createDefaultRegistry,
   formatExprType,
@@ -366,6 +367,25 @@ describe('checker: validated path writes (validateWrites)', () => {
       readonlyPaths: readonly,
     });
     expect(result.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+  });
+
+  it('rejects writing through a nested path under a read-only field, not just a bare reassignment', () => {
+    // A read-only field can be structured (an array/object), not just a flat leaf like `count`
+    // above — `.items = []` and `.items[0].name = "x"` must both be rejected.
+    const itemsSchema = objectType({ items: arrayType(objectType({ name: stringType })) });
+    const readonly = new Map([['items', "cannot assign to '.items'"]]);
+    function errors(text: string): string[] {
+      const { program } = parse(new SourceFile('<t>', text));
+      const result = check(program, {
+        inputSchema: itemsSchema,
+        validateWrites: true,
+        readonlyPaths: readonly,
+      });
+      return result.diagnostics.filter((d) => d.severity === 'error').map((d) => d.code);
+    }
+    expect(errors('.items = []')).toContain('E311');
+    expect(errors('.items[0].name = "x"')).toContain('E311');
+    expect(errors('let x = .items[0].name')).toEqual([]); // reading through it is still fine
   });
 });
 

@@ -49,10 +49,14 @@ export interface CheckOptions {
    */
   readonly validateWrites?: boolean;
   /**
-   * Top-level field names (single-segment paths) that can be read but never assigned, each mapped
-   * to the diagnostic message explaining why. Ignored unless {@link validateWrites} is set. Used
-   * by the metric view for its value-type discriminator (`metricReadonlyPaths`): changing which
-   * variant a metric's value is isn't supported (see `docs/language/design.md`'s "Metric events").
+   * Top-level field names that can be read but never assigned, each mapped to the diagnostic
+   * message explaining why. A field named here is read-only through *any* path starting with it,
+   * not just a bare `.field = ...` reassignment — `.field[0].x = ...` is rejected too, which
+   * matters for a read-only field whose value is itself structured (an array/object). Ignored
+   * unless {@link validateWrites} is set. Used by the metric view for its value-type discriminator
+   * (`metricReadonlyPaths`: changing which variant a metric's value is isn't supported) and by the
+   * span view (`spanReadonlyPaths`: span/trace IDs, the derived `.duration`, and the read-only
+   * `.annotations`/`.links`) — see `docs/language/design.md`'s "Metric events"/"Span events".
    */
   readonly readonlyPaths?: ReadonlyMap<string, string>;
 }

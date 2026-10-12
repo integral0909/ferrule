@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { LogEvent } from '@ferrule/core';
 import { FerruleError } from '@ferrule/core';
 import { routeTransform } from '@ferrule/operators';
-import { buildTransform, logEvent, sealedBatch } from './helpers.js';
+import { buildTransform, counterMetric, logEvent, sealedBatch, spanEvent } from './helpers.js';
 
 const twoRoutes = {
   routes: [
@@ -169,5 +169,52 @@ describe('route', () => {
     expect(message).not.toContain('{ drop }');
     expect(message).toContain('"bad">:1:1');
     expect(message).toContain(`| ${'^'.repeat(condition.length)} `);
+  });
+});
+
+describe("route: event_kind: 'span'", () => {
+  it('routes a span by attribute', async () => {
+    const { transform, harness } = await buildTransform(routeTransform, {
+      event_kind: 'span',
+      routes: [{ name: 'healthz', condition: '.attributes.http_route == "/healthz"' }],
+    });
+    const span = spanEvent({ attributes: { http_route: '/healthz' } });
+    transform.process([span], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.port).toBe('healthz');
+    expect(harness.pushed[0]!.event).toBe(span);
+  });
+
+  it('a route condition can read the derived, read-only `.duration` field', async () => {
+    const { transform, harness } = await buildTransform(routeTransform, {
+      event_kind: 'span',
+      routes: [{ name: 'slow', condition: '.duration > 500000000' }],
+    });
+    const slow = spanEvent({ durationNanos: 600_000_000n });
+    transform.process([slow], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.port).toBe('slow');
+  });
+
+  it('a type error in a span route condition is a build-time compile error', async () => {
+    await expect(
+      buildTransform(routeTransform, {
+        event_kind: 'span',
+        routes: [{ name: 'a', condition: '.name < 1' }], // .name is string, comparing to int
+      }),
+    ).rejects.toBeInstanceOf(FerruleError);
+  });
+
+  it("log and metric events pass through unchanged when event_kind is 'span'", async () => {
+    const { transform, harness } = await buildTransform(routeTransform, {
+      event_kind: 'span',
+      routes: [{ name: 'a', condition: 'true' }],
+    });
+    const log = logEvent({});
+    const metric = counterMetric('requests', 1);
+    transform.process([log, metric], harness.out);
+    expect(harness.pushed).toHaveLength(2);
+    expect(harness.pushed[0]!.event).toBe(log);
+    expect(harness.pushed[1]!.event).toBe(metric);
   });
 });

@@ -37,7 +37,12 @@ describe('ConsumerProtocolSubscription', () => {
 
   it('round-trips an empty topic list', () => {
     const decoded = decodeConsumerProtocolSubscription(
-      encodeConsumerProtocolSubscription({ version: 1, topics: [], userData: null, ownedPartitions: [] }),
+      encodeConsumerProtocolSubscription({
+        version: 1,
+        topics: [],
+        userData: null,
+        ownedPartitions: [],
+      }),
     );
     expect(decoded.topics).toEqual([]);
   });

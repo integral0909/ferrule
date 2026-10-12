@@ -6,7 +6,10 @@ import {
   type TopicPartitions,
 } from '../../src/kafka/assignors.js';
 
-function sub(topics: readonly string[], ownedPartitions: readonly TopicPartitions[] = []): AssignorSubscription {
+function sub(
+  topics: readonly string[],
+  ownedPartitions: readonly TopicPartitions[] = [],
+): AssignorSubscription {
   return { topics, ownedPartitions };
 }
 
@@ -16,7 +19,9 @@ function totalAssigned(assignment: ReadonlyMap<string, TopicPartitions[]>): numb
   return total;
 }
 
-function flattenAssignment(assignment: ReadonlyMap<string, TopicPartitions[]>): Map<string, string> {
+function flattenAssignment(
+  assignment: ReadonlyMap<string, TopicPartitions[]>,
+): Map<string, string> {
   const owner = new Map<string, string>();
   for (const [memberId, tps] of assignment) {
     for (const tp of tps) {

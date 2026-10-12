@@ -158,7 +158,9 @@ export const cooperativeStickyAssignor: Assignor = {
     if (memberIds.length === 0) return result;
 
     const subscribedTopics = new Set<string>();
-    for (const sub of subscriptions.values()) for (const topic of sub.topics) subscribedTopics.add(topic);
+    for (const sub of subscriptions.values()) {
+      for (const topic of sub.topics) subscribedTopics.add(topic);
+    }
 
     const allPartitions: string[] = [];
     for (const topic of subscribedTopics) {

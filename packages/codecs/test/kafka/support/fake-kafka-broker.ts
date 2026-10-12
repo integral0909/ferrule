@@ -69,7 +69,13 @@ interface PartitionLog {
 
 interface JoinWaiter {
   readonly offeredProtocols: readonly { name: string; metadata: Buffer }[];
-  readonly respond: (result: { generationId: number; leader: string; memberId: string; protocolName: string; members: { memberId: string; metadata: Buffer }[] }) => void;
+  readonly respond: (result: {
+    generationId: number;
+    leader: string;
+    memberId: string;
+    protocolName: string;
+    members: { memberId: string; metadata: Buffer }[];
+  }) => void;
 }
 
 interface RebalanceRound {
@@ -249,7 +255,11 @@ class GroupCoordinator {
     const leader = rebalance.joined.get(leaderId)!;
     let protocolName: string | undefined;
     for (const candidate of leader.offeredProtocols.map((p) => p.name)) {
-      if ([...rebalance.joined.values()].every((m) => m.offeredProtocols.some((p) => p.name === candidate))) {
+      if (
+        [...rebalance.joined.values()].every((m) =>
+          m.offeredProtocols.some((p) => p.name === candidate),
+        )
+      ) {
         protocolName = candidate;
         break;
       }
@@ -288,7 +298,13 @@ class GroupCoordinator {
         members: memberId === leaderId ? membersForLeader : [],
       });
     }
-    group.sync = { generationId, leaderId, protocolName, waiting: new Map(), assignments: undefined };
+    group.sync = {
+      generationId,
+      leaderId,
+      protocolName,
+      waiting: new Map(),
+      assignments: undefined,
+    };
     group.rebalance = undefined;
   }
 
@@ -359,7 +375,10 @@ class GroupCoordinator {
     groupId: string,
     generationId: number,
     memberId: string,
-    topics: readonly { name: string; partitions: readonly { partitionIndex: number; committedOffset: bigint }[] }[],
+    topics: readonly {
+      name: string;
+      partitions: readonly { partitionIndex: number; committedOffset: bigint }[];
+    }[],
   ): { name: string; partitions: { partitionIndex: number; errorCode: number }[] }[] {
     const group = this.state.groupFor(groupId);
     const member = group.stableMembers.get(memberId);
@@ -395,7 +414,8 @@ class GroupCoordinator {
 
 class KafkaConnectionHandler {
   private readonly inbox: { apiKey: number; correlationId: number; body: Buffer }[] = [];
-  private waiter: ((m: { apiKey: number; correlationId: number; body: Buffer }) => void) | undefined;
+  private waiter:
+    ((m: { apiKey: number; correlationId: number; body: Buffer }) => void) | undefined;
   private recvBuffer: Buffer = Buffer.alloc(0);
 
   constructor(
@@ -411,7 +431,8 @@ class KafkaConnectionHandler {
   }
 
   private onData(chunk: Buffer): void {
-    this.recvBuffer = this.recvBuffer.length === 0 ? chunk : Buffer.concat([this.recvBuffer, chunk]);
+    this.recvBuffer =
+      this.recvBuffer.length === 0 ? chunk : Buffer.concat([this.recvBuffer, chunk]);
     for (;;) {
       if (this.recvBuffer.length < 4) return;
       const size = this.recvBuffer.readInt32BE(0);
@@ -503,10 +524,13 @@ class KafkaConnectionHandler {
     }
     const w = new KafkaWriter();
     w.int32(0);
-    w.compactArray([{ nodeId: this.nodeId, host: '127.0.0.1', port: this.selfPort }], (writer, b) => {
-      writer.int32(b.nodeId).compactString(b.host).int32(b.port).compactNullableString(null);
-      writer.emptyTaggedFields();
-    });
+    w.compactArray(
+      [{ nodeId: this.nodeId, host: '127.0.0.1', port: this.selfPort }],
+      (writer, b) => {
+        writer.int32(b.nodeId).compactString(b.host).int32(b.port).compactNullableString(null);
+        writer.emptyTaggedFields();
+      },
+    );
     w.compactNullableString('fake-cluster');
     w.int32(this.nodeId);
     w.compactArray(topics, (writer, topic) => {
@@ -514,16 +538,19 @@ class KafkaConnectionHandler {
       writer.compactNullableString(topic);
       writer.boolean(false);
       const partitionCount = this.options.partitionCounts?.[topic] ?? 1;
-      writer.compactArray(Array.from({ length: partitionCount }, (_, p) => p), (pw, partitionIndex) => {
-        pw.int16(0);
-        pw.int32(partitionIndex);
-        pw.int32(this.nodeId);
-        pw.int32(0);
-        pw.compactArray([this.nodeId], (aw, v) => aw.int32(v));
-        pw.compactArray([this.nodeId], (aw, v) => aw.int32(v));
-        pw.compactArray([], () => undefined);
-        pw.emptyTaggedFields();
-      });
+      writer.compactArray(
+        Array.from({ length: partitionCount }, (_, p) => p),
+        (pw, partitionIndex) => {
+          pw.int16(0);
+          pw.int32(partitionIndex);
+          pw.int32(this.nodeId);
+          pw.int32(0);
+          pw.compactArray([this.nodeId], (aw, v) => aw.int32(v));
+          pw.compactArray([this.nodeId], (aw, v) => aw.int32(v));
+          pw.compactArray([], () => undefined);
+          pw.emptyTaggedFields();
+        },
+      );
       writer.int32(0);
       writer.emptyTaggedFields();
     });
@@ -603,16 +630,22 @@ class KafkaConnectionHandler {
     }
     r.skipTaggedFields();
 
-    this.coordinator.syncGroup(groupId, generationId, memberId, assignments, (errorCode, assignment) => {
-      const w = new KafkaWriter();
-      w.int32(0); // throttle_time_ms
-      w.int16(errorCode);
-      w.compactNullableString(errorCode === 0 ? 'consumer' : null);
-      w.compactNullableString(errorCode === 0 ? 'range' : null);
-      w.compactNullableBytes(assignment);
-      w.emptyTaggedFields();
-      this.send(correlationId, w.build());
-    });
+    this.coordinator.syncGroup(
+      groupId,
+      generationId,
+      memberId,
+      assignments,
+      (errorCode, assignment) => {
+        const w = new KafkaWriter();
+        w.int32(0); // throttle_time_ms
+        w.int16(errorCode);
+        w.compactNullableString(errorCode === 0 ? 'consumer' : null);
+        w.compactNullableString(errorCode === 0 ? 'range' : null);
+        w.compactNullableBytes(assignment);
+        w.emptyTaggedFields();
+        this.send(correlationId, w.build());
+      },
+    );
   }
 
   private handleHeartbeat(correlationId: number, body: Buffer): void {
@@ -662,7 +695,10 @@ class KafkaConnectionHandler {
     const memberId = r.compactString();
     r.compactNullableString();
     const topicCount = r.compactArrayLength();
-    const topics: { name: string; partitions: { partitionIndex: number; committedOffset: bigint }[] }[] = [];
+    const topics: {
+      name: string;
+      partitions: { partitionIndex: number; committedOffset: bigint }[];
+    }[] = [];
     for (let t = 0; t < topicCount; t++) {
       const name = r.compactString();
       const partitionCount = r.compactArrayLength();
@@ -741,7 +777,8 @@ class KafkaConnectionHandler {
     r.int32(); // session_id
     r.int32(); // session_epoch
     const topicCount = r.compactArrayLength();
-    const topics: { topic: string; partitions: { partition: number; fetchOffset: bigint }[] }[] = [];
+    const topics: { topic: string; partitions: { partition: number; fetchOffset: bigint }[] }[] =
+      [];
     for (let t = 0; t < topicCount; t++) {
       const topic = r.compactString();
       const partitionCount = r.compactArrayLength();

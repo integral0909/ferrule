@@ -203,6 +203,86 @@ interval: 15s
 namespace_override: ferrule
 ```
 
+## `kafka`
+
+Consumes Kafka topics via a hand-written protocol client, with acknowledgement-driven, per-partition offset commits.
+
+**Produces:** log
+
+**Output ports:**
+
+- `_default` — the default port
+
+**Options:**
+
+| Option                     | Type                                       | Default              | Required | Secret | Description                                                                                                                                                                                                 | Constraints |
+| -------------------------- | ------------------------------------------ | -------------------- | -------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `brokers`                  | socket_address[]                           |                      | yes      |        | Bootstrap broker addresses (host:port); metadata discovers the rest of the cluster.                                                                                                                         | minItems=1  |
+| `client_id`                | string                                     | `"ferrule"`          | no       |        | Client ID reported to the brokers.                                                                                                                                                                          |             |
+| `group_id`                 | string                                     |                      | yes      |        | Consumer group ID. Offsets are committed under this group.                                                                                                                                                  | minLength=1 |
+| `topics`                   | string[]                                   | `[]`                 | no       |        | Literal topic names to subscribe to.                                                                                                                                                                        |             |
+| `topic_pattern`            | regex                                      |                      | no       |        | A regular expression matched against the cluster’s topic list once at startup; every matching topic is added to topics. A topic created afterward that matches is only picked up once this source restarts. |             |
+| `tls`                      | object                                     |                      | no       |        | TLS options for connecting to the brokers.                                                                                                                                                                  |             |
+| `tls.enabled`              | boolean                                    |                      | no       |        | Require TLS for this connection.                                                                                                                                                                            |             |
+| `tls.ca_file`              | string                                     |                      | no       |        | Path to a PEM CA bundle used instead of the default trust store.                                                                                                                                            |             |
+| `tls.cert_file`            | string                                     |                      | no       |        | Path to a PEM client certificate, for mutual TLS.                                                                                                                                                           |             |
+| `tls.key_file`             | string                                     |                      | no       |        | Path to the PEM private key matching cert_file.                                                                                                                                                             |             |
+| `tls.verify_certificate`   | boolean                                    | `true`               | no       |        | Verify the broker certificate.                                                                                                                                                                              |             |
+| `tls.server_name`          | string                                     |                      | no       |        | Overrides the hostname used for SNI and certificate verification.                                                                                                                                           |             |
+| `sasl`                     | object                                     |                      | no       |        | SASL authentication for connecting to the brokers.                                                                                                                                                          |             |
+| `sasl.mechanism`           | enum("PLAIN", "SCRAM-SHA-256")             |                      | yes      |        |                                                                                                                                                                                                             |             |
+| `sasl.username`            | string                                     |                      | yes      |        |                                                                                                                                                                                                             |             |
+| `sasl.password`            | string                                     |                      | yes      | yes    |                                                                                                                                                                                                             |             |
+| `assignor`                 | enum("range", "cooperative_sticky")        | `"range"`            | no       |        | Partition assignment strategy run by the group’s elected leader.                                                                                                                                            |             |
+| `auto_offset_reset`        | enum("earliest", "latest")                 | `"latest"`           | no       |        | Where to position a partition with no committed offset, or whose committed offset the broker reports out of range: at the start of the log (earliest) or its current end (latest).                          |             |
+| `isolation_level`          | enum("read_uncommitted", "read_committed") | `"read_uncommitted"` | no       |        | read_uncommitted sees every record, including ones from an aborted transaction; read_committed filters them out.                                                                                            |             |
+| `decoding`                 | object                                     | `{"codec":"json"}`   | no       |        | Decoder configuration. Extra keys are passed through to the codec as its own options.                                                                                                                       |             |
+| `decoding.codec`           | string                                     | `"json"`             | no       |        | Codec used to parse the raw input.                                                                                                                                                                          |             |
+| `connect_timeout`          | duration                                   | `10000`              | no       |        | Timeout connecting to a broker.                                                                                                                                                                             |             |
+| `session_timeout`          | duration                                   | `10000`              | no       |        | How long the coordinator waits for a heartbeat before evicting this member.                                                                                                                                 |             |
+| `rebalance_timeout`        | duration                                   | `60000`              | no       |        | How long a rebalance waits for every expected member to rejoin.                                                                                                                                             |             |
+| `heartbeat_interval`       | duration                                   |                      | no       |        | Default: a third of session_timeout.                                                                                                                                                                        |             |
+| `fetch_min_bytes`          | byte_size                                  | `1`                  | no       |        | Minimum bytes the broker waits to accumulate before answering a Fetch.                                                                                                                                      |             |
+| `fetch_max_bytes`          | byte_size                                  | `1048576`            | no       |        | Maximum bytes per Fetch response.                                                                                                                                                                           |             |
+| `fetch_max_wait`           | duration                                   | `500`                | no       |        | Maximum time the broker waits for fetch_min_bytes before answering anyway.                                                                                                                                  |             |
+| `partition_max_bytes`      | byte_size                                  | `1048576`            | no       |        | Maximum bytes fetched per partition per Fetch.                                                                                                                                                              |             |
+| `max_outstanding_batches`  | integer                                    | `64`                 | no       |        | Maximum not-yet-acknowledged fetched batches kept per partition before pausing that partition’s fetching (backpressure) until one resolves.                                                                 | min=1       |
+| `rebalance_commit_timeout` | duration                                   | `5000`               | no       |        | Bounded wait, when a partition is revoked, for its in-flight acknowledgements to resolve before committing its acknowledged prefix and releasing it.                                                        |             |
+| `key_field`                | string                                     | `"kafka.key"`        | no       |        | Field each event is annotated with: the record key.                                                                                                                                                         |             |
+| `headers_field`            | string                                     | `"kafka.headers"`    | no       |        | Field each event is annotated with: the record headers.                                                                                                                                                     |             |
+| `topic_field`              | string                                     | `"kafka.topic"`      | no       |        | Field each event is annotated with: the source topic.                                                                                                                                                       |             |
+| `partition_field`          | string                                     | `"kafka.partition"`  | no       |        | Field each event is annotated with: the source partition.                                                                                                                                                   |             |
+| `offset_field`             | string                                     | `"kafka.offset"`     | no       |        | Field each event is annotated with: the record offset.                                                                                                                                                      |             |
+| `timestamp_field`          | string                                     |                      | no       |        | If set, each event is annotated with the record’s broker timestamp under this field.                                                                                                                        |             |
+
+**Examples:**
+
+**Consume JSON events from a topic**
+
+```yaml
+type: kafka
+brokers:
+  - 127.0.0.1:9092
+group_id: ferrule
+topics:
+  - events
+decoding:
+  codec: json
+```
+
+**Subscribe to every topic matching a pattern, replaying from the start**
+
+```yaml
+type: kafka
+brokers:
+  - 127.0.0.1:9092
+group_id: ferrule
+topic_pattern: ^events-.*$
+auto_offset_reset: earliest
+decoding:
+  codec: ndjson
+```
+
 ## `otlp`
 
 Receives OTLP/HTTP log, metric, and trace exports (protobuf or OTLP/JSON).

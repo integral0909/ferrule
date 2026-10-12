@@ -9,6 +9,7 @@ import { fileSource } from './file.js';
 import { heartbeatSource } from './heartbeat.js';
 import { httpServerSource } from './http_server.js';
 import { internalMetricsSource } from './internal_metrics.js';
+import { kafkaSource } from './kafka.js';
 import { otlpSource } from './otlp.js';
 import { prometheusScrapeSource } from './prometheus_scrape.js';
 import { statsdSource } from './statsd.js';
@@ -20,6 +21,7 @@ export * from './file.js';
 export * from './heartbeat.js';
 export * from './http_server.js';
 export * from './internal_metrics.js';
+export * from './kafka.js';
 export * from './otlp.js';
 export * from './prometheus_scrape.js';
 export * from './statsd.js';
@@ -34,6 +36,7 @@ export function builtinSources(): readonly SourceDefinition<unknown>[] {
     heartbeatSource,
     httpServerSource,
     internalMetricsSource,
+    kafkaSource,
     otlpSource,
     prometheusScrapeSource,
     statsdSource,

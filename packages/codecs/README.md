@@ -341,6 +341,7 @@ const consumer = new KafkaConsumer({
   groupId: 'my-group',
   topics: ['events'],
   assignor: 'cooperative_sticky', // or 'range' (default)
+  autoOffsetReset: 'earliest', // or 'latest'; default 'earliest'
   onRebalance: ({ assigned, revoked }) => {
     /* flush state for `revoked` before it's handed to another member */
   },
@@ -369,8 +370,17 @@ timeout by default, and rejoins on `REBALANCE_IN_PROGRESS` or a lost membership 
 own minimal `KafkaConsumerClock` (`now()`/`sleep()`), not `@ferrule/runtime`'s `Clock` — this
 package must not depend on that higher layer — so a caller with a runtime `Clock` adapts it.
 
-Wiring this into an actual `@ferrule/sources` Kafka source (a `SourceDefinition`, its option
-schema, checkpointing) is separate, later work; this package provides the protocol client only.
+A partition with no committed offset (a fresh group, or one new to that partition), or whose
+committed offset the broker reports `OFFSET_OUT_OF_RANGE`, is positioned via `ListOffsets` against
+`autoOffsetReset` (`earliest`, the default, or `latest`) rather than assumed to be `0`.
+`pausePartitions`/`resumePartitions` exclude specific owned partitions from the next `poll()`'s
+`Fetch` without affecting group membership — the mechanism a caller applies its own per-partition
+backpressure with (see `@ferrule/sources`'s `kafka` source, below).
+
+`@ferrule/sources`'s `kafka` source (issue #15) wires this into a `SourceDefinition`: its own
+option schema, acknowledgement-driven offset commits (only the contiguous prefix of acknowledged
+records per partition is ever committed), and per-partition backpressure — see that package's
+README for the source itself.
 
 ## Codec registry
 
@@ -441,9 +451,7 @@ with `new CodecRegistry()`) to extend the set by name.
 - **Kafka**: no KIP-394 two-phase join (a `JoinGroup` from a brand-new member always succeeds on
   the first try rather than requiring `UNKNOWN_MEMBER_ID` once and a retry with the assigned
   member ID — a lenient-broker-compatible simplification); no incremental Fetch sessions (every
-  `Fetch` restates its full topic-partition set); no `ListOffsets`, so a partition with no prior
-  committed offset always starts from `0` rather than honouring an `earliest`/`latest` auto-reset
-  policy against the log's actual bounds; no static membership (`group.instance.id`); the
+  `Fetch` restates its full topic-partition set); no static membership (`group.instance.id`); the
   cooperative-sticky assignor's balancing pass is a greedy repeated max/min swap, exact for the
   common case of every member subscribing to the same topics, not Kafka's precise sticky
   optimizer. Tested against an in-repo fake broker (`packages/codecs/test/kafka/support/`), not a

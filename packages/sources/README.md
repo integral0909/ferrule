@@ -1,7 +1,8 @@
 # `@ferrule/sources`
 
-Every source Ferrule ships: HTTP/OTLP/syslog/StatsD receivers, a file tailer, a Prometheus
-scraper, a demo generator, stdin, a heartbeat, and Ferrule's own internal metrics. This package
+Every source Ferrule ships: HTTP/OTLP/syslog/StatsD receivers, a file tailer, a Kafka consumer, a
+Prometheus scraper, a demo generator, stdin, a heartbeat, and Ferrule's own internal metrics. This
+package
 implements the `sources` row of the [architecture doc's](../../docs/architecture.md) §3 package
 table and the M6 roadmap item. Every source is a `SourceDefinition` (see
 `@ferrule/runtime`'s `defineSource`), registered individually or all at once via
@@ -22,6 +23,7 @@ for (const source of builtinSources()) registry.register(source);
 - [`otlp`](#otlp)
 - [`syslog`](#syslog)
 - [`file`](#file)
+- [`kafka`](#kafka)
 - [`statsd`](#statsd)
 - [`prometheus_scrape`](#prometheus_scrape)
 - [`demo_logs`](#demo_logs)
@@ -291,6 +293,92 @@ _later_ chunk delivering successfully in the same run can never let the watermar
 earlier chunk that errored; only a restart, which re-reads from before it, retries that data.
 Checkpoints are written atomically (temp file + rename) so a crash mid-write never corrupts the
 checkpoint file.
+
+---
+
+## `kafka`
+
+Consumes one or more Kafka topics via `@ferrule/codecs`'s hand-written consumer group client
+(`KafkaConsumer`), decoding each record's value through the codec registry and annotating every
+decoded event with the record's key, headers, topic, partition, and offset. No `data_dir` is
+needed — unlike `file`, this source's "checkpoint" is the committed offset held by the Kafka
+cluster itself, under `group_id`.
+
+| Option                     | Type                                 | Default                      | Description                                                                                                            |
+| -------------------------- | ------------------------------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `brokers`                  | `string[]`, min 1                    | —                            | Bootstrap broker addresses (`host:port`); metadata discovers the rest of the cluster.                                  |
+| `client_id`                | string                               | `ferrule`                    | Client ID reported to the brokers.                                                                                     |
+| `group_id`                 | string                               | —                            | Consumer group ID. Offsets are committed under this group.                                                             |
+| `topics`                   | `string[]`                           | `[]`                         | Literal topic names. At least one of `topics`/`topic_pattern` must be set.                                             |
+| `topic_pattern`            | regex, optional                      | —                            | Matched against the cluster's topic list once at startup; matches are added to `topics`.                               |
+| `tls`                      | object, optional                     | —                            | `enabled`, `ca_file`, `cert_file`, `key_file`, `verify_certificate`, `server_name` — same shape as the `kafka` sink's. |
+| `sasl`                     | object, optional                     | —                            | `mechanism: PLAIN \| SCRAM-SHA-256`, `username`, `password` — same shape as the `kafka` sink's.                        |
+| `assignor`                 | `range \| cooperative_sticky`        | `range`                      | Partition assignment strategy run by the group's elected leader.                                                       |
+| `auto_offset_reset`        | `earliest \| latest`                 | `latest`                     | Where a partition with no committed offset (or one reported out of range) starts.                                      |
+| `isolation_level`          | `read_uncommitted \| read_committed` | `read_uncommitted`           | `read_committed` filters out records from an aborted transaction.                                                      |
+| `decoding`                 | `{ codec, ... }`                     | `{ codec: "json" }`          | Codec (and its options) used to decode each record's value.                                                            |
+| `connect_timeout`          | duration                             | `10s`                        | Timeout connecting to a broker.                                                                                        |
+| `session_timeout`          | duration                             | `10s`                        | How long the coordinator waits for a heartbeat before evicting this member.                                            |
+| `rebalance_timeout`        | duration                             | `60s`                        | How long a rebalance waits for every expected member to rejoin.                                                        |
+| `heartbeat_interval`       | duration, optional                   | a third of `session_timeout` | How often this member heartbeats.                                                                                      |
+| `fetch_min_bytes`          | byte size                            | `1`                          | Minimum bytes the broker waits to accumulate before answering a Fetch.                                                 |
+| `fetch_max_bytes`          | byte size                            | `1MiB`                       | Maximum bytes per Fetch response.                                                                                      |
+| `fetch_max_wait`           | duration                             | `500ms`                      | Maximum time the broker waits for `fetch_min_bytes` before answering anyway.                                           |
+| `partition_max_bytes`      | byte size                            | `1MiB`                       | Maximum bytes fetched per partition per Fetch.                                                                         |
+| `max_outstanding_batches`  | integer                              | `64`                         | Max not-yet-acknowledged fetched batches per partition before pausing its fetching.                                    |
+| `rebalance_commit_timeout` | duration                             | `5s`                         | Bounded wait, on revocation, for a partition's in-flight acknowledgements to resolve.                                  |
+| `key_field`                | string                               | `kafka.key`                  | Field each event is annotated with: the record key.                                                                    |
+| `headers_field`            | string                               | `kafka.headers`              | Field each event is annotated with: the record headers.                                                                |
+| `topic_field`              | string                               | `kafka.topic`                | Field each event is annotated with: the source topic.                                                                  |
+| `partition_field`          | string                               | `kafka.partition`            | Field each event is annotated with: the source partition.                                                              |
+| `offset_field`             | string                               | `kafka.offset`               | Field each event is annotated with: the record offset.                                                                 |
+| `timestamp_field`          | string, optional                     | —                            | If set, each event is annotated with the record's broker timestamp.                                                    |
+
+```yaml
+sources:
+  events_in:
+    type: kafka
+    brokers: ['kafka-0:9092', 'kafka-1:9092']
+    group_id: ferrule
+    topics: [events]
+    decoding:
+      codec: json
+```
+
+**At-least-once, never at-most-once.** Offsets are committed only for the **contiguous prefix of
+acknowledged records per partition** — the same ordered-outstanding-range design the `file`
+source's checkpoints use, adapted from file offsets to Kafka offsets. Each poll's fetched batch
+for a partition is sent downstream and queued immediately, not awaited inline, so one partition's
+slow acknowledgement never holds up another; the _committed_ offset only ever advances over
+records that have resolved to something other than `'errored'`. A batch that resolves `'errored'`
+is left in place at the head of its partition's queue, permanently blocking that partition's
+committed offset from advancing past it for the rest of this run — a restart (or the partition
+moving to another group member) re-fetches from the last committed offset and redelivers it. A
+batch that resolves `'rejected'` (a permanent, non-retryable failure) does advance the committed
+offset, the same as `'delivered'` — retrying data that will never succeed would just block the
+partition forever instead. With `ctx.acknowledgements` off, a batch's offset is committed as soon
+as it is sent downstream. **This means a crash between delivery and commit — or a rebalance that
+moves a partition away before its last batch's commit lands — can redeliver already-processed
+records, but never silently drops one that was never acknowledged.**
+
+**Backpressure pauses fetching per partition.** Once a partition's outstanding queue reaches
+`max_outstanding_batches`, it is excluded from this consumer's next `Fetch`
+(`KafkaConsumer.pausePartitions`) until an outstanding batch resolves — bounding memory without
+slowing down any other partition that is still keeping up.
+
+**Rebalance handling.** When a partition is revoked, this source's partition is already excluded
+from fetching (the consumer drops it from its owned set before the rebalance callback fires); the
+callback then waits — bounded by `rebalance_commit_timeout`, since an acknowledgement might never
+resolve (e.g. a downstream that's gone away) — for that partition's outstanding batches to
+resolve, commits whatever contiguous prefix that leaves acknowledged, and only then releases the
+partition. This narrows, but (as with any real Kafka consumer) cannot fully close, the same
+race against the new owner's own offset lookup that the two-phase commit protocol itself has no
+synchronization for.
+
+**`topic_pattern` is resolved once, at startup**, against the cluster's topic list (via a
+`Metadata` request), not re-evaluated while running — `KafkaConsumer` has no support for changing
+a running member's subscription. A topic created later that matches the pattern is only picked up
+once this source restarts.
 
 ---
 

@@ -193,6 +193,11 @@ export class KafkaBrokerConnection {
   private fail(error: unknown): void {
     if (this.terminalError !== undefined) return;
     this.terminalError = error instanceof Error ? error : new Error(String(error));
+    // An unexpected socket error or close makes this connection permanently unusable, exactly
+    // like an explicit `close()` — without this, `KafkaProducer.getOrConnect`'s `!isClosed` reuse
+    // check would hand back a dead connection on the very next send, whose `write()` either
+    // throws or (worse) silently never resolves, instead of opening a fresh one.
+    this.closed = true;
     for (const [, pending] of this.pending) pending.reject(this.terminalError);
     this.pending.clear();
   }

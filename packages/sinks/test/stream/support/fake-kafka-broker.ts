@@ -1,4 +1,5 @@
 import * as net from 'node:net';
+import { KafkaErrorCode } from '../../../src/kafka/errors.js';
 import { ApiKey } from '../../../src/kafka/protocol.js';
 import { KafkaReader, KafkaWriter } from '../../../src/kafka/primitives.js';
 import { decodeRecordBatch, type DecodedRecordBatch } from '../../../src/kafka/record-batch.js';
@@ -10,10 +11,18 @@ import {
 
 /**
  * A fake Kafka broker speaking just enough of the wire protocol to exercise the producer in
- * `src/kafka/`: `ApiVersions`, `Metadata` (v9, flexible), `Produce` (v9, flexible, decoding and
- * CRC-verifying every `RecordBatch` it receives), and `SaslHandshake`/`SaslAuthenticate` (v1,
- * PLAIN and SCRAM-SHA-256). Driven as a small async request/response pump per connection, the
- * same style as the fake PostgreSQL server.
+ * `src/kafka/`: `ApiVersions`, `Metadata` (v9, flexible), `InitProducerId` (v4, flexible),
+ * `Produce` (v9, flexible, decoding and CRC-verifying every `RecordBatch` it receives, and
+ * deduplicating idempotent producers' sequence numbers the way a real broker would), and
+ * `SaslHandshake`/`SaslAuthenticate` (v1, PLAIN and SCRAM-SHA-256). Driven as a small async
+ * request/response pump per connection, the same style as the fake PostgreSQL server.
+ *
+ * Idempotent-producer state (the next producer ID to hand out, and each producer's last
+ * acknowledged sequence number per partition) lives on the `FakeKafkaBroker` itself and is
+ * shared across every connection's handler, the same way `receivedBatches` already is — a real
+ * broker's dedup window is cluster state, not connection state, which matters for the
+ * connection-drop tests below (a retry over a brand new connection must still be recognized as a
+ * duplicate of what an earlier connection already got accepted).
  */
 
 export interface FakeKafkaSaslOptions {
@@ -28,13 +37,33 @@ export interface ReceivedProduceBatch {
   readonly decoded: DecodedRecordBatch;
 }
 
+/** One record this broker actually *applied* (appended to the topic) — unlike `receivedBatches`,
+ * this excludes batches the dedup check recognised as a duplicate sequence number, so it is what
+ * a "no duplicate records" test assertion should read. */
+export interface AppliedRecord {
+  readonly topic: string;
+  readonly partition: number;
+  readonly key: Buffer | null;
+  readonly value: Buffer | null;
+}
+
 export interface ProduceDecisionInput {
   readonly topic: string;
   readonly partition: number;
   readonly decoded: DecodedRecordBatch;
 }
 
-export type ProduceDecision = { errorCode: 0 } | { errorCode: number; errorMessage?: string };
+export type ProduceDecision =
+  | {
+      readonly errorCode: 0;
+      /** Applies the write as normal, but then destroys the connection before any response is
+       * sent — simulating the ambiguous-outcome failure (broker committed it, client never
+       * learned that) idempotent production exists to handle. Since one TCP response frame
+       * covers every topic/partition in the request, this drops the whole response, not just
+       * this partition's share of it. */
+      readonly disconnectAfter?: boolean;
+    }
+  | { readonly errorCode: number; readonly errorMessage?: string };
 
 export interface FakeKafkaBrokerOptions {
   readonly nodeId?: number;
@@ -52,6 +81,16 @@ function msg(body: Buffer): Buffer {
   return w.build();
 }
 
+/** State shared across every connection this broker accepts — a real broker's idempotent-producer
+ * bookkeeping (next producer ID to hand out, and each producer's last acknowledged sequence
+ * number per partition) is cluster state, not per-connection state. */
+interface BrokerState {
+  nextProducerId: bigint;
+  /** `"producerId\0topic\0partition"` -> the last sequence number accepted there. */
+  readonly sequenceState: Map<string, number>;
+  readonly appliedRecords: AppliedRecord[];
+}
+
 class KafkaConnectionHandler {
   private readonly inbox: { apiKey: number; correlationId: number; body: Buffer }[] = [];
   private waiter:
@@ -66,6 +105,7 @@ class KafkaConnectionHandler {
     private readonly nodeId: number,
     private readonly selfPort: number,
     readonly receivedBatches: ReceivedProduceBatch[],
+    private readonly state: BrokerState,
   ) {
     socket.on('data', (chunk: Buffer) => this.onData(chunk));
     socket.on('error', () => undefined);
@@ -88,7 +128,8 @@ class KafkaConnectionHandler {
       const clientIdLen = frame.readInt16BE(offset);
       offset += 2;
       if (clientIdLen >= 0) offset += clientIdLen;
-      const flexible = apiKey === ApiKey.Metadata || apiKey === ApiKey.Produce;
+      const flexible =
+        apiKey === ApiKey.Metadata || apiKey === ApiKey.Produce || apiKey === ApiKey.InitProducerId;
       if (flexible) {
         // empty tagged fields section: a single 0x00 byte, since this client never sends any.
         offset += 1;
@@ -140,6 +181,9 @@ class KafkaConnectionHandler {
         return;
       case ApiKey.Metadata:
         this.handleMetadata(request.correlationId, request.body);
+        return;
+      case ApiKey.InitProducerId:
+        this.handleInitProducerId(request.correlationId);
         return;
       case ApiKey.Produce:
         this.handleProduce(request.correlationId, request.body);
@@ -274,6 +318,70 @@ class KafkaConnectionHandler {
     this.send(correlationId, w.build());
   }
 
+  private handleInitProducerId(correlationId: number): void {
+    const producerId = this.state.nextProducerId;
+    this.state.nextProducerId += 1n;
+    const w = new KafkaWriter();
+    w.int32(0); // throttle_time_ms
+    w.int16(0); // error_code
+    w.int64(producerId);
+    w.int16(0); // producer_epoch: this fake never bumps an epoch, every InitProducerId is brand new
+    w.emptyTaggedFields();
+    this.send(correlationId, w.build());
+  }
+
+  /**
+   * Decides the outcome for one partition's `RecordBatch`, including the idempotent-producer
+   * dedup check real brokers perform before ever looking at `onProduce`: a batch whose sequence
+   * range is entirely at or before what this (producerId, topic, partition) has already
+   * acknowledged is a duplicate (the client retried a write that actually landed) and is neither
+   * re-applied nor passed to the test's own decision hook; a batch that leaves a gap is out of
+   * order. Non-idempotent batches (`producerId === -1n`, this client's default) skip the check
+   * entirely, matching a real broker's behaviour for a producer that never called
+   * `InitProducerId`.
+   */
+  private resolveProduceDecision(
+    topic: string,
+    partition: number,
+    decoded: DecodedRecordBatch,
+  ): ProduceDecision {
+    let sequenceKey: string | undefined;
+    if (decoded.producerId >= 0n) {
+      sequenceKey = `${decoded.producerId}\u0000${topic}\u0000${partition}`;
+      const lastAcked = this.state.sequenceState.get(sequenceKey);
+      const batchLastSeq = decoded.baseSequence + decoded.records.length - 1;
+      if (lastAcked === undefined) {
+        if (decoded.baseSequence !== 0) {
+          return { errorCode: KafkaErrorCode.OUT_OF_ORDER_SEQUENCE_NUMBER };
+        }
+      } else if (decoded.baseSequence === lastAcked + 1) {
+        // in order, genuinely new data — falls through to be applied (and only then
+        // acknowledged) below.
+      } else if (batchLastSeq <= lastAcked) {
+        return { errorCode: KafkaErrorCode.DUPLICATE_SEQUENCE_NUMBER };
+      } else {
+        return { errorCode: KafkaErrorCode.OUT_OF_ORDER_SEQUENCE_NUMBER };
+      }
+    }
+    const decision = this.options.onProduce?.({ topic, partition, decoded }) ?? { errorCode: 0 };
+    // The sequence number is only committed — and the records only applied — once the decision
+    // actually accepts the write: a retryable error from `onProduce` (simulating e.g.
+    // NOT_LEADER_OR_FOLLOWER) means this broker never durably accepted it, so the *next* attempt
+    // at the same sequence must still be seen as new data, not a duplicate.
+    if (decision.errorCode === 0) {
+      if (sequenceKey !== undefined) {
+        this.state.sequenceState.set(
+          sequenceKey,
+          decoded.baseSequence + decoded.records.length - 1,
+        );
+      }
+      for (const record of decoded.records) {
+        this.state.appliedRecords.push({ topic, partition, key: record.key, value: record.value });
+      }
+    }
+    return decision;
+  }
+
   private handleProduce(correlationId: number, body: Buffer): void {
     const r = new KafkaReader(body);
     r.compactNullableString(); // transactional_id
@@ -284,6 +392,7 @@ class KafkaConnectionHandler {
       name: string;
       partitions: { index: number; decision: ProduceDecision }[];
     }[] = [];
+    let disconnectAfter = false;
     for (let t = 0; t < topicCount; t++) {
       const name = r.compactString();
       const partitionCount = r.compactArrayLength();
@@ -299,9 +408,10 @@ class KafkaConnectionHandler {
         const decision: ProduceDecision =
           decoded === undefined
             ? { errorCode: 0 }
-            : (this.options.onProduce?.({ topic: name, partition: index, decoded }) ?? {
-                errorCode: 0,
-              });
+            : this.resolveProduceDecision(name, index, decoded);
+        if ('disconnectAfter' in decision && decision.disconnectAfter === true) {
+          disconnectAfter = true;
+        }
         partitions.push({ index, decision });
       }
       r.skipTaggedFields();
@@ -309,6 +419,14 @@ class KafkaConnectionHandler {
     }
     r.skipTaggedFields();
 
+    if (disconnectAfter) {
+      // Every accepted write above is already applied; the client just never finds out, so its
+      // retry — over a new connection — must look exactly like a first attempt from the
+      // connection's point of view, while `resolveProduceDecision` still recognises it as a
+      // duplicate via the shared `state`.
+      this.socket.destroy();
+      return;
+    }
     if (acks === 0) return; // no response for fire-and-forget
 
     const w = new KafkaWriter();
@@ -339,6 +457,11 @@ export class FakeKafkaBroker {
   private _port = 0;
   readonly receivedBatches: ReceivedProduceBatch[] = [];
   readonly nodeId: number;
+  private readonly state: BrokerState = {
+    nextProducerId: 1000n,
+    sequenceState: new Map(),
+    appliedRecords: [],
+  };
 
   constructor(private readonly options: FakeKafkaBrokerOptions = {}) {
     this.nodeId = options.nodeId ?? 1;
@@ -349,6 +472,7 @@ export class FakeKafkaBroker {
         this.nodeId,
         this._port,
         this.receivedBatches,
+        this.state,
       );
       handler.run().catch(() => undefined);
     });
@@ -363,6 +487,18 @@ export class FakeKafkaBroker {
 
   get port(): number {
     return this._port;
+  }
+
+  /** Records this broker actually applied — excludes any batch its dedup check recognised as a
+   * duplicate sequence number. What a "no duplicate records" assertion should read. */
+  get appliedRecords(): readonly AppliedRecord[] {
+    return this.state.appliedRecords;
+  }
+
+  /** How many distinct producer IDs this broker has handed out via `InitProducerId`. A producer
+   * resetting its ID (after a fencing error) shows up here as the count increasing again. */
+  get producerIdsIssued(): number {
+    return Number(this.state.nextProducerId - 1000n);
   }
 
   async close(): Promise<void> {

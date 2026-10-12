@@ -13,6 +13,7 @@ import { KafkaReader, KafkaWriter } from './primitives.js';
 export const ApiKey = {
   Produce: 0,
   Metadata: 3,
+  InitProducerId: 22,
   SaslHandshake: 17,
   ApiVersions: 18,
   SaslAuthenticate: 36,
@@ -151,6 +152,41 @@ export function decodeMetadataResponseV9(body: Buffer): MetadataResponse {
   }
   r.skipTaggedFields();
   return { throttleTimeMs, brokers, clusterId, controllerId, topics };
+}
+
+// ---------------------------------------------------------------------------------------------
+// InitProducerId (key 22, v4; flexible) — idempotent producer bootstrap. This client only ever
+// requests a brand new producer ID (`producer_id: -1`, `producer_epoch: -1`); it implements
+// idempotent production, not transactions, so `transactional_id` is always null and an epoch
+// bump (KIP-360, requesting the *current* producer_id back with a fenced-out old epoch) is never
+// needed — a fencing error instead resets to a fresh producer ID entirely (see `producer.ts`).
+// ---------------------------------------------------------------------------------------------
+
+export function encodeInitProducerIdRequestV4(transactionTimeoutMs: number): Buffer {
+  const w = new KafkaWriter();
+  w.compactNullableString(null); // transactional_id
+  w.int32(transactionTimeoutMs);
+  w.int64(-1n); // producer_id: -1 requests a new one
+  w.int16(-1); // producer_epoch: -1 requests a new one
+  w.emptyTaggedFields();
+  return w.build();
+}
+
+export interface InitProducerIdResponse {
+  readonly throttleTimeMs: number;
+  readonly errorCode: number;
+  readonly producerId: bigint;
+  readonly producerEpoch: number;
+}
+
+export function decodeInitProducerIdResponseV4(body: Buffer): InitProducerIdResponse {
+  const r = new KafkaReader(body);
+  const throttleTimeMs = r.int32();
+  const errorCode = r.int16();
+  const producerId = r.int64();
+  const producerEpoch = r.int16();
+  r.skipTaggedFields();
+  return { throttleTimeMs, errorCode, producerId, producerEpoch };
 }
 
 // ---------------------------------------------------------------------------------------------

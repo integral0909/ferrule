@@ -1,13 +1,20 @@
 import type { Event } from '@ferrule/core';
 import type { TlsOptions } from '../fragments.js';
 import { KafkaBrokerConnection } from './connection.js';
-import { KafkaError, KafkaProtocolError } from './errors.js';
+import {
+  isDuplicateSequenceErrorCode,
+  needsProducerIdReset,
+  KafkaError,
+  KafkaProtocolError,
+} from './errors.js';
 import { murmur2Partition, RoundRobinPartitioner, StickyPartitioner } from './murmur2.js';
 import { encodeRecordBatch, type CompressionType, type RecordHeaderInput } from './record-batch.js';
 import {
   ApiKey,
+  decodeInitProducerIdResponseV4,
   decodeMetadataResponseV9,
   decodeProduceResponseV9,
+  encodeInitProducerIdRequestV4,
   encodeMetadataRequestV9,
   encodeProduceRequestV9,
   type ProducePartitionRequest,
@@ -33,6 +40,15 @@ export interface KafkaProducerOptions {
   /** Partition strategy for records with no key. Keyed records always use the murmur2 default
    * partitioner (matching the classic Java client). Default `sticky`. */
   readonly partitioner?: 'round_robin' | 'sticky';
+  /**
+   * Enables the idempotent producer: `InitProducerId`, a producer epoch, and per-partition
+   * sequence numbers in every `RecordBatch`, so a retry after a partial failure resends the
+   * exact same sequence range instead of risking a duplicate. Requires `acks: -1` and
+   * `maxInFlightRequestsPerConnection` of at most 5 — both enforced by this constructor, since a
+   * broker only tracks the last 5 unacknowledged batches per partition for deduplication.
+   * Default `false`.
+   */
+  readonly idempotent?: boolean;
 }
 
 export interface OutgoingRecord {
@@ -51,15 +67,24 @@ interface Assigned {
   readonly partition: number;
 }
 
+interface SequenceReservation {
+  readonly baseSequence: number;
+  readonly producerId: bigint;
+  readonly producerEpoch: number;
+}
+
 /**
  * A hand-written Kafka producer: broker connections (one per node, opened lazily), a metadata
  * cache (topic -> partition -> leader, refreshed on demand or after a stale-metadata error), the
  * default (murmur2) and sticky/round-robin partitioners, and `Produce` request constructions that
  * group records first by partition and then by the partition's leader broker, so one `send()`
  * call issues at most one `Produce` request per broker involved, regardless of how many
- * topic-partitions it touches. Idempotence is not implemented (not required by this sink): a
- * retry after a partial failure may resend records a partition already accepted, which is
- * consistent with the pipeline's documented at-least-once contract.
+ * topic-partitions it touches. With `idempotent: true` (see {@link KafkaProducerOptions}), every
+ * `RecordBatch` carries an `InitProducerId`-issued producer ID/epoch and a per-partition
+ * sequence number reserved once per batch and reused on every retry, so a partial failure's
+ * retry resends the exact same sequence range instead of risking a duplicate; without it, a
+ * retry may resend records a partition already accepted, which is consistent with the pipeline's
+ * documented at-least-once contract.
  */
 export class KafkaProducer {
   private readonly connections = new Map<string, KafkaBrokerConnection>();
@@ -71,9 +96,42 @@ export class KafkaProducer {
   private readonly roundRobin = new RoundRobinPartitioner();
   private readonly sticky = new StickyPartitioner();
 
+  // Idempotent producer state (only meaningful when `options.idempotent === true`). `-1n`/`-1`
+  // are the "uninitialized" sentinels InitProducerId itself uses for "give me a new one".
+  private producerId = -1n;
+  private producerEpoch = -1;
+  private producerIdInit: Promise<void> | undefined;
+  /** `"topic\0partition"` -> the next sequence number this producer ID will assign there. Reset
+   * (cleared) whenever the producer ID itself is reset. */
+  private readonly partitionSequences = new Map<string, number>();
+  /** Partition assignment is computed once per distinct `records` array and reused on every
+   * retry of that same array (`runBatchedSink` passes the identical reference back in): without
+   * this, a retry could land unkeyed records on a different partition than the first attempt
+   * (the round-robin/sticky partitioners are stateful), which would be wrong even without
+   * idempotence and is actively unsafe with it, since the sequence reservation below is keyed by
+   * (topic, partition). */
+  private readonly batchAssignments = new WeakMap<readonly OutgoingRecord[], Assigned[]>();
+  /** Sequence numbers reserved for a given `records` batch, keyed the same way, so a retry reuses
+   * the exact (producerId, epoch, baseSequence) of its first attempt rather than reserving a new
+   * range. */
+  private readonly batchSequences = new WeakMap<
+    readonly OutgoingRecord[],
+    Map<string, SequenceReservation>
+  >();
+
   constructor(private readonly options: KafkaProducerOptions) {
     if (options.bootstrapBrokers.length === 0) {
       throw new KafkaProtocolError('at least one bootstrap broker is required');
+    }
+    if (options.idempotent === true) {
+      if ((options.acks ?? -1) !== -1) {
+        throw new KafkaProtocolError('idempotent production requires acks: -1');
+      }
+      if ((options.maxInFlightRequestsPerConnection ?? 5) > 5) {
+        throw new KafkaProtocolError(
+          'idempotent production requires maxInFlightRequestsPerConnection of at most 5',
+        );
+      }
     }
     this.bootstrapAddrs = [...options.bootstrapBrokers];
   }
@@ -174,14 +232,21 @@ export class KafkaProducer {
    */
   async send(records: readonly OutgoingRecord[]): Promise<void> {
     if (records.length === 0) return;
+    if (this.options.idempotent === true) await this.ensureProducerId();
     const topics = [...new Set(records.map((r) => r.topic))];
     await this.ensureMetadata(topics);
 
-    const assigned: Assigned[] = records.map((record) => ({
-      record,
-      partition: this.partitionFor(record.topic, record.key),
-    }));
-    for (const topic of topics) this.sticky.onBatchComplete(topic);
+    // Computed once per distinct `records` array and reused on every retry — see
+    // `batchAssignments`'s doc comment.
+    let assigned = this.batchAssignments.get(records);
+    if (assigned === undefined) {
+      assigned = records.map((record) => ({
+        record,
+        partition: this.partitionFor(record.topic, record.key),
+      }));
+      for (const topic of topics) this.sticky.onBatchComplete(topic);
+      this.batchAssignments.set(records, assigned);
+    }
 
     // nodeId -> topic -> partition -> assigned records
     const byLeader = new Map<number, Map<string, Map<number, Assigned[]>>>();
@@ -217,7 +282,7 @@ export class KafkaProducer {
 
     await Promise.all(
       [...byLeader.entries()].map(([nodeId, byTopic]) =>
-        this.sendToLeader(nodeId, byTopic, retryableErrors).catch((error: unknown) => {
+        this.sendToLeader(records, nodeId, byTopic, retryableErrors).catch((error: unknown) => {
           retryableErrors.push(
             error instanceof KafkaError ? error : new KafkaError(-1, String(error)),
           );
@@ -234,6 +299,7 @@ export class KafkaProducer {
   }
 
   private async sendToLeader(
+    records: readonly OutgoingRecord[],
     nodeId: number,
     byTopic: Map<string, Map<number, Assigned[]>>,
     retryableErrors: KafkaError[],
@@ -249,6 +315,7 @@ export class KafkaProducer {
     for (const [topic, byPartition] of byTopic) {
       const partitions: ProducePartitionRequest[] = [];
       for (const [partition, items] of byPartition) {
+        const seq = this.reserveSequence(records, topic, partition, items.length);
         const batch = encodeRecordBatch(
           items.map((a) => ({
             key: a.record.key,
@@ -256,7 +323,16 @@ export class KafkaProducer {
             headers: a.record.headers,
             timestamp: a.record.timestamp,
           })),
-          { compression: this.options.compression ?? 'none' },
+          {
+            compression: this.options.compression ?? 'none',
+            ...(seq !== undefined
+              ? {
+                  producerId: seq.producerId,
+                  producerEpoch: seq.producerEpoch,
+                  baseSequence: seq.baseSequence,
+                }
+              : {}),
+          },
         );
         partitions.push({ index: partition, records: batch });
         byKey.set(`${topic}\u0000${partition}`, items);
@@ -284,8 +360,23 @@ export class KafkaProducer {
     for (const topic of response.topics) {
       for (const partition of topic.partitions) {
         const items = byKey.get(`${topic.name}\u0000${partition.index}`) ?? [];
-        if (partition.errorCode === 0) {
+        if (partition.errorCode === 0 || isDuplicateSequenceErrorCode(partition.errorCode)) {
+          // A duplicate sequence number means the broker already appended this exact batch on an
+          // earlier attempt whose response this producer never saw (e.g. a dropped connection) —
+          // from the caller's point of view that is indistinguishable from success.
           for (const a of items) a.record.event.metadata.finalizers.finish('delivered');
+          continue;
+        }
+        if (this.options.idempotent === true && needsProducerIdReset(partition.errorCode)) {
+          // The broker's view of this producer's sequence state can no longer be trusted (a
+          // gap, a stale epoch, or a fencing producer instance). Resending this batch under a
+          // fresh producer ID would be accepted as brand new data — but if an earlier attempt
+          // of it was *also* accepted under the old identity (which this response alone cannot
+          // rule out), that resend would duplicate it. So these events are finished `errored`
+          // instead of retried, and the producer ID and every partition's sequence counter are
+          // reset so whatever is produced next starts clean.
+          for (const a of items) a.record.event.metadata.finalizers.finish('errored');
+          this.resetProducerId();
           continue;
         }
         const error = new KafkaError(partition.errorCode, partition.errorMessage ?? undefined);
@@ -297,6 +388,88 @@ export class KafkaProducer {
         }
       }
     }
+  }
+
+  /**
+   * Reserves the next sequence range for `(topic, partition)` under the current producer ID, the
+   * first time this `records` batch is sent there; every later retry of the same `records`
+   * reference gets back the identical reservation. Returns `undefined` when idempotence is off
+   * (callers then omit producerId/epoch/baseSequence from the encoded `RecordBatch` entirely).
+   */
+  private reserveSequence(
+    records: readonly OutgoingRecord[],
+    topic: string,
+    partition: number,
+    count: number,
+  ): SequenceReservation | undefined {
+    if (this.options.idempotent !== true) return undefined;
+    let perBatch = this.batchSequences.get(records);
+    if (perBatch === undefined) {
+      perBatch = new Map();
+      this.batchSequences.set(records, perBatch);
+    }
+    const key = `${topic}\u0000${partition}`;
+    const cached = perBatch.get(key);
+    if (cached !== undefined) return cached;
+    const baseSequence = this.partitionSequences.get(key) ?? 0;
+    this.partitionSequences.set(key, baseSequence + count);
+    const reservation: SequenceReservation = {
+      baseSequence,
+      producerId: this.producerId,
+      producerEpoch: this.producerEpoch,
+    };
+    perBatch.set(key, reservation);
+    return reservation;
+  }
+
+  /** Discards the current producer ID and every partition's sequence counter, forcing a fresh
+   * `InitProducerId` round trip before the next batch is sent. */
+  private resetProducerId(): void {
+    this.producerId = -1n;
+    this.producerEpoch = -1;
+    this.partitionSequences.clear();
+  }
+
+  private async ensureProducerId(): Promise<void> {
+    if (this.producerId !== -1n) return;
+    if (this.producerIdInit === undefined) {
+      this.producerIdInit = this.initProducerId().finally(() => {
+        this.producerIdInit = undefined;
+      });
+    }
+    await this.producerIdInit;
+  }
+
+  /** Fetches a fresh producer ID and epoch from any one reachable bootstrap broker —
+   * `InitProducerId` may be answered by any broker in the cluster, the same way `ApiVersions`
+   * and `Metadata` can. */
+  private async initProducerId(): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < this.bootstrapAddrs.length; attempt++) {
+      const addr = this.nextBootstrap();
+      try {
+        const conn = await this.getOrConnect(addr);
+        const body = await conn.sendRequest(
+          ApiKey.InitProducerId,
+          4,
+          true,
+          encodeInitProducerIdRequestV4(60_000),
+        );
+        const response = decodeInitProducerIdResponseV4(body);
+        if (response.errorCode !== 0) {
+          lastError = new KafkaError(response.errorCode, 'InitProducerId failed');
+          continue;
+        }
+        this.producerId = response.producerId;
+        this.producerEpoch = response.producerEpoch;
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new KafkaProtocolError('failed to initialize a Kafka producer ID');
   }
 
   /** Connects to any one reachable bootstrap broker and asks its supported API versions, as a

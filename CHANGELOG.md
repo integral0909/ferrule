@@ -28,7 +28,11 @@ All notable changes to this project are documented here. The format follows
 - `@ferrule/sources`: 10 sources, including HTTP, OTLP, syslog, file tailing with checkpoints,
   StatsD, and Prometheus scraping.
 - `@ferrule/sinks`: 15 sinks, including Loki, ClickHouse, Elasticsearch, S3-compatible storage,
-  OTLP, Prometheus, Kafka, and PostgreSQL.
+  OTLP, Prometheus, Kafka, and PostgreSQL. The Kafka sink's producer is idempotent by default
+  (`idempotent: true`): `InitProducerId`, a producer epoch, and per-partition sequence numbers in
+  every `RecordBatch`, so a retry after a partial failure — a retryable broker error or a
+  connection dropped after the broker already applied the write — resends the exact same sequence
+  range instead of duplicating the record (GitHub #17).
 - `@ferrule/config`: position-aware YAML parser, interpolation, secret backends, code-frame
   diagnostics, and config diffing.
 - `@ferrule/admin`: admin HTTP API with health, topology, metrics, live tap, and reload.

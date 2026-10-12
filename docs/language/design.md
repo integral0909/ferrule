@@ -128,3 +128,68 @@ test "normalises level" {
   expect { "level": "warn" }
 }
 ```
+
+## 8. Metric events
+
+Everything above describes a program's view of a **log** event: `.field` paths over an open,
+mostly-`any` object (§3). A **metric** event (`@ferrule/core`'s `MetricEvent`) has a different,
+fixed shape instead — a name, a namespace, a set of string tags, an incremental/absolute kind, and
+a value whose structure depends on the metric's type (counter, gauge, set, distribution,
+histogram, or summary). The `script` component's `metrics: true` option checks and runs a program
+against this view instead of a log's; see `packages/operators/src/script.ts`.
+
+| Path             | Type                                                 | Present for        |
+| ---------------- | ---------------------------------------------------- | ------------------ |
+| `.name`          | `string`                                             | every metric       |
+| `.namespace`     | `string \| null`                                     | every metric       |
+| `.tags`          | `object { ..string }`                                | every metric       |
+| `.kind`          | `string` (`"incremental"` or `"absolute"`)           | every metric       |
+| `.value_type`    | `string`, **read-only**                              | every metric       |
+| `.timestamp`     | `timestamp \| null`                                  | every metric       |
+| `.interval_ms`   | `float \| null`                                      | every metric       |
+| `.value`         | `float`                                              | counter, gauge     |
+| `.values`        | `array<string>`                                      | set                |
+| `.statistic`     | `string` (`"histogram"` or `"summary"`)              | distribution       |
+| `.samples`       | `array<object { value: float, rate: float }>`        | distribution       |
+| `.buckets`       | `array<object { upper_limit: float, count: float }>` | histogram          |
+| `.count`, `.sum` | `float`                                              | histogram, summary |
+| `.quantiles`     | `array<object { quantile: float, value: float }>`    | summary            |
+
+Every value-type's field(s) coexist in this one view and are typed and readable regardless of the
+event's actual type — a field that does not apply to the current event reads as `null`, the same
+as any other absent path. `.tags`, by contrast, is always precisely typed: any tag _name_ is
+allowed, but a tag's _value_ must be a string, so `.tags.env = 1` is a compile-time type error —
+not just for a declared tag, any tag name type-checks the same way, since `.tags` has no fixed set
+of field names, only a fixed value type:
+
+```ferrule-metric
+.tags.region = "eu"
+if .value_type == "counter" || .value_type == "gauge" {
+  .value = .value + 1.0
+}
+```
+
+```ferrule-metric-error
+.tags.env = 1
+```
+
+`.value_type` cannot be assigned at all — changing a metric's value type (turning a counter into a
+histogram, say) isn't supported, so reassigning it is rejected at compile time rather than
+producing a metric whose fields don't match its own declared type:
+
+```ferrule-metric-error
+.value_type = "gauge"
+```
+
+Every other field's write is _also_ validated once the program finishes running, not just
+type-checked: this is deliberately not fully sound at the type level (an open `rest`/`any` type
+along the way, e.g. through `merge`, isn't checked — the same gradual-typing tradeoff §3's
+`input_schema` already makes for logs), so a non-string tag value that slipped past the checker, a
+`.kind` that isn't `"incremental"`/`"absolute"`, or a deleted required field each abort the event
+with a clear reason instead of silently producing a malformed metric. A field that doesn't apply
+to the event's actual type (writing `.buckets` on a counter, say) is simply never read back — it
+has nowhere to go, so the write has no effect on the metric that leaves the component, but it does
+not abort the event either.
+
+A program that reads and writes none of these fields leaves the metric's value bit-identical, for
+every one of the six value types.

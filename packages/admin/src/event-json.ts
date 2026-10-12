@@ -116,6 +116,15 @@ function metricValueValue(value: MetricValue): ValueMap {
       out.set('count', value.count);
       out.set('sum', value.sum);
       break;
+    case 'exponentialHistogram':
+      out.set('scale', BigInt(value.scale));
+      out.set('zeroCount', value.zeroCount);
+      out.set('zeroThreshold', value.zeroThreshold);
+      out.set('positive', exponentialBucketsValue(value.positive));
+      out.set('negative', exponentialBucketsValue(value.negative));
+      out.set('count', value.count);
+      out.set('sum', value.sum);
+      break;
     case 'summary':
       out.set(
         'quantiles',
@@ -130,6 +139,13 @@ function metricValueValue(value: MetricValue): ValueMap {
       out.set('sum', value.sum);
       break;
   }
+  return out;
+}
+
+function exponentialBucketsValue(buckets: { offset: number; counts: number[] }): ValueMap {
+  const out: ValueMap = new Map<string, Value>();
+  out.set('offset', BigInt(buckets.offset));
+  out.set('counts', buckets.counts);
   return out;
 }
 

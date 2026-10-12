@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fromPlain } from '@ferrule/core';
+import { fromPlain, MetricEvent } from '@ferrule/core';
 import {
   assertEventMatches,
   assertEveryEventMatches,
@@ -86,6 +86,44 @@ describe('eventToValue', () => {
         value: { type: 'counter', value: 3 },
       },
       { numbers: 'float' }, // MetricValue's counter/gauge `value` is always a float, never int64
+    );
+    expect(diffValues(expected, value, 'exact')).toEqual([]);
+  });
+
+  it('a metric event with an exponentialHistogram value carries its scale and sparse buckets', () => {
+    const event = new MetricEvent({
+      name: 'latency',
+      tags: new Map(),
+      kind: 'absolute',
+      value: {
+        type: 'exponentialHistogram',
+        scale: 1,
+        zeroCount: 2,
+        zeroThreshold: 0.1,
+        positive: { offset: 0, counts: [3, 4] },
+        negative: { offset: -1, counts: [5] },
+        count: 14,
+        sum: 10,
+      },
+    });
+    const value = eventToValue(event);
+    const expected = fromPlain(
+      {
+        name: 'latency',
+        kind: 'absolute',
+        tags: {},
+        value: {
+          type: 'exponentialHistogram',
+          scale: 1n,
+          zero_count: 2n,
+          zero_threshold: 0.1,
+          positive: { offset: 0n, counts: [3n, 4n] },
+          negative: { offset: -1n, counts: [5n] },
+          count: 14n,
+          sum: 10,
+        },
+      },
+      { numbers: 'float' }, // zero_threshold/sum are MetricValue floats, not whole-number bigints
     );
     expect(diffValues(expected, value, 'exact')).toEqual([]);
   });

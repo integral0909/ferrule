@@ -86,6 +86,16 @@ export type MetricValueJson =
       readonly sum: number;
     }
   | {
+      readonly type: 'exponentialHistogram';
+      readonly scale: number;
+      readonly zeroCount: number;
+      readonly zeroThreshold: number;
+      readonly positive: { readonly offset: number; readonly counts: readonly number[] };
+      readonly negative: { readonly offset: number; readonly counts: readonly number[] };
+      readonly count: number;
+      readonly sum: number;
+    }
+  | {
       readonly type: 'summary';
       readonly quantiles: readonly { readonly quantile: number; readonly value: number }[];
       readonly count: number;

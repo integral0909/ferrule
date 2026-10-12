@@ -64,6 +64,33 @@ describe('metricEventToJson', () => {
     });
   });
 
+  it('preserves exponentialHistogram scale, zero bucket, and sparse buckets', () => {
+    const event = new MetricEvent({
+      name: 'x',
+      kind: 'absolute',
+      value: {
+        type: 'exponentialHistogram',
+        scale: 1,
+        zeroCount: 2,
+        zeroThreshold: 0.5,
+        positive: { offset: 0, counts: [3, 4] },
+        negative: { offset: -1, counts: [5] },
+        count: 14,
+        sum: 10,
+      },
+    });
+    expect(metricEventToJson(event).value).toEqual({
+      type: 'exponentialHistogram',
+      scale: 1,
+      zeroCount: 2,
+      zeroThreshold: 0.5,
+      positive: { offset: 0, counts: [3, 4] },
+      negative: { offset: -1, counts: [5] },
+      count: 14,
+      sum: 10,
+    });
+  });
+
   it('preserves summary quantiles, count, and sum', () => {
     const event = new MetricEvent({
       name: 'x',

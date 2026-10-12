@@ -24,11 +24,14 @@ import { defineTransform, DEFAULT_PORT, type TransformOutput } from '@ferrule/ru
  *   tags: { [key]: string }
  *   kind: "incremental" | "absolute"
  *   timestamp: timestamp?
- *   type: "counter" | "gauge" | "set" | "distribution" | "histogram" | "summary"
+ *   type: "counter" | "gauge" | "set" | "distribution" | "histogram" | "exponentialHistogram" |
+ *         "summary"
  *   value: number            # counter, gauge
  *   values: [string]         # set
  *   samples: [{value, rate}] # distribution
  *   buckets: [{upper_limit, count}], count, sum  # histogram
+ *   scale, zero_count, zero_threshold,                     # exponentialHistogram
+ *     positive: {offset, counts}, negative: {offset, counts}, count, sum
  *   quantiles: [{quantile, value}], count, sum   # summary
  * ```
  */
@@ -70,6 +73,17 @@ function valueBody(metric: MetricEvent): ValueMap {
       return floatObject({
         type: 'histogram',
         buckets: v.buckets.map((b) => ({ upper_limit: b.upperLimit, count: b.count })),
+        count: v.count,
+        sum: v.sum,
+      });
+    case 'exponentialHistogram':
+      return floatObject({
+        type: 'exponentialHistogram',
+        scale: v.scale,
+        zero_count: v.zeroCount,
+        zero_threshold: v.zeroThreshold,
+        positive: { offset: v.positive.offset, counts: v.positive.counts },
+        negative: { offset: v.negative.offset, counts: v.negative.counts },
         count: v.count,
         sum: v.sum,
       });

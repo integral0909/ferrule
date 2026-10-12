@@ -15,7 +15,18 @@ import {
   type TestTransformHarness,
   type Transform,
   type TransformDefinition,
+  type TransformOutput,
 } from '@ferrule/runtime';
+
+export interface BuiltTransform {
+  /**
+   * Every built-in operator in this package implements the synchronous `process()`, not
+   * `processAsync()`; narrowed here (and checked at runtime below) so call sites can keep
+   * calling `transform.process(...)` directly without an optional-chain on every call.
+   */
+  readonly transform: Transform & { process: (events: Event[], out: TransformOutput) => void };
+  readonly harness: TestTransformHarness;
+}
 
 /**
  * Builds and starts a transform from a definition and raw (unvalidated) options, wired to a
@@ -27,7 +38,7 @@ export async function buildTransform<Options>(
   definition: TransformDefinition<Options>,
   rawOptions: unknown,
   harnessOptions: Parameters<typeof createTestTransformContext>[0] = {},
-): Promise<{ transform: Transform; harness: TestTransformHarness }> {
+): Promise<BuiltTransform> {
   const options = definition.options.parse(rawOptions);
   const harness = createTestTransformContext(harnessOptions);
   const transform = await definition.build(options, {
@@ -37,7 +48,13 @@ export async function buildTransform<Options>(
     inputs: [],
   });
   transform.start?.(harness.ctx);
-  return { transform, harness };
+  if (transform.process === undefined) {
+    throw new Error(
+      `buildTransform: ${definition.type} implements processAsync(), not process(); ` +
+        'this helper only supports synchronous built-in operators.',
+    );
+  }
+  return { transform: transform as BuiltTransform['transform'], harness };
 }
 
 /** A `BatchNotifier` with one finalizer already attached to each of `events`, sealed. */

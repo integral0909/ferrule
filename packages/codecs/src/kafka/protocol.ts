@@ -13,6 +13,7 @@ import { KafkaReader, KafkaWriter } from './primitives.js';
 export const ApiKey = {
   Produce: 0,
   Fetch: 1,
+  ListOffsets: 2,
   OffsetCommit: 8,
   OffsetFetch: 9,
   FindCoordinator: 10,
@@ -93,12 +94,21 @@ export interface MetadataResponse {
   readonly topics: TopicMetadata[];
 }
 
+/** `topics: null` requests metadata for *every* topic the cluster has (a real broker's "null
+ * array" convention for this field) — used to resolve a `topic_pattern` regular expression
+ * against the cluster's actual topic list; `topics: []` (or any concrete list) requests exactly
+ * those topics, same as before. `compactArray` itself has no way to write a true null (see its
+ * own comment in `primitives.ts`), so the null case is written inline here instead. */
 export function encodeMetadataRequestV9(
-  topics: readonly string[],
+  topics: readonly string[] | null,
   allowAutoTopicCreation: boolean,
 ): Buffer {
   const w = new KafkaWriter();
-  w.compactArray(topics, (writer, name) => writer.compactString(name).emptyTaggedFields());
+  if (topics === null) {
+    w.varint(0); // null compact array: "every topic"
+  } else {
+    w.compactArray(topics, (writer, name) => writer.compactString(name).emptyTaggedFields());
+  }
   w.boolean(allowAutoTopicCreation);
   w.boolean(false); // include_topic_authorized_operations
   w.emptyTaggedFields();
@@ -746,6 +756,83 @@ export function decodeOffsetCommitResponseV8(body: Buffer): OffsetCommitResponse
   }
   r.skipTaggedFields();
   return { throttleTimeMs, topics };
+}
+
+// ---------------------------------------------------------------------------------------------
+// ListOffsets (key 2, v1; classic, non-flexible — v1 dropped v0's max_num_offsets field, and no
+// compact string/array/tagged-fields primitive is otherwise exercised by it) — resolves one of
+// the special timestamps below against a partition's actual log bounds. Used by the consumer's
+// `auto_offset_reset` policy: a partition with no committed offset, or whose committed offset the
+// broker reports `OFFSET_OUT_OF_RANGE`, needs to know where "earliest"/"latest" actually is right
+// now rather than guessing (see consumer.ts, and the "known gaps" this closes in the package
+// README).
+// ---------------------------------------------------------------------------------------------
+
+/** The two special timestamps this client ever sends: real Kafka also defines `-3` (max
+ * timestamp, v7+) and an actual wall-clock value (binary search by record timestamp), neither of
+ * which `auto_offset_reset: earliest | latest` needs. */
+export const ListOffsetsTimestamp = {
+  LATEST: -1n,
+  EARLIEST: -2n,
+} as const;
+
+export interface ListOffsetsPartitionRequest {
+  readonly partitionIndex: number;
+  readonly timestamp: bigint;
+}
+
+export interface ListOffsetsTopicRequest {
+  readonly name: string;
+  readonly partitions: readonly ListOffsetsPartitionRequest[];
+}
+
+export function encodeListOffsetsRequestV1(topics: readonly ListOffsetsTopicRequest[]): Buffer {
+  const w = new KafkaWriter();
+  w.int32(-1); // replica_id: this client only ever asks as a plain consumer
+  w.array(topics, (writer, topic) => {
+    writer.string(topic.name);
+    writer.array(topic.partitions, (pw, partition) => {
+      pw.int32(partition.partitionIndex);
+      pw.int64(partition.timestamp);
+    });
+  });
+  return w.build();
+}
+
+export interface ListOffsetsPartitionResponse {
+  readonly partitionIndex: number;
+  readonly errorCode: number;
+  readonly timestamp: bigint;
+  readonly offset: bigint;
+}
+
+export interface ListOffsetsTopicResponse {
+  readonly name: string;
+  readonly partitions: ListOffsetsPartitionResponse[];
+}
+
+export interface ListOffsetsResponse {
+  readonly topics: ListOffsetsTopicResponse[];
+}
+
+export function decodeListOffsetsResponseV1(body: Buffer): ListOffsetsResponse {
+  const r = new KafkaReader(body);
+  const topicCount = r.arrayLength();
+  const topics: ListOffsetsTopicResponse[] = [];
+  for (let t = 0; t < topicCount; t++) {
+    const name = r.string();
+    const partitionCount = r.arrayLength();
+    const partitions: ListOffsetsPartitionResponse[] = [];
+    for (let p = 0; p < partitionCount; p++) {
+      const partitionIndex = r.int32();
+      const errorCode = r.int16();
+      const timestamp = r.int64();
+      const offset = r.int64();
+      partitions.push({ partitionIndex, errorCode, timestamp, offset });
+    }
+    topics.push({ name, partitions });
+  }
+  return { topics };
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -12,6 +12,7 @@ export default defineConfig({
     include: ['packages/*/test/**/*.test.ts'],
     environment: 'node',
     pool: 'threads',
+    globalSetup: ['./vitest.global-setup.ts'],
     coverage: {
       provider: 'v8',
       include: ['packages/*/src/**/*.ts'],

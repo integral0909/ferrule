@@ -12,8 +12,11 @@ import type { ManualClock } from './manual-clock.js';
 /**
  * A fake Kafka broker that acts as a consumer group's coordinator — `FindCoordinator`,
  * `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup`, `OffsetFetch`/`OffsetCommit` — and serves
- * `Fetch` from an in-memory, per-partition log of pre-encoded `RecordBatch`es (`appendRecords`),
- * plus just enough `Metadata` for `KafkaConsumer`'s own partition-count/leader lookups. Driven by
+ * `Fetch` (reporting `OFFSET_OUT_OF_RANGE` for a fetch offset outside a partition's current
+ * bounds, exactly like a real broker would) and `ListOffsets` (`earliest`/`latest` against that
+ * same in-memory log) from an in-memory, per-partition log of pre-encoded `RecordBatch`es
+ * (`appendRecords`), plus just enough `Metadata` for `KafkaConsumer`'s own partition-count/leader
+ * lookups. Driven by
  * an injected clock ({@link ManualClock} in tests) for session-timeout detection, so "a member
  * stops heartbeating" is deterministic rather than racing real wall-clock time.
  *
@@ -509,6 +512,9 @@ class KafkaConnectionHandler {
       case ApiKey.Fetch:
         this.handleFetch(request.correlationId, request.body);
         return;
+      case ApiKey.ListOffsets:
+        this.handleListOffsets(request.correlationId, request.body);
+        return;
       default:
         return;
     }
@@ -808,16 +814,26 @@ class KafkaConnectionHandler {
       tw.compactString(topicReq.topic);
       tw.compactArray(topicReq.partitions, (pw, partitionReq) => {
         const log = this.state.logFor(topicReq.topic, partitionReq.partition);
+        const logStartOffset = log.baseOffsets[0] ?? 0n;
+        // A real broker rejects a fetch offset outside the log's current bounds (e.g. a stale
+        // committed offset after retention deleted the data, or — since this fake log never
+        // actually deletes anything — simply a caller-supplied offset past the end of the log)
+        // with OFFSET_OUT_OF_RANGE rather than silently returning nothing, which is what a
+        // consumer's `auto_offset_reset` handling (via ListOffsets) needs to see to kick in.
+        const outOfRange =
+          partitionReq.fetchOffset > log.nextOffset || partitionReq.fetchOffset < logStartOffset;
         const matching: Buffer[] = [];
-        for (let i = 0; i < log.batches.length; i++) {
-          if (log.baseOffsets[i]! >= partitionReq.fetchOffset) matching.push(log.batches[i]!);
+        if (!outOfRange) {
+          for (let i = 0; i < log.batches.length; i++) {
+            if (log.baseOffsets[i]! >= partitionReq.fetchOffset) matching.push(log.batches[i]!);
+          }
         }
         const records = matching.length === 0 ? null : Buffer.concat(matching);
         pw.int32(partitionReq.partition);
-        pw.int16(0); // error_code
+        pw.int16(outOfRange ? KafkaErrorCode.OFFSET_OUT_OF_RANGE : 0);
         pw.int64(log.nextOffset); // high_watermark
         pw.int64(log.nextOffset); // last_stable_offset
-        pw.int64(0n); // log_start_offset
+        pw.int64(logStartOffset);
         pw.compactArray(log.abortedTransactions, (aw, aborted) => {
           aw.int64(aborted.producerId);
           aw.int64(aborted.firstOffset);
@@ -830,6 +846,44 @@ class KafkaConnectionHandler {
       tw.emptyTaggedFields();
     });
     w.emptyTaggedFields();
+    this.send(correlationId, w.build());
+  }
+
+  /** `ListOffsets` (classic, non-flexible): resolves the special `EARLIEST`/`LATEST` timestamps
+   * (`-2`/`-1`) a consumer's `auto_offset_reset` policy sends against this fake log's actual
+   * bounds — any other timestamp value is answered with `LATEST`'s offset, since no test needs
+   * this broker to support a real timestamp-based search. */
+  private handleListOffsets(correlationId: number, body: Buffer): void {
+    const r = new KafkaReader(body);
+    r.int32(); // replica_id
+    const topicCount = r.arrayLength();
+    const topics: { name: string; partitions: { partitionIndex: number; timestamp: bigint }[] }[] =
+      [];
+    for (let t = 0; t < topicCount; t++) {
+      const name = r.string();
+      const partitionCount = r.arrayLength();
+      const partitions: { partitionIndex: number; timestamp: bigint }[] = [];
+      for (let p = 0; p < partitionCount; p++) {
+        const partitionIndex = r.int32();
+        const timestamp = r.int64();
+        partitions.push({ partitionIndex, timestamp });
+      }
+      topics.push({ name, partitions });
+    }
+
+    const w = new KafkaWriter();
+    w.array(topics, (tw, topicReq) => {
+      tw.string(topicReq.name);
+      tw.array(topicReq.partitions, (pw, partitionReq) => {
+        const log = this.state.logFor(topicReq.name, partitionReq.partitionIndex);
+        const earliest = log.baseOffsets[0] ?? 0n;
+        const offset = partitionReq.timestamp === -2n ? earliest : log.nextOffset;
+        pw.int32(partitionReq.partitionIndex);
+        pw.int16(0); // error_code
+        pw.int64(-1n); // timestamp: unused by this client
+        pw.int64(offset);
+      });
+    });
     this.send(correlationId, w.build());
   }
 }

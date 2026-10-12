@@ -1,5 +1,6 @@
 import {
   createMetadata,
+  exponentialHistogramToHistogram,
   LimitExceededError,
   MetricEvent,
   Timestamp,
@@ -449,7 +450,10 @@ export interface PrometheusEncodeOptions {
 
 /** Encodes `events` as Prometheus text exposition format. Non-cumulative core histogram buckets
  * are converted to Prometheus's cumulative `le` buckets (each bucket's count becomes the running
- * total up to and including it), with a synthesised `+Inf` bucket equal to the total count. */
+ * total up to and including it), with a synthesised `+Inf` bucket equal to the total count.
+ * `exponentialHistogram` values are first expanded to explicit buckets with
+ * `exponentialHistogramToHistogram` (Prometheus has no exponential-scale representation), then
+ * encoded the same way; this conversion is lossy and documented in this package's README. */
 export function encodePrometheusText(
   events: readonly MetricEvent[],
   options: PrometheusEncodeOptions = {},
@@ -472,6 +476,7 @@ function prometheusType(type: MetricValue['type']): PrometheusMetricType {
     case 'counter':
       return 'counter';
     case 'histogram':
+    case 'exponentialHistogram':
       return 'histogram';
     case 'summary':
       return 'summary';
@@ -496,6 +501,13 @@ function encodeSample(
       return [`${name}${labelText} ${formatValue(event.value.value)}${suffix}`];
     case 'histogram':
       return encodeHistogramSample(event.value, name, event.series.tags, suffix);
+    case 'exponentialHistogram':
+      return encodeHistogramSample(
+        exponentialHistogramToHistogram(event.value),
+        name,
+        event.series.tags,
+        suffix,
+      );
     case 'summary':
       return encodeSummarySample(event.value, name, event.series.tags, suffix);
     case 'set':

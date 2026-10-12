@@ -6,7 +6,7 @@ import {
   encodeExportMetricsServiceRequest,
   ProtoWriter,
 } from '@ferrule/codecs';
-import { arbSafeString, arbTagMap, arbTimestamp } from './arbitraries.js';
+import { arbExponentialHistogram, arbSafeString, arbTagMap, arbTimestamp } from './arbitraries.js';
 
 function gauge(
   name: string,
@@ -172,7 +172,7 @@ describe('OTLP metrics protobuf: summary', () => {
   });
 });
 
-describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to explicit buckets)', () => {
+describe('OTLP metrics protobuf: exponential histogram (lossless)', () => {
   function encodeExponentialHistogramRequest(opts: {
     scale: number;
     positiveOffset: number;
@@ -217,47 +217,33 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
     return request.finish();
   }
 
-  it('expands positive-only buckets to ascending explicit upper limits', () => {
-    const bytes = encodeExponentialHistogramRequest({
-      scale: 0, // base = 2
-      positiveOffset: 0,
-      positiveCounts: [3n, 5n, 2n],
-      count: 10n,
-      sum: 42,
-    });
-    const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    expect(decoded!.value.type).toBe('histogram');
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
-    // base=2^(2^-0)=2; bucket i covers (2^i, 2^(i+1)], upperLimit = 2^(i+1)
-    expect(hist.buckets.map((b) => b.upperLimit)).toEqual([2, 4, 8]);
-    expect(hist.buckets.map((b) => b.count)).toEqual([3, 5, 2]);
-    expect(hist.count).toBe(10);
-    expect(hist.sum).toBe(42);
-  });
+  type ExpHist = Extract<MetricEvent['value'], { type: 'exponentialHistogram' }>;
 
-  it('includes a zero bucket between negative and positive ranges when zero_count > 0', () => {
+  it('decodes scale, zero count/threshold, and positive/negative buckets losslessly', () => {
     const bytes = encodeExponentialHistogramRequest({
       scale: 0,
       positiveOffset: 0,
-      positiveCounts: [1n],
-      negativeOffset: 0,
-      negativeCounts: [1n],
+      positiveCounts: [3n, 5n, 2n],
+      negativeOffset: -2,
+      negativeCounts: [1n, 1n],
       zeroCount: 4n,
       zeroThreshold: 0.001,
-      count: 6n,
-      sum: 0,
+      count: 16n,
+      sum: 42,
     });
     const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
-    expect(hist.buckets).toHaveLength(3);
-    expect(hist.buckets.map((b) => b.count)).toEqual([1, 4, 1]);
-    // ascending order: negative bucket upperLimit < zero threshold < positive bucket upperLimit
-    expect(hist.buckets[0]!.upperLimit).toBeLessThan(hist.buckets[1]!.upperLimit);
-    expect(hist.buckets[1]!.upperLimit).toBeLessThan(hist.buckets[2]!.upperLimit);
-    expect(hist.buckets[1]!.upperLimit).toBe(0.001);
+    expect(decoded!.value.type).toBe('exponentialHistogram');
+    const hist = decoded!.value as ExpHist;
+    expect(hist.scale).toBe(0);
+    expect(hist.zeroCount).toBe(4);
+    expect(hist.zeroThreshold).toBe(0.001);
+    expect(hist.positive).toEqual({ offset: 0, counts: [3, 5, 2] });
+    expect(hist.negative).toEqual({ offset: -2, counts: [1, 1] });
+    expect(hist.count).toBe(16);
+    expect(hist.sum).toBe(42);
   });
 
-  it('omits the zero bucket when zero_count is 0', () => {
+  it('defaults offset/counts to empty when a side has no buckets at all', () => {
     const bytes = encodeExponentialHistogramRequest({
       scale: 0,
       positiveOffset: 0,
@@ -266,40 +252,49 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
       sum: 1,
     });
     const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
-    expect(hist.buckets).toHaveLength(1);
+    const hist = decoded!.value as ExpHist;
+    expect(hist.negative).toEqual({ offset: 0, counts: [] });
+    expect(hist.zeroCount).toBe(0);
   });
 
-  it('expands a negative-only histogram in ascending (most-negative-first) order', () => {
-    const bytes = encodeExponentialHistogramRequest({
-      scale: 0,
-      positiveOffset: 0,
-      positiveCounts: [],
-      negativeOffset: 0,
-      negativeCounts: [3n, 5n, 2n],
-      count: 10n,
-      sum: -42,
-    });
-    const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
-    // Negative bucket index i covers (-base^(i+1), -base^i], upperLimit = -base^i; buckets are
-    // emitted from the most negative index down to the least, giving ascending upperLimits.
-    expect(hist.buckets.map((b) => b.upperLimit)).toEqual([-4, -2, -1]);
-    expect(hist.buckets.map((b) => b.count)).toEqual([2, 5, 3]);
-  });
-
-  it('applies a positive scale (base closer to 1) without producing non-finite boundaries', () => {
+  it('round-trips a hand-built exponential histogram through decode -> encode -> decode', () => {
     const bytes = encodeExponentialHistogramRequest({
       scale: 2,
-      positiveOffset: 0,
+      positiveOffset: 5,
       positiveCounts: [1n, 1n],
-      count: 2n,
-      sum: 1,
+      negativeOffset: -3,
+      negativeCounts: [7n],
+      zeroCount: 2n,
+      zeroThreshold: 0.5,
+      count: 10n,
+      sum: -3.5,
     });
     const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
-    expect(hist.buckets.every((b) => Number.isFinite(b.upperLimit))).toBe(true);
-    expect(hist.buckets[0]!.upperLimit).toBeLessThan(hist.buckets[1]!.upperLimit);
+    const reencoded = encodeExportMetricsServiceRequest([decoded!]);
+    const [reDecoded] = decodeExportMetricsServiceRequest(reencoded);
+    expect(reDecoded!.value).toEqual(decoded!.value);
+  });
+
+  it('decode -> encode round-trips arbitrary exponential histograms bit-for-bit', () => {
+    fc.assert(
+      fc.property(arbExponentialHistogram, arbTimestamp, (value, timestamp) => {
+        const event = new MetricEvent({
+          name: 'exp_hist',
+          tags: new Map(),
+          kind: 'absolute',
+          value,
+          timestamp,
+        });
+        const bytes = encodeExportMetricsServiceRequest([event]);
+        const [decoded] = decodeExportMetricsServiceRequest(bytes);
+        expect(decoded!.value).toEqual(value);
+        // "Bit-for-bit": re-encoding the lossless decode must reproduce the exact same bytes,
+        // not merely an equal value — nothing about the exponential scale was thrown away.
+        const reencoded = encodeExportMetricsServiceRequest([decoded!]);
+        expect([...reencoded]).toEqual([...bytes]);
+      }),
+      { numRuns: 100 },
+    );
   });
 });
 

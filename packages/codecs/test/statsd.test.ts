@@ -191,9 +191,23 @@ describe('encodeMetricEventAsStatsd', () => {
     expect(lines).toEqual(['m:1|c|#env:prod']);
   });
 
-  it('rejects histogram and summary metric values', () => {
+  it('rejects histogram, exponentialHistogram, and summary metric values', () => {
     expect(() =>
       encodeMetricEventAsStatsd(metric({ type: 'histogram', buckets: [], count: 0, sum: 0 })),
+    ).toThrow();
+    expect(() =>
+      encodeMetricEventAsStatsd(
+        metric({
+          type: 'exponentialHistogram',
+          scale: 0,
+          zeroCount: 0,
+          zeroThreshold: 0,
+          positive: { offset: 0, counts: [] },
+          negative: { offset: 0, counts: [] },
+          count: 0,
+          sum: 0,
+        }),
+      ),
     ).toThrow();
     expect(() =>
       encodeMetricEventAsStatsd(metric({ type: 'summary', quantiles: [], count: 0, sum: 0 })),

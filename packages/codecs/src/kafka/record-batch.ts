@@ -134,6 +134,10 @@ export interface DecodedRecordBatch {
   readonly attributes: number;
   readonly compression: CompressionType;
   readonly isTransactional: boolean;
+  /** Bit 5 of `attributes`: a broker-internal marker batch (an abort/commit marker for a
+   * transactional producer) rather than application data. A consumer must skip these — see
+   * `consumer.ts`'s Fetch handling — never surface them as records. */
+  readonly isControl: boolean;
   readonly lastOffsetDelta: number;
   readonly firstTimestamp: bigint;
   readonly maxTimestamp: bigint;
@@ -166,6 +170,7 @@ export function decodeRecordBatch(buf: Buffer): DecodedRecordBatch {
   const attributes = body.int16();
   const compression = COMPRESSION_BY_CODE[attributes & 0x7] ?? 'none';
   const isTransactional = (attributes & 0x10) !== 0;
+  const isControl = (attributes & 0x20) !== 0;
   const lastOffsetDelta = body.int32();
   const firstTimestamp = body.int64();
   const maxTimestamp = body.int64();
@@ -223,6 +228,7 @@ export function decodeRecordBatch(buf: Buffer): DecodedRecordBatch {
     attributes,
     compression,
     isTransactional,
+    isControl,
     lastOffsetDelta,
     firstTimestamp,
     maxTimestamp,

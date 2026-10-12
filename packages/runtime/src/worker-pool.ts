@@ -21,18 +21,18 @@ import { FerruleError } from '@ferrule/core';
 // -------------------------------------------------------------------------------------------
 
 /** Sent from the pool to a worker. */
-export interface WorkerPoolRequestMessage<Meta> {
+export interface WorkerPoolRequestMessage<ReqMeta> {
   readonly type: 'ferrule:request';
   readonly id: number;
-  readonly meta: Meta;
+  readonly meta: ReqMeta;
   readonly payload: ArrayBuffer;
 }
 
 /** Sent from a worker back to the pool: a successful result. */
-export interface WorkerPoolResponseMessage<Meta> {
+export interface WorkerPoolResponseMessage<ResMeta> {
   readonly type: 'ferrule:response';
   readonly id: number;
-  readonly meta: Meta;
+  readonly meta: ResMeta;
   readonly payload: ArrayBuffer;
 }
 
@@ -47,8 +47,8 @@ export interface WorkerPoolErrorMessage {
   readonly message: string;
 }
 
-export type WorkerPoolOutboundMessage<Meta> =
-  WorkerPoolResponseMessage<Meta> | WorkerPoolErrorMessage;
+export type WorkerPoolOutboundMessage<ResMeta> =
+  WorkerPoolResponseMessage<ResMeta> | WorkerPoolErrorMessage;
 
 /**
  * An exactly-sized, standalone `ArrayBuffer` backing `view`, safe to transfer whole: `view`
@@ -72,11 +72,11 @@ function exactArrayBuffer(view: Uint8Array): ArrayBuffer {
  * long (e.g. produced by `Uint8Array.prototype.slice`, as every codec function here does) since
  * it is transferred whole.
  */
-export function runWorkerPoolHandler<Meta>(
+export function runWorkerPoolHandler<ReqMeta, ResMeta>(
   handler: (
-    meta: Meta,
+    meta: ReqMeta,
     payload: Uint8Array,
-  ) => { meta: Meta; payload: Uint8Array } | Promise<{ meta: Meta; payload: Uint8Array }>,
+  ) => { meta: ResMeta; payload: Uint8Array } | Promise<{ meta: ResMeta; payload: Uint8Array }>,
 ): void {
   if (parentPort === null) {
     throw new FerruleError(
@@ -85,13 +85,13 @@ export function runWorkerPoolHandler<Meta>(
     );
   }
   const port = parentPort;
-  port.on('message', (msg: WorkerPoolRequestMessage<Meta>) => {
+  port.on('message', (msg: WorkerPoolRequestMessage<ReqMeta>) => {
     if (msg.type !== 'ferrule:request') return;
     Promise.resolve()
       .then(() => handler(msg.meta, new Uint8Array(msg.payload)))
       .then((result) => {
         const buffer = exactArrayBuffer(result.payload);
-        const response: WorkerPoolResponseMessage<Meta> = {
+        const response: WorkerPoolResponseMessage<ResMeta> = {
           type: 'ferrule:response',
           id: msg.id,
           meta: result.meta,
@@ -196,14 +196,14 @@ export class WorkerPoolCrashedError extends FerruleError {
 // Pool
 // -------------------------------------------------------------------------------------------
 
-export interface WorkerPoolRequest<Meta = unknown> {
-  readonly meta: Meta;
+export interface WorkerPoolRequest<ReqMeta = unknown> {
+  readonly meta: ReqMeta;
   /** Transferred, not copied, on the wire — but never detached on the caller's side; see `submit`. */
   readonly payload: Uint8Array;
 }
 
-export interface WorkerPoolResponse<Meta = unknown> {
-  readonly meta: Meta;
+export interface WorkerPoolResponse<ResMeta = unknown> {
+  readonly meta: ResMeta;
   readonly payload: Uint8Array;
 }
 
@@ -224,36 +224,36 @@ export interface WorkerPoolOptions<Init> {
   readonly maxQueueDepth?: number;
 }
 
-interface PendingRequest<Meta> {
-  readonly request: WorkerPoolRequest<Meta>;
+interface PendingRequest<ReqMeta, ResMeta> {
+  readonly request: WorkerPoolRequest<ReqMeta>;
   attempts: number;
   settled: boolean;
-  resolve(response: WorkerPoolResponse<Meta>): void;
+  resolve(response: WorkerPoolResponse<ResMeta>): void;
   reject(reason: unknown): void;
 }
 
-interface WorkerSlot<Meta> {
+interface WorkerSlot<ReqMeta, ResMeta> {
   worker: Worker;
   /** The request currently dispatched to this worker, if any. */
-  current: { id: number; pending: PendingRequest<Meta> } | undefined;
+  current: { id: number; pending: PendingRequest<ReqMeta, ResMeta> } | undefined;
 }
 
 /** @see the module doc. */
-export class WorkerPool<Init, Meta = unknown> {
-  private readonly slots: WorkerSlot<Meta>[] = [];
-  private readonly idle: WorkerSlot<Meta>[] = [];
-  private readonly queue: PendingRequest<Meta>[] = [];
+export class WorkerPool<Init, ReqMeta = unknown, ResMeta = ReqMeta> {
+  private readonly slots: WorkerSlot<ReqMeta, ResMeta>[] = [];
+  private readonly idle: WorkerSlot<ReqMeta, ResMeta>[] = [];
+  private readonly queue: PendingRequest<ReqMeta, ResMeta>[] = [];
   private readonly maxQueueDepth: number;
   private readonly spaceWaiters = new Set<() => void>();
   private readonly drainWaiters: Array<() => void> = [];
-  private readonly allPending = new Set<PendingRequest<Meta>>();
+  private readonly allPending = new Set<PendingRequest<ReqMeta, ResMeta>>();
   private nextId = 1;
   private closed = false;
 
   constructor(private readonly options: WorkerPoolOptions<Init>) {
     this.maxQueueDepth = options.maxQueueDepth ?? options.workerCount * 4;
     for (let i = 0; i < options.workerCount; i++) {
-      const slot: WorkerSlot<Meta> = { worker: this.spawn(), current: undefined };
+      const slot: WorkerSlot<ReqMeta, ResMeta> = { worker: this.spawn(), current: undefined };
       this.wire(slot);
       this.slots.push(slot);
       this.idle.push(slot);
@@ -277,9 +277,9 @@ export class WorkerPool<Init, Meta = unknown> {
    * exception — finds `slot.worker !== worker` and is ignored, instead of mistakenly re-crashing
    * the fresh replacement that already took its place.
    */
-  private wire(slot: WorkerSlot<Meta>): void {
+  private wire(slot: WorkerSlot<ReqMeta, ResMeta>): void {
     const worker = slot.worker;
-    worker.on('message', (msg: WorkerPoolOutboundMessage<Meta>) => {
+    worker.on('message', (msg: WorkerPoolOutboundMessage<ResMeta>) => {
       if (slot.worker !== worker) return;
       const current = slot.current;
       if (current === undefined || current.id !== msg.id) return;
@@ -302,7 +302,7 @@ export class WorkerPool<Init, Meta = unknown> {
     });
   }
 
-  private handleCrash(slot: WorkerSlot<Meta>, cause: unknown): void {
+  private handleCrash(slot: WorkerSlot<ReqMeta, ResMeta>, cause: unknown): void {
     const idleIndex = this.idle.indexOf(slot);
     if (idleIndex !== -1) this.idle.splice(idleIndex, 1);
 
@@ -334,7 +334,10 @@ export class WorkerPool<Init, Meta = unknown> {
     }
   }
 
-  private dispatch(slot: WorkerSlot<Meta>, pending: PendingRequest<Meta>): void {
+  private dispatch(
+    slot: WorkerSlot<ReqMeta, ResMeta>,
+    pending: PendingRequest<ReqMeta, ResMeta>,
+  ): void {
     pending.attempts++;
     const id = this.nextId++;
     slot.current = { id, pending };
@@ -342,7 +345,7 @@ export class WorkerPool<Init, Meta = unknown> {
     // exactly-sized, standalone buffer to transfer — no structured clone of event data, one
     // memcpy per dispatch (two if this request is ever retried).
     const buffer = exactArrayBuffer(pending.request.payload.slice());
-    const message: WorkerPoolRequestMessage<Meta> = {
+    const message: WorkerPoolRequestMessage<ReqMeta> = {
       type: 'ferrule:request',
       id,
       meta: pending.request.meta,
@@ -351,7 +354,7 @@ export class WorkerPool<Init, Meta = unknown> {
     slot.worker.postMessage(message, [buffer]);
   }
 
-  private settle(pending: PendingRequest<Meta>, fn: () => void): void {
+  private settle(pending: PendingRequest<ReqMeta, ResMeta>, fn: () => void): void {
     if (pending.settled) return;
     pending.settled = true;
     this.allPending.delete(pending);
@@ -403,9 +406,9 @@ export class WorkerPool<Init, Meta = unknown> {
    * request be retried without the caller doing anything).
    */
   async submit(
-    request: WorkerPoolRequest<Meta>,
+    request: WorkerPoolRequest<ReqMeta>,
     signal?: AbortSignal,
-  ): Promise<WorkerPoolResponse<Meta>> {
+  ): Promise<WorkerPoolResponse<ResMeta>> {
     if (this.closed) throw new WorkerPoolClosedError();
     if (signal?.aborted === true) throw signal.reason as unknown;
 
@@ -415,14 +418,14 @@ export class WorkerPool<Init, Meta = unknown> {
     }
     if (this.closed) throw new WorkerPoolClosedError();
 
-    return new Promise<WorkerPoolResponse<Meta>>((resolveOuter, rejectOuter) => {
+    return new Promise<WorkerPoolResponse<ResMeta>>((resolveOuter, rejectOuter) => {
       const onAbort = (): void => {
         const index = this.queue.indexOf(pending);
         if (index === -1) return; // already dispatched; let it run to completion
         this.queue.splice(index, 1);
         pending.reject(signal!.reason as unknown);
       };
-      const pending: PendingRequest<Meta> = {
+      const pending: PendingRequest<ReqMeta, ResMeta> = {
         request,
         attempts: 0,
         settled: false,

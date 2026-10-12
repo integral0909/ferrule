@@ -73,6 +73,30 @@ export const upcaseTransformDefinition = defineTransform<Record<string, never>>(
   }),
 });
 
+/** Same as {@link upcaseTransformDefinition}, but via the asynchronous transform contract. */
+export const upcaseAsyncTransformDefinition = defineTransform<Record<string, never>>({
+  kind: 'transform',
+  type: 'fake_upcase_async',
+  description: 'uppercases .message; drops events with .skip == true (processAsync)',
+  options: s.object({}),
+  accepts: ['log'],
+  build: () => ({
+    async processAsync(events: Event[], out: TransformOutput) {
+      await Promise.resolve();
+      for (const event of events) {
+        const log = event as LogEvent;
+        if (log.get('skip') === true) {
+          log.metadata.finalizers.finish('delivered');
+          continue;
+        }
+        const message = log.get('message');
+        if (typeof message === 'string') log.set('message', message.toUpperCase());
+        out.push(log, DEFAULT_PORT);
+      }
+    },
+  }),
+});
+
 /**
  * A minimal `type: script` transform definition: it never actually compiles or runs Ferrule
  * Script (that's `@ferrule/operators`'s job; this package doesn't depend on it) — just enough of

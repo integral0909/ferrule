@@ -3,6 +3,7 @@ import {
   createTestSinkContext,
   createTestSourceContext,
   createTestTransformContext,
+  validateTransformContract,
   type CapturedLogRecord,
   type PushedEvent,
   type SentBatch,
@@ -103,11 +104,16 @@ export interface TestTransformOptions {
 
 /**
  * Builds `definition` from validated `rawOptions`, runs `events` (mutated/consumed exactly as a
- * real pipeline would call `process`/`flush`), and checks for a **finalizer leak**: an event
- * neither pushed onward (ownership transferred to whatever the test does with `pushed`) nor
- * finished by the transform itself is a bug, per `packages/runtime/README.md`'s "every event's
- * finalizers must be finished" contract, and fails loudly here instead of silently hanging a
- * batch's acknowledgement forever.
+ * real pipeline would call `process`/`processAsync`/`flush`), and checks for a **finalizer
+ * leak**: an event neither pushed onward (ownership transferred to whatever the test does with
+ * `pushed`) nor finished by the transform itself is a bug, per `packages/runtime/README.md`'s
+ * "every event's finalizers must be finished" contract, and fails loudly here instead of silently
+ * hanging a batch's acknowledgement forever.
+ *
+ * Validates the same process/processAsync contract a real pipeline validates at build time (see
+ * `validateTransformContract`), awaits `processAsync` when that is what the transform implements,
+ * and applies the same finalizer-leak timeout used for `testSink`'s `run()` in case it never
+ * resolves.
  */
 export async function testTransform<Options>(
   definition: TransformDefinition<Options>,
@@ -123,13 +129,22 @@ export async function testTransform<Options>(
     dataDir: harness.ctx.dataDir,
     inputs: [],
   });
+  validateTransformContract(transform, harness.ctx.id);
   transform.start?.(harness.ctx);
 
   const batch = new BatchNotifier();
   for (const event of events) event.metadata.finalizers.add(batch.createFinalizer());
   batch.seal();
 
-  transform.process([...events], harness.out);
+  if (transform.processAsync !== undefined) {
+    await withLeakTimeout(
+      transform.processAsync([...events], harness.out),
+      5000,
+      'transform processAsync()',
+    );
+  } else {
+    transform.process!([...events], harness.out);
+  }
   if (testOptions.flush !== false) transform.flush?.(harness.out);
 
   const pushedSet = new Set(harness.pushed.map((p) => p.event));

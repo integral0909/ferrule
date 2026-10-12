@@ -32,14 +32,10 @@ export * from './postgres/pool.js';
 export * from './postgres/sink.js';
 export * from './postgres/wire.js';
 
-export * from './kafka/connection.js';
-export * from './kafka/errors.js';
-export * from './kafka/murmur2.js';
-export * from './kafka/primitives.js';
+// The Kafka wire protocol itself (primitives, RecordBatch, murmur2, protocol messages, errors,
+// connections, SASL) now lives in `@ferrule/codecs` (`src/kafka/`), shared with the future Kafka
+// source; import it from there directly. Only the producer and sink definition stay here.
 export * from './kafka/producer.js';
-export * from './kafka/protocol.js';
-export * from './kafka/record-batch.js';
-export * from './kafka/sasl.js';
 export * from './kafka/sink.js';
 
 /** Every sink this module defines, ready to register with a `ComponentRegistry`. */

@@ -1,4 +1,4 @@
-import { ScramSha256Client } from '../stream/scram.js';
+import { ScramSha256Client } from '../scram.js';
 import type { KafkaBrokerConnection } from './connection.js';
 import { KafkaAuthError } from './errors.js';
 import {
@@ -10,7 +10,7 @@ import {
 } from './protocol.js';
 
 /** SASL/PLAIN and SASL/SCRAM-SHA-256, the two mechanisms this client implements. SCRAM reuses
- * the same client-side implementation the PostgreSQL sink uses (`../stream/scram.js`). */
+ * this package's own `../scram.js` client (also used by `@ferrule/sinks`'s PostgreSQL sink). */
 export interface KafkaSaslOptions {
   readonly mechanism: 'PLAIN' | 'SCRAM-SHA-256';
   readonly username: string;

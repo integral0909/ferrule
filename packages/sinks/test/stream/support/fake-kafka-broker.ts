@@ -1,8 +1,12 @@
 import * as net from 'node:net';
-import { KafkaErrorCode } from '../../../src/kafka/errors.js';
-import { ApiKey } from '../../../src/kafka/protocol.js';
-import { KafkaReader, KafkaWriter } from '../../../src/kafka/primitives.js';
-import { decodeRecordBatch, type DecodedRecordBatch } from '../../../src/kafka/record-batch.js';
+import {
+  ApiKey,
+  KafkaErrorCode,
+  KafkaReader,
+  KafkaWriter,
+  decodeRecordBatch,
+  type DecodedRecordBatch,
+} from '@ferrule/codecs';
 import {
   scramServerFirst,
   scramServerVerifyFinal,

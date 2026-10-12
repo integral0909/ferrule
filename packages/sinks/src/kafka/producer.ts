@@ -1,14 +1,4 @@
 import type { Event } from '@ferrule/core';
-import type { TlsOptions } from '../fragments.js';
-import { KafkaBrokerConnection } from './connection.js';
-import {
-  isDuplicateSequenceErrorCode,
-  needsProducerIdReset,
-  KafkaError,
-  KafkaProtocolError,
-} from './errors.js';
-import { murmur2Partition, RoundRobinPartitioner, StickyPartitioner } from './murmur2.js';
-import { encodeRecordBatch, type CompressionType, type RecordHeaderInput } from './record-batch.js';
 import {
   ApiKey,
   decodeInitProducerIdResponseV4,
@@ -17,10 +7,22 @@ import {
   encodeInitProducerIdRequestV4,
   encodeMetadataRequestV9,
   encodeProduceRequestV9,
+  encodeRecordBatch,
+  isDuplicateSequenceErrorCode,
+  murmur2Partition,
+  needsProducerIdReset,
+  KafkaBrokerConnection,
+  KafkaError,
+  KafkaProtocolError,
+  RoundRobinPartitioner,
+  StickyPartitioner,
+  type CompressionType,
+  type KafkaSaslOptions,
   type ProducePartitionRequest,
   type ProduceTopicRequest,
-} from './protocol.js';
-import type { KafkaSaslOptions } from './sasl.js';
+  type RecordHeaderInput,
+} from '@ferrule/codecs';
+import type { TlsOptions } from '../fragments.js';
 
 export interface BrokerAddress {
   readonly host: string;

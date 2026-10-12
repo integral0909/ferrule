@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BatchNotifier, LogEvent, type DeliveryStatus } from '@ferrule/core';
+import { KafkaErrorCode } from '@ferrule/codecs';
 import { createTestSinkContext } from '@ferrule/runtime';
-import { KafkaErrorCode } from '../../src/kafka/errors.js';
 import {
   createKafkaSink,
   kafkaSinkOptionsSchema,

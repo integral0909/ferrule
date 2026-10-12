@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BatchNotifier, LogEvent, type DeliveryStatus } from '@ferrule/core';
 import { createTestSinkContext } from '@ferrule/runtime';
-import { createKafkaSink, type KafkaSinkOptions } from '../../src/kafka/sink.js';
+import { KafkaErrorCode } from '../../src/kafka/errors.js';
+import {
+  createKafkaSink,
+  kafkaSinkOptionsSchema,
+  type KafkaSinkOptions,
+} from '../../src/kafka/sink.js';
 import { FakeKafkaBroker } from './support/fake-kafka-broker.js';
 
 function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {
@@ -23,6 +28,7 @@ function baseOptions(port: number, overrides: Partial<KafkaSinkOptions> = {}): K
     connect_timeout: 2_000,
     request_timeout: 5_000,
     max_in_flight_requests_per_connection: 5,
+    idempotent: true,
     batch: { max_events: 100, max_size: 1024 * 1024, timeout: 100 },
     retry: { initial_backoff: 5, max_backoff: 20 },
     ...overrides,
@@ -176,5 +182,101 @@ describe('kafka sink', () => {
     const sink = createKafkaSink(baseOptions(port));
     const ctx = createTestSinkContext();
     await expect(sink.healthcheck?.(ctx.ctx)).resolves.toBeUndefined();
+  });
+});
+
+describe('kafka sink options validation (idempotent)', () => {
+  function validOptions(overrides: Record<string, unknown> = {}): unknown {
+    return {
+      brokers: ['127.0.0.1:9092'],
+      topic: 'events',
+      encoding: { codec: 'json' },
+      ...overrides,
+    };
+  }
+
+  it('defaults idempotent to true, compatible with the default acks and in-flight limit', () => {
+    const result = kafkaSinkOptionsSchema.safeParse(validOptions());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.idempotent).toBe(true);
+      expect(result.value.acks).toBe('-1');
+      expect(result.value.max_in_flight_requests_per_connection).toBe(5);
+    }
+  });
+
+  it('rejects idempotent: true combined with acks other than "-1"', () => {
+    const result = kafkaSinkOptionsSchema.safeParse(validOptions({ idempotent: true, acks: '1' }));
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects idempotent: true combined with more than 5 in-flight requests', () => {
+    const result = kafkaSinkOptionsSchema.safeParse(
+      validOptions({ idempotent: true, max_in_flight_requests_per_connection: 6 }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('allows idempotent: false with any acks/in-flight combination', () => {
+    const result = kafkaSinkOptionsSchema.safeParse(
+      validOptions({ idempotent: false, acks: '1', max_in_flight_requests_per_connection: 10 }),
+    );
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('kafka sink: idempotent production end to end (issue #17)', () => {
+  it('a connection drop after the broker accepts the write produces no duplicate record', async () => {
+    let attempts = 0;
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 1 },
+      onProduce: () => {
+        attempts++;
+        // The broker applies the write, but the client never learns that (the connection drops
+        // before any response), so the sink's retry policy resends the batch.
+        if (attempts === 1) return { errorCode: 0, disconnectAfter: true };
+        return { errorCode: 0 };
+      },
+    });
+    const port = await broker.listen();
+    const sink = createKafkaSink(
+      baseOptions(port, { retry: { initial_backoff: 5, max_backoff: 20 } }),
+    );
+    const ctx = createTestSinkContext();
+    const event = LogEvent.fromMessage('no-duplicate');
+    const completion = withFinalizer(event);
+
+    const running = sink.run(ctx.ctx);
+    await ctx.feed(event);
+    ctx.close();
+
+    for (let i = 0; i < 200 && attempts < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await ctx.clock.advance(20);
+    }
+    await running;
+
+    await expect(completion).resolves.toBe('delivered');
+    expect(broker.appliedRecords).toHaveLength(1);
+  }, 15_000);
+
+  it('finishes an event errored, not retried, when the broker reports PRODUCER_FENCED', async () => {
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 1 },
+      onProduce: () => ({ errorCode: KafkaErrorCode.PRODUCER_FENCED }),
+    });
+    const port = await broker.listen();
+    const sink = createKafkaSink(baseOptions(port));
+    const ctx = createTestSinkContext();
+    const event = LogEvent.fromMessage('fenced');
+    const completion = withFinalizer(event);
+
+    const running = sink.run(ctx.ctx);
+    await ctx.feed(event);
+    ctx.close();
+    await running;
+
+    await expect(completion).resolves.toBe('errored');
+    expect(broker.appliedRecords).toHaveLength(0);
   });
 });

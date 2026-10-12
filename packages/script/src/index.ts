@@ -229,9 +229,26 @@ export { Scope, type Binding } from './check/scope.js';
 
 // ---- compiler / runtime (M2 back end) --------------------------------------------------------
 
-export { compile, type CompileOptions, type CompiledProgram } from './compile/program.js';
+export {
+  compile,
+  outcomeForError,
+  type CompileOptions,
+  type CompiledProgram,
+} from './compile/program.js';
 export { optimizeProgram } from './compile/optimizer.js';
 export { runInlineTests, type FieldDiff, type InlineTestResult } from './compile/testRunner.js';
+
+// ---- metric event view --------------------------------------------------------------------
+
+export {
+  BUCKET_SHAPE,
+  METRIC_VALUE_TYPE_FIELD,
+  metricEventSchema,
+  metricReadonlyPaths,
+  QUANTILE_SHAPE,
+  SAMPLE_SHAPE,
+} from './metric/schema.js';
+export { applyViewToMetric, metricEventToView } from './metric/view.js';
 
 export {
   impl,

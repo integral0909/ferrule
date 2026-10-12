@@ -587,6 +587,12 @@ export class Pipeline {
     transform.start?.(ctx);
     rc.state = 'running';
 
+    // Exactly one of these is defined — validated at build time (validateTransformContract) —
+    // so this is resolved once up front rather than branching on `transform.processAsync` inside
+    // the hot loop below, keeping a synchronous transform's path identical to before this.
+    const processAsync = transform.processAsync;
+    const processSync = transform.process;
+
     const tickController = new AbortController();
     const onAbort = (): void => tickController.abort();
     rc.abort.signal.addEventListener('abort', onAbort);
@@ -620,12 +626,17 @@ export class Pipeline {
       this.recordReceived(rc, batch);
       const events = batch;
       try {
-        await rc.mutex.run(() => transform.process(events, out));
+        if (processAsync !== undefined) {
+          await rc.mutex.run(() => processAsync(events, out));
+        } else {
+          await rc.mutex.run(() => processSync!(events, out));
+        }
       } catch (error) {
-        // process() is documented to fail the component only as a last resort (a bug); when it
-        // does, the whole batch's outcome is unknowable, so it is finalized errored rather than
-        // left to hang a source's acknowledgement forever. Already-forwarded events' finalizers
-        // may already be finishing downstream; finishing them again here is a safe no-op.
+        // process()/processAsync() is documented to fail the component only as a last resort (a
+        // bug); when it does, the whole batch's outcome is unknowable, so it is finalized
+        // errored rather than left to hang a source's acknowledgement forever. Already-forwarded
+        // events' finalizers may already be finishing downstream; finishing them again here is a
+        // safe no-op.
         for (const e of events) e.metadata.finalizers.finish('errored');
         throw error;
       }

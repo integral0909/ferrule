@@ -553,8 +553,14 @@ export class KafkaConsumer {
         sync.assignment.length === 0
           ? []
           : decodeConsumerProtocolAssignment(sync.assignment).partitions;
-      const revokedCount = await this.applyAssignment(newAssignment);
+      // Set *before* `applyAssignment` (and the `onRebalance` callback it awaits), not after:
+      // this member's new generation/member ID are already settled at this point (SyncGroup
+      // just succeeded), and a caller's `onRebalance` may itself need to call `commit()` or
+      // anything else that goes through `ensureStableGroup()` — which, had `stable` still been
+      // `false`, would try to join `this.joinPromise`, i.e. the very call it is nested inside,
+      // and deadlock forever rather than seeing this member as already stable.
       this.stable = true;
+      const revokedCount = await this.applyAssignment(newAssignment);
       this.ensureHeartbeatLoop();
       // The cooperative protocol defers a moving partition's hand-off across two generations
       // (see assignors.ts): this generation revoked it from its old owner without yet giving it

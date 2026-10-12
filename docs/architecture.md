@@ -158,17 +158,30 @@ and reported).
 Ferrule runs on a single Node.js event loop per process by default. A transform implements
 exactly one of two contracts: `process`, a synchronous function over a batch of events, which
 keeps per-event overhead low and ordering trivially deterministic; or `processAsync`, for a
-transform that must await something per batch (an external lookup, eventually a `worker_threads`
-pool) without blocking the event loop for every other component while it does. The runtime awaits
-`processAsync` between batches the same way it would a slow `process` call — the next batch, a
-due `tick()`, and `flush()` all wait for it — so ordering and backpressure on that transform's
-inbox are identical either way; only the event loop is free in between. To use more cores, run
-several Ferrule processes and split inputs between them (for example several file sources over
-disjoint globs, or several instances behind a load balancer).
+transform that must await something per batch (an external lookup, or handing work to a
+`worker_threads` pool) without blocking the event loop for every other component while it does.
+The runtime awaits `processAsync` between batches the same way it would a slow `process` call —
+the next batch, a due `tick()`, and `flush()` all wait for it — so ordering and backpressure on
+that transform's inbox are identical either way; only the event loop is free in between. To use
+more cores for everything else, run several Ferrule processes and split inputs between them (for
+example several file sources over disjoint globs, or several instances behind a load balancer).
 
-A `worker_threads` pool for CPU-heavy transforms is planned, now that the asynchronous transform
-contract exists for it to await. The binary event encoding in `@ferrule/buffer` was designed so
-events can cross thread boundaries without structured cloning.
+For a single CPU-heavy transform, `@ferrule/runtime`'s `WorkerPool` gives one component access to
+several cores without a second process: a fixed set of `worker_threads`, each running the same
+entry module, exchanging `{ meta, payload }` pairs keyed by an internally assigned request id.
+`payload` crosses the thread boundary by transfer, not by the structured-clone algorithm walking
+a (possibly deep) event graph — this is exactly why the binary event encoding in `@ferrule/buffer`
+exists: a transform that uses the pool encodes the events it hands to a worker with that codec,
+and decodes what comes back, instead of ever structured-cloning an `Event`. A worker that crashes
+(exits non-zero, or errors) has its in-flight request retried once on a fresh worker; a second
+crash gives up and reports it to the caller, which decides what that means for the data (for
+`script`, finishing those events `errored`). `@ferrule/operators`' `script` transform's
+`workers: <n>` option is the pool's first user: each batch's log events are split into up to `n`
+chunks, run concurrently (through `processAsync`, never `process`), and reattached to the
+original events by position — metadata the binary codec doesn't carry, chiefly finalizers, never
+leaves the main thread. See `packages/runtime/README.md`'s "Worker pool" section and
+`packages/operators/README.md`'s "Worker pool (CPU-heavy `script`)" for the full design,
+including how a worker entry module is resolved and run.
 
 ### 4.4 Disk buffer
 

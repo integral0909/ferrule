@@ -22,9 +22,21 @@ function record(value: string, overrides: Partial<RecordInput> = {}): RecordInpu
 }
 
 /**
- * Advances the shared ManualClock in small steps, yielding a real macrotask between each so
- * genuine (if fast, loopback) socket I/O triggered by a resolved heartbeat/rejoin has a chance to
- * complete before the next advance — the same pattern this repo's own README documents for other
+ * Yields several real event-loop turns (not just microtasks) so genuine, in-flight socket I/O
+ * (a heartbeat/rejoin request that a just-resolved `clock.sleep()` triggered) has a real chance
+ * to complete before the next clock advance — one `setImmediate` turn is usually enough on an
+ * idle machine, but under load (e.g. this whole suite running in parallel) a single round trip
+ * can span more than one turn, so this chains several rather than assuming it never will.
+ */
+async function yieldToRealIo(turns = 5): Promise<void> {
+  for (let i = 0; i < turns; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+/**
+ * Advances the shared ManualClock in small steps, yielding to real I/O between each (see
+ * {@link yieldToRealIo}) — the same pattern this repo's own README documents for other
  * ManualClock-driven, real-socket tests. Keeps stepping until `until` settles (a rebalance may
  * need more than one heartbeat tick to fully converge — e.g. the cooperative-sticky assignor's
  * second, deferred hand-off round, or a member that only discovers REBALANCE_IN_PROGRESS on its
@@ -36,7 +48,7 @@ async function settleUntil(
   clock: ManualClock,
   stepMs: number,
   until: Promise<unknown>,
-  maxSteps = 40,
+  maxSteps = 80,
 ): Promise<void> {
   let settled = false;
   until.then(
@@ -49,7 +61,7 @@ async function settleUntil(
   );
   for (let i = 0; i < maxSteps && !settled; i++) {
     await clock.advance(stepMs);
-    await new Promise((resolve) => setImmediate(resolve));
+    await yieldToRealIo();
   }
 }
 
@@ -67,11 +79,11 @@ async function settleWhile(
   clock: ManualClock,
   stepMs: number,
   isConverged: () => boolean,
-  maxSteps = 60,
+  maxSteps = 100,
 ): Promise<void> {
   for (let i = 0; i < maxSteps && !isConverged(); i++) {
     await clock.advance(stepMs);
-    await new Promise((resolve) => setImmediate(resolve));
+    await yieldToRealIo();
   }
 }
 
@@ -275,7 +287,7 @@ describe('KafkaConsumer: a member leaves mid-stream', () => {
     // shared afterEach cleanup; the broker's own close() forcibly tears down its leftover socket.
     clockA.freeze();
     consumers.splice(consumers.indexOf(a), 1);
-    await settleWhile(clock, HEARTBEAT_MS, () => b.assignment.length === 4, 40);
+    await settleWhile(clock, HEARTBEAT_MS, () => b.assignment.length === 4);
 
     expect(b.assignment).toHaveLength(4);
   });

@@ -647,7 +647,13 @@ export function decodeOffsetFetchResponseV6(body: Buffer): OffsetFetchResponse {
       const metadata = r.compactNullableString();
       const errorCode = r.int16();
       r.skipTaggedFields();
-      partitions.push({ partitionIndex, committedOffset, committedLeaderEpoch, metadata, errorCode });
+      partitions.push({
+        partitionIndex,
+        committedOffset,
+        committedLeaderEpoch,
+        metadata,
+        errorCode,
+      });
     }
     r.skipTaggedFields();
     topics.push({ name, partitions });

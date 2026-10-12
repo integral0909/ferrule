@@ -26,7 +26,10 @@ export interface ConsumerProtocolSubscription {
    * empty array at version 0 (or when this member owns nothing yet, e.g. on its very first
    * join). Essential to the cooperative-sticky assignor: it is how each member tells the leader
    * what to preserve. */
-  readonly ownedPartitions: readonly { readonly topic: string; readonly partitions: readonly number[] }[];
+  readonly ownedPartitions: readonly {
+    readonly topic: string;
+    readonly partitions: readonly number[];
+  }[];
 }
 
 export function encodeConsumerProtocolSubscription(sub: ConsumerProtocolSubscription): Buffer {
@@ -66,7 +69,10 @@ export function decodeConsumerProtocolSubscription(buf: Buffer): ConsumerProtoco
 
 export interface ConsumerProtocolAssignment {
   readonly version: number;
-  readonly partitions: readonly { readonly topic: string; readonly partitions: readonly number[] }[];
+  readonly partitions: readonly {
+    readonly topic: string;
+    readonly partitions: readonly number[];
+  }[];
   readonly userData: Buffer | null;
 }
 

@@ -1,5 +1,9 @@
 import type { KafkaSaslOptions } from './sasl.js';
-import { KafkaBrokerConnection, type KafkaConnectionOptions, type KafkaTlsOptions } from './connection.js';
+import {
+  KafkaBrokerConnection,
+  type KafkaConnectionOptions,
+  type KafkaTlsOptions,
+} from './connection.js';
 import {
   cooperativeStickyAssignor,
   rangeAssignor,
@@ -182,7 +186,9 @@ function assignorProtocolName(assignor: Assignor): string {
 
 function flatten(topicPartitions: readonly TopicPartitions[]): TopicPartition[] {
   const out: TopicPartition[] = [];
-  for (const tp of topicPartitions) for (const partition of tp.partitions) out.push({ topic: tp.topic, partition });
+  for (const tp of topicPartitions) {
+    for (const partition of tp.partitions) out.push({ topic: tp.topic, partition });
+  }
   return out;
 }
 
@@ -195,7 +201,13 @@ function flatten(topicPartitions: readonly TopicPartitions[]): TopicPartition[] 
  * matching control batch for that producer closes it) is dropped too.
  */
 function filterRecordBatches(
-  decodedBatches: readonly { readonly baseOffset: bigint; readonly producerId: bigint; readonly isTransactional: boolean; readonly isControl: boolean; readonly records: readonly DecodedRecord[] }[],
+  decodedBatches: readonly {
+    readonly baseOffset: bigint;
+    readonly producerId: bigint;
+    readonly isTransactional: boolean;
+    readonly isControl: boolean;
+    readonly records: readonly DecodedRecord[];
+  }[],
   abortedTransactions: readonly { readonly producerId: bigint; readonly firstOffset: bigint }[],
   isolationLevel: 'read_uncommitted' | 'read_committed',
 ): DecodedRecord[] {
@@ -207,7 +219,10 @@ function filterRecordBatches(
   const out: DecodedRecord[] = [];
   for (const batch of decodedBatches) {
     if (isolationLevel === 'read_committed') {
-      while (nextAborted < sortedAborted.length && sortedAborted[nextAborted]!.firstOffset <= batch.baseOffset) {
+      while (
+        nextAborted < sortedAborted.length &&
+        sortedAborted[nextAborted]!.firstOffset <= batch.baseOffset
+      ) {
         openAborts.add(sortedAborted[nextAborted]!.producerId);
         nextAborted++;
       }
@@ -216,7 +231,11 @@ function filterRecordBatches(
       openAborts.delete(batch.producerId);
       continue;
     }
-    if (isolationLevel === 'read_committed' && batch.isTransactional && openAborts.has(batch.producerId)) {
+    if (
+      isolationLevel === 'read_committed' &&
+      batch.isTransactional &&
+      openAborts.has(batch.producerId)
+    ) {
       continue;
     }
     out.push(...batch.records);
@@ -361,7 +380,12 @@ export class KafkaConsumer {
   private async refreshMetadata(topics: readonly string[]): Promise<void> {
     if (topics.length === 0) return;
     const conn = await this.anyBootstrapConnection();
-    const body = await conn.sendRequest(ApiKey.Metadata, 9, true, encodeMetadataRequestV9(topics, true));
+    const body = await conn.sendRequest(
+      ApiKey.Metadata,
+      9,
+      true,
+      encodeMetadataRequestV9(topics, true),
+    );
     const response = decodeMetadataResponseV9(body);
     for (const broker of response.brokers) {
       this.brokerAddresses.set(broker.nodeId, { host: broker.host, port: broker.port });
@@ -369,7 +393,9 @@ export class KafkaConsumer {
     for (const topic of response.topics) {
       if (topic.name === null || topic.errorCode !== 0) continue;
       const leaders = new Map<number, number>();
-      for (const partition of topic.partitions) leaders.set(partition.partitionIndex, partition.leaderId);
+      for (const partition of topic.partitions) {
+        leaders.set(partition.partitionIndex, partition.leaderId);
+      }
       this.topicLeaders.set(topic.name, leaders);
       this.partitionCounts.set(topic.name, topic.partitions.length);
     }
@@ -485,7 +511,9 @@ export class KafkaConsumer {
       }
 
       const newAssignment =
-        sync.assignment.length === 0 ? [] : decodeConsumerProtocolAssignment(sync.assignment).partitions;
+        sync.assignment.length === 0
+          ? []
+          : decodeConsumerProtocolAssignment(sync.assignment).partitions;
       const revokedCount = await this.applyAssignment(newAssignment);
       this.stable = true;
       this.ensureHeartbeatLoop();
@@ -522,9 +550,12 @@ export class KafkaConsumer {
     }
     await this.ensureMetadata([...unionTopics]);
     const partitionCounts = new Map<string, number>();
-    for (const topic of unionTopics) partitionCounts.set(topic, this.partitionCounts.get(topic) ?? 0);
+    for (const topic of unionTopics) {
+      partitionCounts.set(topic, this.partitionCounts.get(topic) ?? 0);
+    }
 
-    const assignor = assignorName === cooperativeStickyAssignor.name ? cooperativeStickyAssignor : rangeAssignor;
+    const assignor =
+      assignorName === cooperativeStickyAssignor.name ? cooperativeStickyAssignor : rangeAssignor;
     const assigned = assignor.assign(subscriptions, partitionCounts);
     return members.map((member) => ({
       memberId: member.memberId,
@@ -541,12 +572,16 @@ export class KafkaConsumer {
    * Returns how many partitions were revoked, so the cooperative protocol's caller (see
    * `joinAndSync`) knows whether it must rejoin immediately to complete a deferred hand-off. */
   private async applyAssignment(newAssignment: readonly TopicPartitions[]): Promise<number> {
-    const previous = new Set(flatten(this.owned).map((tp) => topicPartitionKey(tp.topic, tp.partition)));
+    const previous = new Set(
+      flatten(this.owned).map((tp) => topicPartitionKey(tp.topic, tp.partition)),
+    );
     const next = flatten(newAssignment);
     const nextKeys = new Set(next.map((tp) => topicPartitionKey(tp.topic, tp.partition)));
 
     const assigned = next.filter((tp) => !previous.has(topicPartitionKey(tp.topic, tp.partition)));
-    const revoked = flatten(this.owned).filter((tp) => !nextKeys.has(topicPartitionKey(tp.topic, tp.partition)));
+    const revoked = flatten(this.owned).filter(
+      (tp) => !nextKeys.has(topicPartitionKey(tp.topic, tp.partition)),
+    );
 
     for (const tp of revoked) this.nextOffset.delete(topicPartitionKey(tp.topic, tp.partition));
     this.owned = newAssignment.map((tp) => ({ topic: tp.topic, partitions: [...tp.partitions] }));
@@ -597,7 +632,9 @@ export class KafkaConsumer {
   // -----------------------------------------------------------------------------------------
 
   private ensureHeartbeatLoop(): void {
-    this.heartbeatLoopDone ??= this.heartbeatLoop(this.heartbeatAbort.signal).catch(() => undefined);
+    this.heartbeatLoopDone ??= this.heartbeatLoop(this.heartbeatAbort.signal).catch(
+      () => undefined,
+    );
   }
 
   private async heartbeatLoop(signal: AbortSignal): Promise<void> {
@@ -673,9 +710,14 @@ export class KafkaConsumer {
     return results.flat();
   }
 
-  private async fetchFromLeader(nodeId: number, partitions: readonly TopicPartition[]): Promise<PartitionBatch[]> {
+  private async fetchFromLeader(
+    nodeId: number,
+    partitions: readonly TopicPartition[],
+  ): Promise<PartitionBatch[]> {
     const addr = this.brokerAddresses.get(nodeId);
-    if (addr === undefined) throw new KafkaProtocolError(`no known address for broker node ${nodeId}`);
+    if (addr === undefined) {
+      throw new KafkaProtocolError(`no known address for broker node ${nodeId}`);
+    }
     const conn = await this.getOrConnect(addr);
 
     const byTopic = new Map<string, TopicPartition[]>();
@@ -727,7 +769,10 @@ export class KafkaConsumer {
         );
         if (records.length === 0) continue;
         const last = records[records.length - 1]!;
-        this.nextOffset.set(topicPartitionKey(topicResponse.topic, partitionResponse.partitionIndex), last.offset + 1n);
+        this.nextOffset.set(
+          topicPartitionKey(topicResponse.topic, partitionResponse.partitionIndex),
+          last.offset + 1n,
+        );
         out.push({
           topic: topicResponse.topic,
           partition: partitionResponse.partitionIndex,
@@ -839,7 +884,11 @@ export class KafkaConsumer {
     this.closed = true;
     this.heartbeatAbort.abort();
     await this.heartbeatLoopDone?.catch(() => undefined);
-    if (this.memberId !== '' && this.coordinatorConn !== undefined && !this.coordinatorConn.isClosed) {
+    if (
+      this.memberId !== '' &&
+      this.coordinatorConn !== undefined &&
+      !this.coordinatorConn.isClosed
+    ) {
       try {
         const body = await this.coordinatorConn.sendRequest(
           ApiKey.LeaveGroup,

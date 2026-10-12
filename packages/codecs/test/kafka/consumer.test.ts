@@ -349,17 +349,25 @@ describe('KafkaConsumer: Fetch decoding', () => {
     broker = new FakeGroupCoordinatorBroker({ partitionCounts: { events: 1 } });
     await broker.listen();
     broker.appendRecords('events', 0, [record('data-1')]);
-    broker.appendRecords('events', 0, [{ key: null, value: Buffer.from([0, 0]), headers: [], timestamp: 1_700_000_000_000n }], {
-      isControl: true,
-      isTransactional: true,
-      producerId: 42n,
-    });
+    broker.appendRecords(
+      'events',
+      0,
+      [{ key: null, value: Buffer.from([0, 0]), headers: [], timestamp: 1_700_000_000_000n }],
+      {
+        isControl: true,
+        isTransactional: true,
+        producerId: 42n,
+      },
+    );
     broker.appendRecords('events', 0, [record('data-2')]);
 
     const consumer = makeConsumer(broker, 'g11', ['events'], clock);
     const batches = await consumer.poll();
     const allRecords: PartitionBatch[] = batches;
-    expect(allRecords[0]?.records.map((r) => r.value?.toString('utf8'))).toEqual(['data-1', 'data-2']);
+    expect(allRecords[0]?.records.map((r) => r.value?.toString('utf8'))).toEqual([
+      'data-1',
+      'data-2',
+    ]);
   });
 
   it('read_committed skips records from an aborted transaction', async () => {

@@ -313,6 +313,62 @@ describe('checker: typed paths from an input schema', () => {
   });
 });
 
+describe('checker: validated path writes (validateWrites)', () => {
+  const schema = objectType({ tags: objectType({}, stringType), count: intType }, undefined);
+
+  function errorCodesOf(text: string, readonlyPaths?: ReadonlyMap<string, string>): string[] {
+    const { program } = parse(new SourceFile('<t>', text));
+    const result = check(program, {
+      inputSchema: schema,
+      validateWrites: true,
+      ...(readonlyPaths === undefined ? {} : { readonlyPaths }),
+    });
+    return result.diagnostics.filter((d) => d.severity === 'error').map((d) => d.code);
+  }
+
+  it('leaves ordinary path writes unchecked by default (no validateWrites)', () => {
+    const { program } = parse(new SourceFile('<t>', '.tags.env = 1'));
+    const result = check(program, { inputSchema: schema });
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('rejects writing a non-string into an open string-rest field', () => {
+    expect(errorCodesOf('.tags.env = 1')).toContain('E301');
+  });
+
+  it('accepts writing a string into an open string-rest field', () => {
+    expect(errorCodesOf('.tags.env = "prod"')).toEqual([]);
+  });
+
+  it('rejects writing a value of the wrong type to a known field', () => {
+    expect(errorCodesOf('.count = "nope"')).toContain('E301');
+  });
+
+  it('accepts writing a value of the right type to a known field', () => {
+    expect(errorCodesOf('.count = 1')).toEqual([]);
+  });
+
+  it('rejects writing to a field the closed schema does not have', () => {
+    expect(errorCodesOf('.nope = 1')).toContain('E302');
+  });
+
+  it('rejects writing to a configured read-only path', () => {
+    const readonly = new Map([['count', "cannot assign to '.count'"]]);
+    expect(errorCodesOf('.count = 1', readonly)).toContain('E311');
+  });
+
+  it('still permits reading a read-only path', () => {
+    const readonly = new Map([['count', "cannot assign to '.count'"]]);
+    const { program } = parse(new SourceFile('<t>', 'let x = .count'));
+    const result = check(program, {
+      inputSchema: schema,
+      validateWrites: true,
+      readonlyPaths: readonly,
+    });
+    expect(result.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+  });
+});
+
 describe('checker: flow narrowing', () => {
   it('narrows a variable inside `if is_string(x) { ... }`', () => {
     const src = 'let x = .v\nif is_string(x) { upcase(x) }';

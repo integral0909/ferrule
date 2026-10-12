@@ -111,37 +111,32 @@ export function runWorkerPoolHandler<ReqMeta, ResMeta>(
 }
 
 // -------------------------------------------------------------------------------------------
-// Entry resolution (dist vs src, see README "Worker entry resolution")
+// Entry resolution (always dist/, see README "Worker entry resolution")
 // -------------------------------------------------------------------------------------------
 
 /**
- * Resolves a worker entry module's URL and the `execArgv` a `Worker` needs to run it, given the
- * `import.meta.url` of the module constructing the pool (`callerUrl`) and the entry's path
- * relative to that module's package's `src/` directory (`entryRelativePath`, e.g.
- * `'worker/script-worker-entry.ts'`).
+ * Resolves a worker entry module's URL, given the `import.meta.url` of the module constructing
+ * the pool (`callerUrl`) and the entry's path relative to that module's package's `src/`
+ * directory (`entryRelativePath`, e.g. `'worker/script-worker-entry.ts'` — note `.ts`: this is
+ * where the entry's *source* lives, even though the resolved URL points at its *built* form).
  *
- * Worker entry modules always run from TypeScript *source*, in both environments, using Node's
- * `--experimental-strip-types` (the same flag the `script` and `runtime` packages' own
- * benchmarks already run with — see `packages/script/bench/throughput.ts`): a package ships both
- * `dist/` (built JS) and `src/` (TypeScript) — see any package's `package.json` `files` — so the
- * entry's source is always present, and type-stripping it at worker startup is a one-time cost
- * per long-lived worker, not a per-batch one.
+ * The result always points at the entry's **built** `dist/<entryRelativePath, as .js>`, never
+ * its TypeScript source, even when `callerUrl` itself is running from source (this monorepo's
+ * own tests, via Vitest's bare-package-name alias, or an unbuilt workspace checkout) — unlike a
+ * *bare* `@ferrule/*` import, which goes through `package.json` `exports` and can be switched
+ * between `dist/` and `src/` with a custom resolution condition, a worker entry's own *relative*
+ * imports (and, transitively, every `@ferrule/*` package's own internal relative imports) have
+ * no such switch: they resolve by file path alone, and nothing but the built output has a
+ * same-named `.js` sibling for every `.ts` file's relative imports to land on. In practice this
+ * means a test or an unbuilt checkout that constructs a `WorkerPool` this way needs `dist/` to
+ * already be built — see `vitest.config.ts`'s `globalSetup`, which runs `tsc -b` once before the
+ * suite for exactly this reason.
  *
- * What differs between "running from a built `dist/`" (production) and "running from `src/`"
- * (this monorepo's own tests, via Vitest's alias, or an unbuilt workspace checkout) is how the
- * entry's *own* imports of other `@ferrule/*` packages resolve: in production those packages are
- * built too, so the default `exports` condition (→ `dist/index.js`) is correct and fast; from
- * source, nothing is built, so the worker also needs `--conditions=@ferrule/source` (the same
- * custom condition `tsconfig.base.json`'s `customConditions` already uses for type-checking) to
- * resolve its imports to *their* `src/index.ts` too. `callerUrl`'s own immediate parent directory
- * name (`src` or `dist`) says which situation this is, since `dist/` mirrors `src/` file for
- * file — this is why `callerUrl` must be a module directly inside its package's `src`/`dist`,
- * not nested further: one directory above it is always that package's root.
+ * `callerUrl`'s own immediate parent directory name (`src` or `dist`) locates the package root
+ * one level up — this is why `callerUrl` must be a module directly inside its package's
+ * `src`/`dist`, not nested further.
  */
-export function resolveWorkerEntry(
-  callerUrl: string | URL,
-  entryRelativePath: string,
-): { readonly url: URL; readonly execArgv: readonly string[] } {
+export function resolveWorkerEntry(callerUrl: string | URL, entryRelativePath: string): URL {
   const caller = typeof callerUrl === 'string' ? new URL(callerUrl) : callerUrl;
   const segments = caller.pathname.split('/');
   const parentDir = segments[segments.length - 2];
@@ -153,12 +148,8 @@ export function resolveWorkerEntry(
     );
   }
   const packageRoot = new URL('../', caller);
-  const url = new URL(`src/${entryRelativePath}`, packageRoot);
-  const execArgv =
-    parentDir === 'src'
-      ? ['--experimental-strip-types', '--conditions=@ferrule/source']
-      : ['--experimental-strip-types'];
-  return { url, execArgv };
+  const jsPath = entryRelativePath.replace(/\.ts$/, '.js');
+  return new URL(`dist/${jsPath}`, packageRoot);
 }
 
 // -------------------------------------------------------------------------------------------

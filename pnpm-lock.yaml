@@ -133,6 +133,9 @@ importers:
 
   packages/operators:
     dependencies:
+      '@ferrule/buffer':
+        specifier: workspace:*
+        version: link:../buffer
       '@ferrule/core':
         specifier: workspace:*
         version: link:../core

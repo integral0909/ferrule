@@ -32,6 +32,7 @@
     "@ferrule/core": "workspace:*",
     "@ferrule/schema": "workspace:*",
     "@ferrule/runtime": "workspace:*",
-    "@ferrule/script": "workspace:*"
+    "@ferrule/script": "workspace:*",
+    "@ferrule/buffer": "workspace:*"
   }
 }

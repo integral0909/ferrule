@@ -589,9 +589,11 @@ export class Pipeline {
 
     // Exactly one of these is defined — validated at build time (validateTransformContract) —
     // so this is resolved once up front rather than branching on `transform.processAsync` inside
-    // the hot loop below, keeping a synchronous transform's path identical to before this.
-    const processAsync = transform.processAsync;
-    const processSync = transform.process;
+    // the hot loop below, keeping a synchronous transform's path identical to before this. Bound
+    // to `transform` explicitly (rather than handing the method off directly) so a transform
+    // implementation that relies on `this` inside `process`/`processAsync` keeps working.
+    const processAsync = transform.processAsync?.bind(transform);
+    const processSync = transform.process?.bind(transform);
 
     const tickController = new AbortController();
     const onAbort = (): void => tickController.abort();

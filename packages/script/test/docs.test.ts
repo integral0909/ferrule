@@ -2,7 +2,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LogEvent } from '@ferrule/core';
-import { compile, parseAndCheck } from '@ferrule/script';
+import {
+  compile,
+  metricEventSchema,
+  metricReadonlyPaths,
+  parseAndCheck,
+  type CheckOptions,
+} from '@ferrule/script';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -13,8 +19,19 @@ import { describe, expect, it } from 'vitest';
  * Convention: a block fenced ```ferrule must check clean. A block fenced ```ferrule-error is
  * documenting a *deliberate* error (e.g. design.md's fallibility examples might one day show what
  * an unhandled `T!` diagnostic looks like) and is asserted to produce at least one error instead —
- * use this tag rather than leaving a broken example unlabeled.
+ * use this tag rather than leaving a broken example unlabeled. ```ferrule-metric and
+ * ```ferrule-metric-error are the same two conventions, but checked against the metric view
+ * (`metricEventSchema`/`metricReadonlyPaths`, see design.md's "Metric events") instead of the
+ * log-oriented default — design.md's metric examples use these so `.tags.env = 1` actually is
+ * checked as the type error the prose claims it is, rather than passing trivially under the
+ * default `any`-rooted schema.
  */
+
+const METRIC_CHECK_OPTIONS: CheckOptions = {
+  inputSchema: metricEventSchema(),
+  validateWrites: true,
+  readonlyPaths: metricReadonlyPaths(),
+};
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, '../../..');
@@ -58,8 +75,10 @@ function allDocBlocks(): FencedBlock[] {
   });
 }
 
+const CHECKED_LANGS = ['ferrule', 'ferrule-error', 'ferrule-metric', 'ferrule-metric-error'];
+
 describe('doc examples: ```ferrule blocks type-check, ```ferrule-error blocks do not', () => {
-  const blocks = allDocBlocks().filter((b) => b.lang === 'ferrule' || b.lang === 'ferrule-error');
+  const blocks = allDocBlocks().filter((b) => CHECKED_LANGS.includes(b.lang));
 
   // Not vacuous: fail loudly if the extraction itself breaks (e.g. a doc file's fences change
   // shape) rather than silently collecting zero blocks and reporting an empty, "passing" suite.
@@ -67,23 +86,31 @@ describe('doc examples: ```ferrule blocks type-check, ```ferrule-error blocks do
     expect(blocks.some((b) => b.lang === 'ferrule')).toBe(true);
   });
 
+  it('found at least one ```ferrule-metric block to check', () => {
+    expect(blocks.some((b) => b.lang === 'ferrule-metric')).toBe(true);
+  });
+
   for (const block of blocks) {
     const label = `${block.file}:${block.line}`;
-    if (block.lang === 'ferrule') {
-      it(`${label} parses and type-checks with zero errors`, () => {
-        const result = parseAndCheck(block.code);
-        const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
-          (d) => d.severity === 'error',
-        );
-        expect(errors.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
-      });
-    } else {
-      it(`${label} (ferrule-error) fails to parse or type-check`, () => {
-        const result = parseAndCheck(block.code);
+    const isMetric = block.lang === 'ferrule-metric' || block.lang === 'ferrule-metric-error';
+    const shouldError = block.lang === 'ferrule-error' || block.lang === 'ferrule-metric-error';
+    const checkOptions = isMetric ? METRIC_CHECK_OPTIONS : {};
+
+    if (shouldError) {
+      it(`${label} (${block.lang}) fails to parse or type-check`, () => {
+        const result = parseAndCheck(block.code, checkOptions);
         const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
           (d) => d.severity === 'error',
         );
         expect(errors.length).toBeGreaterThan(0);
+      });
+    } else {
+      it(`${label} parses and type-checks with zero errors`, () => {
+        const result = parseAndCheck(block.code, checkOptions);
+        const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
+          (d) => d.severity === 'error',
+        );
+        expect(errors.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
       });
     }
   }

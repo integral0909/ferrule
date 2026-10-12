@@ -93,18 +93,25 @@ so a syntax or type error is reported immediately with the same rendered code fr
 | `drop_on_abort`   | boolean                       | `false` | deliberate `abort()`/type-mismatch: drop+count vs. route to `errors`                                                            |
 | `drop_on_error`   | boolean                       | `false` | resource-limit/internal-error abort: drop+count vs. route to `errors`                                                           |
 | `reroute_dropped` | boolean                       | `false` | route `drop()`ped events to the `dropped` port instead of finishing them                                                        |
+| `metrics`         | boolean                       | `false` | run the program over metric events instead of log events (log/span then pass through); see below                                |
 | `limits`          | object                        | `{}`    | per-event resource limit overrides (`max_string_length`, `max_collection_size`, `max_regex_input_length`, `max_emitted_events`) |
 
 `input_schema` is a **flat** field → type-name map (`null`/`bool`/`int`/`float`/`string`/`bytes`/
 `timestamp`/`array`/`object`/`any`), converted to a Ferrule object type (`objectType(fields,
 anyType)`): it types the top-level fields it names; anything else stays `any`, and named
 `array`/`object` fields stay fully open (no nested element typing) — see
-`docs/language/design.md` §3 for the default-`any` behaviour this narrows.
+`docs/language/design.md` §3 for the default-`any` behaviour this narrows. It only applies to log
+events; it is rejected at config time together with `metrics: true`.
 
-**Metric and span events pass through unchanged**, counted by `script_passthrough_events_total`
-(tagged `kind`): `@ferrule/script`'s compiler only supports `LogEvent` today (see the script
-package README's "Execution model: logs only"), so there is no way to run a program against a
-metric or span, and rejecting a mixed-kind pipeline outright would be more surprising than useful.
+**One instance runs its program over exactly one event kind; the other kinds pass through**,
+counted by `script_passthrough_events_total` (tagged `kind`). By default that's log events (span
+events always pass through — `@ferrule/script` has no span view); setting `metrics: true` checks
+and runs the program against the metric view instead (`docs/language/design.md`'s "Metric events",
+`@ferrule/script`'s `metric/schema.ts`/`metric/view.ts`) and flips the passthrough to log/span. A
+metric that aborts (including a write the script produced that doesn't validate once the program
+finishes, e.g. a non-string tag value) routes the metric's log-shaped view — not the `MetricEvent`,
+which has no field bag to attach `ferrule.error.*` to — to the `errors` port, sharing the original
+metric's finalizers.
 
 **Outcomes**, per `CompiledProgram.run`'s `Outcome`:
 
@@ -122,7 +129,8 @@ metric or span, and rejecting a mixed-kind pipeline outright would be more surpr
   `ferrule.error.transform` (this component's ID).
 
 Metrics: `script_events_total` (tag `outcome: continue|drop|abort`) and
-`script_run_duration_seconds` (a histogram), both recorded per log event.
+`script_run_duration_seconds` (a histogram), both recorded per processed event (log, or metric
+with `metrics: true`).
 
 ```yaml
 transforms:
@@ -136,6 +144,12 @@ transforms:
   shape_errors:
     type: console # or any sink
     inputs: [shape.errors]
+  tag_metrics:
+    type: script
+    inputs: [raw_metrics]
+    metrics: true
+    source: |
+      .tags.service = "checkout"
 ```
 
 ## `filter`
@@ -588,9 +602,15 @@ transforms:
 ## Known gaps
 
 - `script`'s `input_schema` is a flat field → type-name map; there is no nested object/array
-  element typing (a named `array`/`object` field stays fully open), and metric/span events pass
-  through `script` untouched since `@ferrule/script`'s compiler only supports `LogEvent` (see the
-  script package README's "Execution model: logs only").
+  element typing (a named `array`/`object` field stays fully open).
+- `script` never runs the same program against both log and metric events — `metrics: true`
+  switches which kind it handles, it doesn't add a second one — and span events have no view at
+  all yet, so they always pass through untouched (see the script package README's "Execution
+  model").
+- The metric view types every value-type's field(s) together rather than narrowing to the event's
+  actual `.value_type`; declaring the specific value type up front (to make, say, `.buckets` a
+  compile-time error on a counter) is a documented, currently unimplemented follow-up
+  (`@ferrule/script`'s `metric/schema.ts`).
 - `filter`/`route` compile `condition` inside a synthetic wrapper program
   (`if !((<condition>) ?? <fallback>) { drop }`); a compile error's position is reported against
   that wrapper, not the bare `condition` string.

@@ -1,6 +1,7 @@
 import { gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { isZstdSupported, zstdDecompress } from '@ferrule/codecs';
 import { LogEvent } from '@ferrule/core';
 import { createTestSinkContext } from '@ferrule/runtime';
 import {
@@ -143,6 +144,32 @@ describe('object_storage sink', () => {
     const decompressed = gunzipSync(req.body).toString('utf8');
     expect(decompressed).toContain('compress-me');
   });
+
+  it.runIf(isZstdSupported())(
+    'zstd-compresses the object body and appends .zst to the key',
+    async () => {
+      server = await startServer((_req, res) => res.end());
+      const options = objectStorageSinkOptions.parse({
+        endpoint: server.url,
+        bucket: 'b',
+        key: 'events',
+        compression: 'zstd',
+        ...credentials,
+      });
+      const sink = await objectStorageSink.build(options, testBuildContext().ctx);
+      const harness = createTestSinkContext();
+      const run = sink.run(harness.ctx);
+      await harness.feed([LogEvent.fromMessage('compress-me-zstd')]);
+      harness.close();
+      await run;
+
+      const req = server.requests[0]!;
+      expect(req.url).toContain('.zst');
+      expect(req.headers['content-encoding']).toBe('zstd');
+      const decompressed = zstdDecompress(req.body).toString('utf8');
+      expect(decompressed).toContain('compress-me-zstd');
+    },
+  );
 
   it('includes x-amz-security-token when a session token is configured', async () => {
     server = await startServer((_req, res) => res.end());

@@ -1,4 +1,5 @@
-import { s, type Infer } from '@ferrule/schema';
+import { isZstdSupported, zstdUnsupportedMessage } from '@ferrule/codecs';
+import { s, type Infer, type Schema } from '@ferrule/schema';
 import { tlsSchema } from '../fragments.js';
 
 /**
@@ -64,11 +65,28 @@ export type ProxyOptions = Infer<typeof proxyInnerSchema>;
 // ---------------------------------------------------------------------------------------------
 
 export const compressionSchema = s
-  .enum(['none', 'gzip'])
+  .enum(['none', 'gzip', 'zstd'])
   .default('none')
   .describe('Compresses the request body before sending.')
   .example('gzip');
 export type CompressionOptions = Infer<typeof compressionSchema>;
+
+/**
+ * Rejects `compression: zstd` at config validation if this runtime's `node:zlib` has no zstd
+ * support (see `isZstdSupported` from `@ferrule/codecs`), with a message naming the required
+ * Node version — the same check `@ferrule/codecs`' Kafka sink applies to its own `compression`
+ * option. Every HTTP-family sink's final option schema (after its own `.extend(...)`) wraps
+ * itself with this, since `.refine()` on the base `Schema` class returns a plain `Schema<Out>`
+ * (losing `ObjectSchema`-specific methods like `.extend()`), so it must be the last step applied.
+ */
+export function withZstdSupportCheck<T extends { compression: CompressionOptions }>(
+  schema: Schema<T>,
+): Schema<T> {
+  return schema.refine(
+    (o) => o.compression !== 'zstd' || isZstdSupported(),
+    zstdUnsupportedMessage(),
+  );
+}
 
 // ---------------------------------------------------------------------------------------------
 // HTTP client transport options common to every sink

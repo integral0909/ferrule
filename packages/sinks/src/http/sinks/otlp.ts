@@ -4,7 +4,13 @@ import { parseJson, type Event, type EventKind } from '@ferrule/core';
 import { defineSink, FixedConcurrencyLimiter, runBatchedSink } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
 import { HttpClient, ensureSuccess } from '../client.js';
-import { batchSchema, concurrencySchema, retrySchema, transportSchema } from '../schema.js';
+import {
+  batchSchema,
+  concurrencySchema,
+  retrySchema,
+  transportSchema,
+  withZstdSupportCheck,
+} from '../schema.js';
 import { buildRetryPolicy } from '../support.js';
 
 export type OtlpSignal = 'logs' | 'metrics' | 'traces';
@@ -21,17 +27,19 @@ const SIGNAL_KIND: Record<OtlpSignal, EventKind> = {
   traces: 'span',
 };
 
-export const otlpSinkOptions = transportSchema.extend({
-  /** OTLP/HTTP collector base URL, e.g. `http://collector:4318`. */
-  endpoint: s.url({ protocols: ['http', 'https'] }),
-  signal: s.enum(['logs', 'metrics', 'traces']).default('logs'),
-  protocol: s.enum(['protobuf', 'json']).default('protobuf'),
-  /** Overrides the standard per-signal path (`/v1/logs`, `/v1/metrics`, `/v1/traces`). */
-  path: s.string().optional(),
-  batch: batchSchema,
-  retry: retrySchema,
-  concurrency: concurrencySchema,
-});
+export const otlpSinkOptions = withZstdSupportCheck(
+  transportSchema.extend({
+    /** OTLP/HTTP collector base URL, e.g. `http://collector:4318`. */
+    endpoint: s.url({ protocols: ['http', 'https'] }),
+    signal: s.enum(['logs', 'metrics', 'traces']).default('logs'),
+    protocol: s.enum(['protobuf', 'json']).default('protobuf'),
+    /** Overrides the standard per-signal path (`/v1/logs`, `/v1/metrics`, `/v1/traces`). */
+    path: s.string().optional(),
+    batch: batchSchema,
+    retry: retrySchema,
+    concurrency: concurrencySchema,
+  }),
+);
 export type OtlpSinkOptions = Infer<typeof otlpSinkOptions>;
 
 interface PartialSuccess {

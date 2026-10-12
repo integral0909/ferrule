@@ -2,6 +2,12 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import { brotliDecompress, gunzip, gzip, inflate } from 'node:zlib';
 import { promisify } from 'node:util';
+import {
+  isZstdSupported,
+  zstdCompress,
+  zstdDecompress,
+  zstdUnsupportedMessage,
+} from '@ferrule/codecs';
 import { FerruleError } from '@ferrule/core';
 import { SinkError, type Logger } from '@ferrule/runtime';
 import type { AuthOptions, CompressionOptions, ProxyOptions, TlsOptions } from './schema.js';
@@ -81,6 +87,14 @@ export class HttpClient {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.compression = options.compression ?? 'none';
+    if (this.compression === 'zstd' && !isZstdSupported()) {
+      // Defensive, mirroring KafkaProducer's constructor-level check: the option schema's own
+      // `.refine()` (`withZstdSupportCheck` in schema.ts) already rejects this at config
+      // validation, but a caller that builds `HttpClient` directly (bypassing that schema) still
+      // gets a clear error naming the required Node version instead of a cryptic failure the
+      // first time a request body happens to compress.
+      throw new FerruleError('E_HTTP_ZSTD_UNSUPPORTED', zstdUnsupportedMessage());
+    }
     this.staticHeaders = options.headers ?? new Map();
     this.maxSockets = options.maxSockets ?? 16;
   }
@@ -93,9 +107,14 @@ export class HttpClient {
     applyAuth(headers, this.auth);
 
     let body = req.body;
-    if (body !== undefined && body.byteLength > 0 && this.compression === 'gzip') {
-      body = await gzipAsync(body);
-      headers['content-encoding'] = 'gzip';
+    if (body !== undefined && body.byteLength > 0 && this.compression !== 'none') {
+      if (this.compression === 'gzip') {
+        body = await gzipAsync(body);
+        headers['content-encoding'] = 'gzip';
+      } else {
+        body = zstdCompress(body);
+        headers['content-encoding'] = 'zstd';
+      }
     }
     if (body !== undefined) headers['content-length'] = String(body.byteLength);
 
@@ -262,6 +281,8 @@ async function decodeBody(
         return await inflateAsync(body);
       case 'br':
         return await brotliDecompressAsync(body);
+      case 'zstd':
+        return zstdDecompress(body);
       default:
         return body;
     }

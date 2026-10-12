@@ -57,7 +57,7 @@ const client = new HttpClient({
   proxy, // { use_env, url? } — HTTP(S)_PROXY / NO_PROXY by default, or an explicit override
   timeoutMs,
   maxResponseBytes,
-  compression, // 'none' | 'gzip' — compresses the request body, sets Content-Encoding
+  compression, // 'none' | 'gzip' | 'zstd' — compresses the request body, sets Content-Encoding
   headers, // static headers merged into every request; secret values are never logged
   maxSockets,
   logger,
@@ -83,7 +83,7 @@ Notable pieces:
   response into a `SinkError` — `429`/`5xx`/`408` retryable (honouring `Retry-After`, both the
   integer-seconds and HTTP-date forms), every other `4xx` permanent.
 - **Response bounds**: reading stops and the request fails (`E_HTTP_RESPONSE_TOO_LARGE`,
-  permanent) once `maxResponseBytes` is exceeded; `gzip`/`deflate`/`br` response bodies are
+  permanent) once `maxResponseBytes` is exceeded; `gzip`/`deflate`/`br`/`zstd` response bodies are
   decompressed transparently based on `Content-Encoding`.
 
 ### Field templating (`src/http/templating.ts`)
@@ -111,7 +111,7 @@ byte chunks into one request body; `contentTypeFor` gives a matching default `Co
 | `http`                    | Any HTTP(S) endpoint               | Field-templated URL, encoding + framing + compression, generic auth.                                                                                                                                                                                                                                                                                                                                                 |
 | `loki`                    | Loki-compatible push API           | Labels from templates (validated names), partitioned per resolved label set via `runBatchedSink`'s `partitionKey`, a label-cardinality cap (new streams past it are rejected, not sent), optional entry sort for out-of-order protection, tenant header.                                                                                                                                                             |
 | `clickhouse`              | ClickHouse HTTP interface          | `INSERT INTO db.table FORMAT JSONEachRow`; identifiers are validated and backtick-quoted (`quoteClickHouseIdentifier`); rows are encoded with core's lossless JSON encoder so `int64` columns keep full precision; optional field→column mapping; arbitrary settings as query params.                                                                                                                                |
-| `object_storage`          | Any S3-compatible store            | Hand-written AWS **SigV4** header signing (`src/http/sigv4.ts`); path-style or virtual-hosted addressing; `%Y/%m/%d/%H`-style + field-templated object keys with an always-appended random suffix; gzip.                                                                                                                                                                                                             |
+| `object_storage`          | Any S3-compatible store            | Hand-written AWS **SigV4** header signing (`src/http/sigv4.ts`); path-style or virtual-hosted addressing; `%Y/%m/%d/%H`-style + field-templated object keys with an always-appended random suffix; gzip/zstd (appends `.gz`/`.zst`).                                                                                                                                                                                 |
 | `otlp`                    | An OTLP/HTTP collector             | Logs/metrics/traces, protobuf or JSON, via `@ferrule/codecs`'s OTLP codecs; a 2xx response with `partial_success` is still `delivered` (logged, per the OTLP spec's own semantics) — only a non-2xx status is a delivery failure.                                                                                                                                                                                    |
 | `prometheus_remote_write` | A Prometheus remote-write endpoint | `prompb.WriteRequest` built with the codecs package's `ProtoWriter`; counters/gauges map directly, histograms/summaries expand into `_bucket`/`_sum`/`_count`/`quantile` series; `incremental` metrics are accumulated into absolute totals with a staleness bound (`MetricAccumulator`, `src/http/prom-remote-write.ts`); compressed with a **hand-written Snappy block-format compressor** (`src/http/snappy.ts`). |
 | `prometheus_exporter`     | Pull: serves `/metrics` itself     | A real `node:http` server (port `0` supported for tests); keeps the latest/accumulated value per series with the same staleness-bound logic; events are `delivered` as soon as they're incorporated into the served state, independent of any scrape.                                                                                                                                                                |
@@ -145,13 +145,29 @@ than a `FerruleError` subclass, however malformed the input — exercised by a `
 test asserting `decompress(compress(x)) === x` for arbitrary buffers and that decompression of
 arbitrary bytes never throws an untyped error.
 
+### zstd (`@ferrule/codecs`'s `zstdCompress`/`zstdDecompress`)
+
+The shared `compression` option (`none | gzip | zstd`, `src/http/schema.ts`'s
+`compressionSchema`) adds `zstd` on top of the gzip support described above, via
+`@ferrule/codecs`'s thin wrapper over `node:zlib`'s own native zstd support (issue #16; zstd
+needs no hand-written codec, unlike LZ4 — see that package's README). `HttpClient` zstd-compresses
+the request body and sets `Content-Encoding: zstd` the same way it already does for gzip, and
+transparently decompresses a `zstd`-encoded response body. Every HTTP-family sink's final option
+schema wraps itself with `withZstdSupportCheck` (`src/http/schema.ts`), which rejects
+`compression: zstd` at config validation — with a message naming the required Node version
+(22.15.0/23.8.0+) — on a runtime whose `node:zlib` doesn't have it; `HttpClient`'s constructor
+checks the same thing again defensively. `object_storage` appends `.zst` to the object key for
+zstd the same way it already appends `.gz` for gzip.
+
 ### Known gaps
 
 - `object_storage` ignores the shared `auth` option entirely (it authenticates every request with
   SigV4 instead); its option schema (`transportSchemaNoAuth`) simply omits the field rather than
   exposing an unused one.
 - `prometheus_remote_write` ignores the shared `compression` option (the wire format mandates
-  Snappy, not the client's generic gzip-only request compression) rather than layering both.
+  Snappy, not the client's generic gzip/zstd request compression) rather than layering both; it
+  also has no request-compression use for the hand-written LZ4 codec, since nothing here needs
+  LZ4 over HTTP. `prometheus_exporter` has no request-compression option at all (it's pull-based).
 - The `CONNECT`-tunnel proxy path is tested for its request framing and its failure path (a proxy
   that refuses the tunnel); a full success-path integration test would need a locally trusted TLS
   certificate for the "origin" server behind the tunnel, which isn't set up here.
@@ -323,8 +339,11 @@ true`, the sequence reservation below are both computed once per distinct batch 
   same batch) and reused on every subsequent retry, rather than recomputed — a prerequisite for
   idempotence, and a correctness fix in its own right for the sticky/round-robin partitioners,
   which are stateful and would otherwise assign a retried batch to a different partition than its
-  first attempt. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
-  dependency, per CONTRIBUTING.md's dependency policy) and are rejected at encode time.
+  first attempt. `gzip`/`lz4`/`zstd` compression are all supported (issue #16 — `lz4` is
+  `@ferrule/codecs`'s own hand-written LZ4 frame codec, `zstd` is `node:zlib`'s native support,
+  feature-detected and rejected at config validation with a clear message on a runtime that
+  doesn't have it); `snappy` is not (no implementation of it exists for Kafka's RecordBatch
+  compression) and is rejected at encode time.
 
   **Idempotent production** (`idempotent: true`, the default): `InitProducerId` (key 22) fetches a
   producer ID and epoch, lazily, before the first batch; every `RecordBatch` then carries that
@@ -394,8 +413,9 @@ themselves are genuine (if fast, loopback) async I/O.
   testing, not against memorised published hash constants — the test suite does not assert
   specific magic numbers for named inputs, to avoid asserting a value from memory that could
   itself be wrong.
-- **Kafka compression** supports `none` and `gzip` only (no snappy/lz4/zstd, which need a native
-  dependency this project avoids).
+- **Kafka compression** supports `none`/`gzip`/`lz4`/`zstd`; `snappy` is not implemented (no
+  Kafka-side codec exists for it here, unlike the unrelated Snappy _block format_ used for
+  Prometheus remote write).
 - **Transactional Kafka production** (multi-partition atomic writes, the other half of KIP-98) is
   not implemented — only idempotent (duplicate-free retries within a single partition) production,
   which is what `idempotent: true` (the default) enables; see `producer.ts` above for its

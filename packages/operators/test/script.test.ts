@@ -5,7 +5,15 @@ import { describe, expect, it } from 'vitest';
 import type { LogEvent } from '@ferrule/core';
 import { FerruleError, MetricEvent } from '@ferrule/core';
 import { scriptTransform } from '@ferrule/operators';
-import { buildTransform, counterMetric, logEvent, sealedBatch } from './helpers.js';
+import {
+  buildTransform,
+  counterMetric,
+  gaugeMetric,
+  logEvent,
+  metricEvent,
+  sealedBatch,
+  spanEvent,
+} from './helpers.js';
 
 describe('script', () => {
   it('runs a compiled program that mutates fields', async () => {
@@ -184,5 +192,192 @@ describe('script', () => {
     const off = scriptTransform.options.parse({ source: '.x = 1' });
     expect(scriptTransform.outputs?.(on).map((p) => p.name)).toEqual(['errors', 'dropped']);
     expect(scriptTransform.outputs?.(off).map((p) => p.name)).toEqual(['errors']);
+  });
+});
+
+describe('script: metrics: true', () => {
+  it('rejects input_schema combined with metrics at config time', () => {
+    expect(() =>
+      scriptTransform.options.parse({
+        source: '.x = 1',
+        metrics: true,
+        input_schema: { x: 'int' },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects `.tags.<x> = <non-string>` as a build-time compile error (ferrule/ferrule#12)', async () => {
+    await expect(
+      buildTransform(scriptTransform, { metrics: true, source: '.tags.env = 1' }),
+    ).rejects.toBeInstanceOf(FerruleError);
+  });
+
+  it('rejects changing the metric value type as a build-time compile error', async () => {
+    await expect(
+      buildTransform(scriptTransform, { metrics: true, source: '.value_type = "gauge"' }),
+    ).rejects.toBeInstanceOf(FerruleError);
+  });
+
+  it('runs a compiled program over a metric event, mutating it in place', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: '.tags.region = "eu"\n.value = .value + 1.0\n',
+    });
+    const metric = counterMetric('requests', 1, { env: 'prod' });
+    transform.process([metric], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.event).toBe(metric);
+    expect(harness.pushed[0]!.port).toBe('_default');
+    expect(metric.tags.get('region')).toBe('eu');
+    expect(metric.value).toEqual({ type: 'counter', value: 2 });
+  });
+
+  it('leaves an untouched metric bit-identical (round trip)', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: '# touches nothing\n',
+    });
+    const metric = gaugeMetric('cpu.load', 0.75, { host: 'a' });
+    const before = { ...metric.value };
+    transform.process([metric], harness.out);
+    expect(harness.pushed[0]!.event).toBe(metric);
+    expect(metric.value).toEqual(before);
+    expect(metric.tags.get('host')).toBe('a');
+  });
+
+  it('with metrics: true, log and span events pass through unchanged instead', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: '.value = .value + 1.0',
+    });
+    const log = logEvent({ message: 'hi' });
+    const span = spanEvent({});
+    transform.process([log, span], harness.out);
+    expect(harness.pushed).toHaveLength(2);
+    expect(harness.pushed[0]!.event).toBe(log);
+    expect(harness.pushed[1]!.event).toBe(span);
+  });
+
+  it('drop: finishes the metric delivered by default', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: 'if .name == "skip" { drop }',
+    });
+    const metric = counterMetric('skip', 1);
+    const batch = sealedBatch([metric]);
+    transform.process([metric], harness.out);
+    expect(harness.pushed).toHaveLength(0);
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
+  it('a deliberate abort routes a log-shaped view of the metric to the errors port', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: 'abort "bad metric"',
+    });
+    const metric = counterMetric('requests', 1, { env: 'prod' });
+    transform.process([metric], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.port).toBe('errors');
+    const out = harness.pushed[0]!.event as LogEvent;
+    expect(out.get('ferrule.error.reason')).toBe('bad metric');
+    expect(out.get('name')).toBe('requests');
+  });
+
+  it('an invalid write-back (deleting a required field) aborts with a clear reason', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: 'del(.value)',
+    });
+    const metric = counterMetric('requests', 1);
+    transform.process([metric], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.port).toBe('errors');
+    const out = harness.pushed[0]!.event as LogEvent;
+    expect(out.get('ferrule.error.reason')).toContain("'.value'");
+  });
+
+  it('drop_on_abort finishes the original metric rejected on an invalid write-back', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: '.kind = "oops"',
+      drop_on_abort: true,
+    });
+    const metric = counterMetric('requests', 1);
+    const batch = sealedBatch([metric]);
+    transform.process([metric], harness.out);
+    expect(harness.pushed).toHaveLength(0);
+    await expect(batch.completion).resolves.toBe('rejected');
+  });
+
+  it('a write to a field that does not apply to the metric`s actual type is safely ignored', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: '.buckets = [{"upper_limit": 1.0, "count": 1.0}]\n.value = 9.0\n',
+    });
+    const metric = counterMetric('requests', 1);
+    transform.process([metric], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect((harness.pushed[0]!.event as MetricEvent).value).toEqual({
+      type: 'counter',
+      value: 9,
+    });
+  });
+
+  it('emit() from a metric program adds a plain log event alongside the metric', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: 'emit({ "note": .name })',
+    });
+    const metric = counterMetric('requests', 1);
+    const batch = sealedBatch([metric]);
+    transform.process([metric], harness.out);
+    expect(harness.pushed).toHaveLength(2);
+    expect(harness.pushed[0]!.event).toBe(metric);
+    expect((harness.pushed[1]!.event as LogEvent).get('note')).toBe('requests');
+
+    harness.pushed[0]!.event.metadata.finalizers.finish('delivered');
+    let settled = false;
+    void batch.completion.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    harness.pushed[1]!.event.metadata.finalizers.finish('delivered');
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
+  it('a histogram metric round-trips through buckets/count/sum untouched', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      metrics: true,
+      source: '.tags.unit = "ms"\n',
+    });
+    const metric = metricEvent({
+      name: 'latency',
+      kind: 'incremental',
+      value: {
+        type: 'histogram',
+        buckets: [
+          { upperLimit: 10, count: 2 },
+          { upperLimit: 50, count: 1 },
+        ],
+        count: 3,
+        sum: 42.5,
+      },
+    });
+    transform.process([metric], harness.out);
+    expect(harness.pushed[0]!.event).toBe(metric);
+    expect(metric.value).toEqual({
+      type: 'histogram',
+      buckets: [
+        { upperLimit: 10, count: 2 },
+        { upperLimit: 50, count: 1 },
+      ],
+      count: 3,
+      sum: 42.5,
+    });
+    expect(metric.tags.get('unit')).toBe('ms');
   });
 });

@@ -5,6 +5,7 @@ import {
   renderDiagnostic,
   renderDiagnostics,
   SourceFile,
+  type CheckOptions,
   type CompiledProgram,
   type Diagnostic,
   type Fix,
@@ -29,8 +30,24 @@ export const E_SCRIPT_COMPILE = 'E_SCRIPT_COMPILE';
 export interface CompileScriptOptions {
   /** Types `.field` paths against a declared event shape. Default: every path is `any`. */
   readonly inputSchema?: Type;
+  /**
+   * Checks path writes against `inputSchema` too, instead of the default "a path is always
+   * writable" permissiveness — see `@ferrule/script`'s `CheckOptions.validateWrites`. `script`
+   * sets this for its metric view; its own `input_schema` option (for logs) leaves it unset.
+   */
+  readonly validateWrites?: boolean;
+  /** Top-level fields that can be read but never assigned; see `CheckOptions.readonlyPaths`. */
+  readonly readonlyPaths?: ReadonlyMap<string, string>;
   /** Runs the optimizer. Default `true` (matches `@ferrule/script`'s own default). */
   readonly optimize?: boolean;
+}
+
+function checkOptionsOf(options: CompileScriptOptions): CheckOptions {
+  return {
+    ...(options.inputSchema === undefined ? {} : { inputSchema: options.inputSchema }),
+    ...(options.validateWrites === undefined ? {} : { validateWrites: options.validateWrites }),
+    ...(options.readonlyPaths === undefined ? {} : { readonlyPaths: options.readonlyPaths }),
+  };
 }
 
 /**
@@ -46,10 +63,7 @@ export function compileScriptSource(
   options: CompileScriptOptions = {},
 ): CompiledProgram {
   const file = new SourceFile(fileName, source);
-  const result = parseAndCheck(
-    file,
-    options.inputSchema === undefined ? {} : { inputSchema: options.inputSchema },
-  );
+  const result = parseAndCheck(file, checkOptionsOf(options));
   const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
     (d) => d.severity === 'error',
   );
@@ -189,10 +203,7 @@ export function compileConditionSource(
   options: CompileScriptOptions = {},
 ): CompiledProgram {
   const wrapperFile = new SourceFile(fileName, wrapBooleanCondition(condition, fallbackWhenFailed));
-  const result = parseAndCheck(
-    wrapperFile,
-    options.inputSchema === undefined ? {} : { inputSchema: options.inputSchema },
-  );
+  const result = parseAndCheck(wrapperFile, checkOptionsOf(options));
   const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
     (d) => d.severity === 'error',
   );

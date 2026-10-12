@@ -1,5 +1,12 @@
 import { readFileSync } from 'node:fs';
-import { FerruleError, isLogEvent, type Event, type LogEvent } from '@ferrule/core';
+import {
+  FerruleError,
+  isLogEvent,
+  isMetricEvent,
+  type Event,
+  type LogEvent,
+  type MetricEvent,
+} from '@ferrule/core';
 import { s, type Infer } from '@ferrule/schema';
 import {
   defineTransform,
@@ -12,25 +19,49 @@ import {
   type TransformContext,
   type TransformOutput,
 } from '@ferrule/runtime';
-import type { AbortCause, ResourceLimits, Type } from '@ferrule/script';
+import {
+  applyViewToMetric,
+  metricEventSchema,
+  metricEventToView,
+  metricReadonlyPaths,
+  outcomeForError,
+  type AbortCause,
+  type Outcome,
+  type ResourceLimits,
+  type Span,
+  type Type,
+} from '@ferrule/script';
 import { compileScriptSource } from './util/scriptCompile.js';
 import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
 
 /**
- * `script` — runs a compiled Ferrule Script program over every log event. See
- * `packages/script/README.md` for the language; this transform is the pipeline-facing wrapper
- * that compiles the program once at build time (so a syntax or type error is reported during
- * `ferrule validate`/pipeline startup, with the same rendered code frames the language package
- * produces) and runs it once per event at process time.
+ * `script` — runs a compiled Ferrule Script program over every log event (or, with `metrics:
+ * true`, every metric event instead — see below). See `packages/script/README.md` for the
+ * language; this transform is the pipeline-facing wrapper that compiles the program once at build
+ * time (so a syntax or type error is reported during `ferrule validate`/pipeline startup, with the
+ * same rendered code frames the language package produces) and runs it once per event at process
+ * time.
  *
- * **Metric and span events pass through unchanged.** `@ferrule/script`'s compiler only supports
- * `LogEvent` (see the script README's "Execution model: logs only") — there is no supported way
- * to run a compiled program against a `MetricEvent`/`SpanEvent` today. Rather than reject a
- * mixed-kind pipeline outright, this transform forwards metric/span events untouched (counted by
- * `script_passthrough_events_total`, tagged `kind`), so `script` can still sit in a pipeline that
- * also carries metrics/spans past it to another transform or sink.
+ * **One instance handles one event kind; the other kinds pass through.** By default this
+ * transform runs its program over log events (span events always pass through — `@ferrule/script`
+ * has no span view yet) and forwards metric/span events untouched (counted by
+ * `script_passthrough_events_total`, tagged `kind`), exactly as before `metrics` existed. Setting
+ * `metrics: true` flips that: the program is checked against the metric view instead
+ * (`@ferrule/script`'s `metricEventSchema`/`metric/view.ts` — see `docs/language/design.md`'s
+ * "Metric events"), runs over metric events, and log/span events pass through instead. A single
+ * instance never runs the same program against both kinds — their field shapes have nothing in
+ * common, so a script written for one would almost never also make sense for the other; put a
+ * `split_by_kind` ahead of two `script` instances if a pipeline genuinely needs both.
  *
- * **Outcomes.** Every log event's `program.run(...)` produces one of:
+ * **A metric abort's error-port event is the metric's log-shaped view, not the `MetricEvent`
+ * itself** — a `MetricEvent` has no field bag to attach `ferrule.error.*` to, so there is nowhere
+ * else to put it; the view carries the metric's fields flat (`.name`, `.tags`, `.value`, ... — see
+ * `@ferrule/script`'s `metric/schema.ts` for the exact shape, which is its own, script-facing
+ * convention distinct from `metric_to_log`'s nested log representation), plus whatever the script
+ * mutated before failing, and shares the original metric's finalizers so acknowledgement still
+ * behaves exactly as if the metric itself had been pushed.
+ *
+ * **Outcomes.** Every processed event's `program.run(...)` produces one of:
  *
  * - `continue` — `events[0]` (the same, possibly mutated, event object) is pushed on the default
  *   port; any events an `emit()` call added are pushed too, each carrying a *clone* of the
@@ -107,11 +138,24 @@ export const scriptOptions = s
       .boolean()
       .default(false)
       .describe('route drop()ped events to the `dropped` port instead of finishing them delivered'),
+    metrics: s
+      .boolean()
+      .default(false)
+      .describe(
+        'run the program on metric events instead of log events (log/span events then pass ' +
+          'through unchanged). The program is checked against the metric view — see ' +
+          'docs/language/design.md §"Metric events" — instead of `input_schema`, which has no ' +
+          'effect here since metric fields are typed automatically.',
+      ),
     limits: limitsOptions.default({}).describe('per-event resource limit overrides'),
   })
   .refine(
     (o) => (o.source === undefined) !== (o.file === undefined),
     'exactly one of `source` or `file` must be given',
+  )
+  .refine(
+    (o) => !(o.metrics && o.input_schema !== undefined),
+    '`input_schema` types log fields; it has no effect when `metrics` is set',
   );
 
 export type ScriptOptions = Infer<typeof scriptOptions>;
@@ -167,7 +211,7 @@ export const scriptTransform = defineTransform<ScriptOptions>({
   kind: 'transform',
   type: 'script',
   description:
-    'Runs a compiled Ferrule Script program over log events; metrics/spans pass through.',
+    'Runs a compiled Ferrule Script program over log events, or (with `metrics`) metric events.',
   options: scriptOptions,
   accepts: ['log', 'metric', 'span'],
   outputs: (options): readonly OutputPort[] => {
@@ -186,15 +230,33 @@ export const scriptTransform = defineTransform<ScriptOptions>({
         source: '.status = upcase(.status) ?? "unknown"\n' + 'if .level == "debug" { drop }\n',
       },
     },
+    {
+      title: 'Add a derived tag to every metric',
+      config: {
+        metrics: true,
+        source: '.tags.service = "checkout"\n',
+      },
+    },
   ],
   build: (options) => {
     const sourceText = options.source ?? readScriptFile(options.file!);
     const fileName = options.file ?? '<inline script>';
-    const inputSchema = inputSchemaType(options.input_schema);
-    const compileOpts: { inputSchema?: Type } = {};
-    if (inputSchema !== undefined) compileOpts.inputSchema = inputSchema;
+    const compileOpts: {
+      inputSchema?: Type;
+      validateWrites?: boolean;
+      readonlyPaths?: ReadonlyMap<string, string>;
+    } = {};
+    if (options.metrics) {
+      compileOpts.inputSchema = metricEventSchema();
+      compileOpts.validateWrites = true;
+      compileOpts.readonlyPaths = metricReadonlyPaths();
+    } else {
+      const inputSchema = inputSchemaType(options.input_schema);
+      if (inputSchema !== undefined) compileOpts.inputSchema = inputSchema;
+    }
     const program = compileScriptSource(sourceText, fileName, compileOpts);
     const limits = resolveLimitOverrides(options.limits);
+    const rootSpan: Span = program.checkResult.program.span;
 
     let ctx!: TransformContext;
     let continueCounter!: Counter;
@@ -203,6 +265,114 @@ export const scriptTransform = defineTransform<ScriptOptions>({
     let discardedAbortCounter!: Counter;
     let discardedErrorCounter!: Counter;
     let durationHistogram!: Histogram;
+
+    /**
+     * Shared by the log and metric paths below: `errorLog` is a `LogEvent` either way — for a
+     * metric, that's its synthetic view, since a `MetricEvent` has no field bag of its own to
+     * attach `ferrule.error.*` to (see the module doc's "error-port event" note). `finishRejected`
+     * finishes the *original* event's finalizers, which for a metric means the `MetricEvent`
+     * itself, not the view, even though they currently share the same `Finalizers` instance.
+     */
+    function handleAbort(
+      aborted: Extract<Outcome, { kind: 'abort' }>,
+      errorLog: LogEvent,
+      out: TransformOutput,
+      finishRejected: () => void,
+    ): void {
+      abortCounter.increment();
+      const internal = isInternalAbort(aborted.cause);
+      const shouldDrop = internal ? options.drop_on_error : options.drop_on_abort;
+      if (shouldDrop) {
+        (internal ? discardedErrorCounter : discardedAbortCounter).increment();
+        finishRejected();
+      } else {
+        attachAbortMetadata(errorLog, ctx.id, aborted.reason, aborted.span);
+        out.push(errorLog, ERROR_PORT);
+      }
+    }
+
+    function runLog(log: LogEvent, out: TransformOutput): void {
+      const startedAtMs = ctx.clock.monotonic();
+      const outcome = program.run(log, { limits, clock: () => ctx.clock.now() });
+      durationHistogram.record((ctx.clock.monotonic() - startedAtMs) / 1000);
+
+      switch (outcome.kind) {
+        case 'continue': {
+          continueCounter.increment();
+          const [first, ...extra] = outcome.events;
+          out.push(first ?? log, DEFAULT_PORT);
+          for (const extraEvent of extra) {
+            extraEvent.metadata.finalizers.merge(log.metadata.finalizers.clone());
+            out.push(extraEvent, DEFAULT_PORT);
+          }
+          return;
+        }
+        case 'drop': {
+          dropCounter.increment();
+          if (options.reroute_dropped) {
+            out.push(log, DROPPED_PORT);
+          } else {
+            log.metadata.finalizers.finish('delivered');
+          }
+          return;
+        }
+        case 'abort':
+          handleAbort(outcome, log, out, () => log.metadata.finalizers.finish('rejected'));
+          return;
+      }
+    }
+
+    /**
+     * Runs the program against `metric`'s view (`metricEventToView`). On `continue`,
+     * `applyViewToMetric` both validates and writes the result back into `metric` itself — a
+     * failure there (invalid tags, a deleted required field, ...) is routed exactly like a
+     * mid-run `abort`, since from the pipeline's perspective both mean "the script produced an
+     * event this transform cannot forward as-is."
+     */
+    function runMetric(metric: MetricEvent, out: TransformOutput): void {
+      const view = metricEventToView(metric);
+      const startedAtMs = ctx.clock.monotonic();
+      const outcome = program.run(view, { limits, clock: () => ctx.clock.now() });
+      durationHistogram.record((ctx.clock.monotonic() - startedAtMs) / 1000);
+
+      switch (outcome.kind) {
+        case 'continue': {
+          try {
+            applyViewToMetric(metric, view, rootSpan);
+          } catch (error) {
+            // `applyViewToMetric` only ever throws a `ScriptSignal`, which `outcomeForError`
+            // always turns into an `abort` outcome — the `if` just lets TypeScript see that.
+            const asOutcome = outcomeForError(error, rootSpan);
+            if (asOutcome.kind === 'abort') {
+              handleAbort(asOutcome, view, out, () =>
+                metric.metadata.finalizers.finish('rejected'),
+              );
+            }
+            return;
+          }
+          continueCounter.increment();
+          out.push(metric, DEFAULT_PORT);
+          const [, ...extra] = outcome.events;
+          for (const extraEvent of extra) {
+            extraEvent.metadata.finalizers.merge(metric.metadata.finalizers.clone());
+            out.push(extraEvent, DEFAULT_PORT);
+          }
+          return;
+        }
+        case 'drop': {
+          dropCounter.increment();
+          if (options.reroute_dropped) {
+            out.push(metric, DROPPED_PORT);
+          } else {
+            metric.metadata.finalizers.finish('delivered');
+          }
+          return;
+        }
+        case 'abort':
+          handleAbort(outcome, view, out, () => metric.metadata.finalizers.finish('rejected'));
+          return;
+      }
+    }
 
     return {
       start(context) {
@@ -220,52 +390,17 @@ export const scriptTransform = defineTransform<ScriptOptions>({
       },
       process(events: Event[], out: TransformOutput) {
         for (const event of events) {
-          if (!isLogEvent(event)) {
-            ctx.metrics
-              .counter('script_passthrough_events_total', { kind: event.kind })
-              .increment();
-            out.push(event, DEFAULT_PORT);
+          if (options.metrics) {
+            if (isMetricEvent(event)) {
+              runMetric(event, out);
+              continue;
+            }
+          } else if (isLogEvent(event)) {
+            runLog(event, out);
             continue;
           }
-          const log = event;
-          const startedAtMs = ctx.clock.monotonic();
-          const outcome = program.run(log, { limits, clock: () => ctx.clock.now() });
-          durationHistogram.record((ctx.clock.monotonic() - startedAtMs) / 1000);
-
-          switch (outcome.kind) {
-            case 'continue': {
-              continueCounter.increment();
-              const [first, ...extra] = outcome.events;
-              out.push(first ?? log, DEFAULT_PORT);
-              for (const extraEvent of extra) {
-                extraEvent.metadata.finalizers.merge(log.metadata.finalizers.clone());
-                out.push(extraEvent, DEFAULT_PORT);
-              }
-              break;
-            }
-            case 'drop': {
-              dropCounter.increment();
-              if (options.reroute_dropped) {
-                out.push(log, DROPPED_PORT);
-              } else {
-                log.metadata.finalizers.finish('delivered');
-              }
-              break;
-            }
-            case 'abort': {
-              abortCounter.increment();
-              const internal = isInternalAbort(outcome.cause);
-              const shouldDrop = internal ? options.drop_on_error : options.drop_on_abort;
-              if (shouldDrop) {
-                (internal ? discardedErrorCounter : discardedAbortCounter).increment();
-                log.metadata.finalizers.finish('rejected');
-              } else {
-                attachAbortMetadata(log, ctx.id, outcome.reason, outcome.span);
-                out.push(log, ERROR_PORT);
-              }
-              break;
-            }
-          }
+          ctx.metrics.counter('script_passthrough_events_total', { kind: event.kind }).increment();
+          out.push(event, DEFAULT_PORT);
         }
       },
     };

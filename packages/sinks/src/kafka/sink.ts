@@ -17,7 +17,7 @@ import {
   splitCodecOptions,
   tlsSchema,
 } from '../fragments.js';
-import { KafkaError } from '@ferrule/codecs';
+import { isZstdSupported, KafkaError, zstdUnsupportedMessage } from '@ferrule/codecs';
 import { compileTemplate, renderTemplate, type CompiledTemplate } from '../stream/template.js';
 import { KafkaProducer, type OutgoingRecord } from './producer.js';
 
@@ -43,7 +43,10 @@ export const kafkaSinkOptionsSchema = s
     /** Codec used to encode each event. Default `json`. */
     encoding: encodingSchema('json'),
     acks: s.enum(['0', '1', '-1']).default('-1'),
-    compression: s.enum(['none', 'gzip']).default('none'),
+    /** `lz4` is a hand-written codec (`@ferrule/codecs`); `zstd` uses node:zlib's native support
+     * and is rejected below if this runtime doesn't have it. `snappy` is not offered — no
+     * implementation of it exists for Kafka's RecordBatch compression. */
+    compression: s.enum(['none', 'gzip', 'lz4', 'zstd']).default('none'),
     /** Partition strategy for unkeyed records. Default `sticky` (KIP-480). */
     partitioner: s.enum(['round_robin', 'sticky']).default('sticky'),
     connect_timeout: s.duration().default(10_000),
@@ -66,7 +69,8 @@ export const kafkaSinkOptionsSchema = s
   .refine(
     (o) => !o.idempotent || o.max_in_flight_requests_per_connection <= 5,
     'idempotent requires max_in_flight_requests_per_connection of at most 5 (a broker only keeps the last 5 unacknowledged batches per partition for deduplication)',
-  );
+  )
+  .refine((o) => o.compression !== 'zstd' || isZstdSupported(), zstdUnsupportedMessage());
 
 export type KafkaSinkOptions = Infer<typeof kafkaSinkOptionsSchema>;
 

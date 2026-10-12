@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BatchNotifier, LogEvent, type DeliveryStatus } from '@ferrule/core';
-import { KafkaErrorCode } from '@ferrule/codecs';
+import { isZstdSupported, KafkaErrorCode } from '@ferrule/codecs';
 import { createTestSinkContext } from '@ferrule/runtime';
 import {
   createKafkaSink,
@@ -108,6 +108,53 @@ describe('kafka sink', () => {
     const record = broker.receivedBatches[0]!.decoded.records[0]!;
     expect(record.headers).toEqual([{ key: 'x-service', value: Buffer.from('api') }]);
   });
+
+  it('produces lz4-compressed batches the broker decodes correctly', async () => {
+    broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
+    const port = await broker.listen();
+    const sink = createKafkaSink(baseOptions(port, { compression: 'lz4' }));
+    const ctx = createTestSinkContext();
+    const event = LogEvent.from({ message: 'hello lz4' });
+    const completion = withFinalizer(event);
+
+    const running = sink.run(ctx.ctx);
+    await ctx.feed(event);
+    ctx.close();
+    await running;
+
+    await expect(completion).resolves.toBe('delivered');
+    const batch = broker.receivedBatches[0]!.decoded;
+    expect(batch.compression).toBe('lz4');
+    expect(batch.crcValid).toBe(true);
+    expect(JSON.parse(batch.records[0]!.value!.toString('utf8'))).toEqual({
+      message: 'hello lz4',
+    });
+  });
+
+  it.runIf(isZstdSupported())(
+    'produces zstd-compressed batches the broker decodes correctly',
+    async () => {
+      broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
+      const port = await broker.listen();
+      const sink = createKafkaSink(baseOptions(port, { compression: 'zstd' }));
+      const ctx = createTestSinkContext();
+      const event = LogEvent.from({ message: 'hello zstd' });
+      const completion = withFinalizer(event);
+
+      const running = sink.run(ctx.ctx);
+      await ctx.feed(event);
+      ctx.close();
+      await running;
+
+      await expect(completion).resolves.toBe('delivered');
+      const batch = broker.receivedBatches[0]!.decoded;
+      expect(batch.compression).toBe('zstd');
+      expect(batch.crcValid).toBe(true);
+      expect(JSON.parse(batch.records[0]!.value!.toString('utf8'))).toEqual({
+        message: 'hello zstd',
+      });
+    },
+  );
 
   it('rejects an event whose rendered topic is empty', async () => {
     broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
@@ -223,6 +270,24 @@ describe('kafka sink options validation (idempotent)', () => {
     );
     expect(result.ok).toBe(true);
   });
+
+  it('accepts compression: lz4 (no runtime dependency)', () => {
+    const result = kafkaSinkOptionsSchema.safeParse(validOptions({ compression: 'lz4' }));
+    expect(result.ok).toBe(true);
+  });
+
+  it.runIf(isZstdSupported())('accepts compression: zstd on a runtime with zstd support', () => {
+    const result = kafkaSinkOptionsSchema.safeParse(validOptions({ compression: 'zstd' }));
+    expect(result.ok).toBe(true);
+  });
+
+  it.runIf(!isZstdSupported())(
+    'rejects compression: zstd on a runtime without zstd support',
+    () => {
+      const result = kafkaSinkOptionsSchema.safeParse(validOptions({ compression: 'zstd' }));
+      expect(result.ok).toBe(false);
+    },
+  );
 });
 
 describe('kafka sink: idempotent production end to end (issue #17)', () => {

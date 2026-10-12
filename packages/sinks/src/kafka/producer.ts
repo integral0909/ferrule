@@ -9,8 +9,10 @@ import {
   encodeProduceRequestV9,
   encodeRecordBatch,
   isDuplicateSequenceErrorCode,
+  isZstdSupported,
   murmur2Partition,
   needsProducerIdReset,
+  zstdUnsupportedMessage,
   KafkaBrokerConnection,
   KafkaError,
   KafkaProtocolError,
@@ -124,6 +126,9 @@ export class KafkaProducer {
   constructor(private readonly options: KafkaProducerOptions) {
     if (options.bootstrapBrokers.length === 0) {
       throw new KafkaProtocolError('at least one bootstrap broker is required');
+    }
+    if (options.compression === 'zstd' && !isZstdSupported()) {
+      throw new KafkaProtocolError(zstdUnsupportedMessage());
     }
     if (options.idempotent === true) {
       if ((options.acks ?? -1) !== -1) {

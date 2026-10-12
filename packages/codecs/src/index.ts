@@ -1,3 +1,4 @@
+export * from './compression/index.js';
 export * from './errors.js';
 export * from './framing/index.js';
 export * from './kafka/index.js';

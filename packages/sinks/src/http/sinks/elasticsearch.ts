@@ -12,7 +12,13 @@ import { defineSink, FixedConcurrencyLimiter, runBatchedSink, SinkError } from '
 import { s, type Infer } from '@ferrule/schema';
 import { HttpClient, ensureSuccess } from '../client.js';
 import { frameChunks } from '../framing.js';
-import { batchSchema, concurrencySchema, retrySchema, transportSchema } from '../schema.js';
+import {
+  batchSchema,
+  concurrencySchema,
+  retrySchema,
+  transportSchema,
+  withZstdSupportCheck,
+} from '../schema.js';
 import { buildRetryPolicy, clockDate, eventContext } from '../support.js';
 import {
   compileFieldTemplate,
@@ -20,22 +26,24 @@ import {
   type CompiledFieldTemplate,
 } from '../templating.js';
 
-export const elasticsearchSinkOptions = transportSchema.extend({
-  /** Elasticsearch base URL, e.g. `https://es.internal:9200`. */
-  url: s.url({ protocols: ['http', 'https'] }),
-  /** Index name template: `%Y.%m.%d`-style time tokens plus `{{ field }}` references, evaluated
-   * per event (so one bulk request can span several resolved index names). */
-  index: s.string().nonEmpty(),
-  /** Field supplying the document `_id`. Omit to let Elasticsearch assign one. */
-  id_field: s.fieldPath().optional(),
-  action: s.enum(['index', 'create']).default('index'),
-  /** Data-stream mode: forces the `create` action (data streams reject `index`) and treats
-   * `index` as the data stream name. */
-  data_stream: s.boolean().default(false),
-  batch: batchSchema,
-  retry: retrySchema,
-  concurrency: concurrencySchema,
-});
+export const elasticsearchSinkOptions = withZstdSupportCheck(
+  transportSchema.extend({
+    /** Elasticsearch base URL, e.g. `https://es.internal:9200`. */
+    url: s.url({ protocols: ['http', 'https'] }),
+    /** Index name template: `%Y.%m.%d`-style time tokens plus `{{ field }}` references, evaluated
+     * per event (so one bulk request can span several resolved index names). */
+    index: s.string().nonEmpty(),
+    /** Field supplying the document `_id`. Omit to let Elasticsearch assign one. */
+    id_field: s.fieldPath().optional(),
+    action: s.enum(['index', 'create']).default('index'),
+    /** Data-stream mode: forces the `create` action (data streams reject `index`) and treats
+     * `index` as the data stream name. */
+    data_stream: s.boolean().default(false),
+    batch: batchSchema,
+    retry: retrySchema,
+    concurrency: concurrencySchema,
+  }),
+);
 export type ElasticsearchSinkOptions = Infer<typeof elasticsearchSinkOptions>;
 
 interface Encoded {

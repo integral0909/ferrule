@@ -5,26 +5,34 @@ import { s, type Infer } from '@ferrule/schema';
 import { encodingSchema, splitCodecOptions } from '../../fragments.js';
 import { HttpClient, ensureSuccess } from '../client.js';
 import { contentTypeFor, frameChunks, type BatchFraming } from '../framing.js';
-import { batchSchema, retrySchema, transportSchema, concurrencySchema } from '../schema.js';
+import {
+  batchSchema,
+  retrySchema,
+  transportSchema,
+  concurrencySchema,
+  withZstdSupportCheck,
+} from '../schema.js';
 import { buildRetryPolicy, eventContext } from '../support.js';
 import { compileFieldTemplate, encodeUriValue } from '../templating.js';
 
-export const httpSinkOptions = transportSchema.extend({
-  /** Destination URL. Supports `{{ field.path }}` templating from the first event of each batch. */
-  url: s.string().nonEmpty(),
-  method: s.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).default('POST'),
-  /** Codec used to encode each event; see `@ferrule/codecs`' registry for the full set. */
-  encoding: encodingSchema('ndjson'),
-  /** How per-event encoded chunks are joined into one request body. */
-  framing: s
-    .enum(['ndjson', 'json_array', 'newline'])
-    .default('ndjson')
-    .describe('How per-event encoded chunks are joined into one request body.'),
-  content_type: s.string().optional().describe('Overrides the request `Content-Type` header.'),
-  batch: batchSchema,
-  retry: retrySchema,
-  concurrency: concurrencySchema,
-});
+export const httpSinkOptions = withZstdSupportCheck(
+  transportSchema.extend({
+    /** Destination URL. Supports `{{ field.path }}` templating from the first event of each batch. */
+    url: s.string().nonEmpty(),
+    method: s.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).default('POST'),
+    /** Codec used to encode each event; see `@ferrule/codecs`' registry for the full set. */
+    encoding: encodingSchema('ndjson'),
+    /** How per-event encoded chunks are joined into one request body. */
+    framing: s
+      .enum(['ndjson', 'json_array', 'newline'])
+      .default('ndjson')
+      .describe('How per-event encoded chunks are joined into one request body.'),
+    content_type: s.string().optional().describe('Overrides the request `Content-Type` header.'),
+    batch: batchSchema,
+    retry: retrySchema,
+    concurrency: concurrencySchema,
+  }),
+);
 export type HttpSinkOptions = Infer<typeof httpSinkOptions>;
 
 interface Encoded {

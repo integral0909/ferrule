@@ -1,5 +1,12 @@
 import * as zlib from 'node:zlib';
 import { crc32c } from '@ferrule/buffer';
+import {
+  isZstdSupported,
+  lz4Compress,
+  lz4Decompress,
+  zstdCompress,
+  zstdDecompress,
+} from '../compression/index.js';
 import { KafkaReader, KafkaWriter } from './primitives.js';
 
 /**
@@ -7,6 +14,15 @@ import { KafkaReader, KafkaWriter } from './primitives.js';
  * 0.11. See "RecordBatch" in the Kafka protocol documentation. Every "varint" field inside a
  * record (as opposed to the fixed-width batch header fields) is zigzag-encoded, matching
  * `KafkaWriter.zigzagVarint`/`zigzagVarlong`.
+ *
+ * Compression (the low 3 bits of `attributes`): `none`/`gzip` via `node:zlib`, `lz4` via this
+ * package's own hand-written frame codec (`../compression/lz4.ts`), and `zstd` via `node:zlib`'s
+ * native zstd support where the running Node version provides it (`../compression/zstd.ts`).
+ * `snappy` (codec `2`) is not implemented in either direction — `encodeRecordBatch` rejects it
+ * and `decodeRecordBatch` throws rather than silently treating a snappy-compressed `records`
+ * section as uncompressed (a batch claiming codec `2` decoded as garbage before this module
+ * handled `lz4`/`zstd` explicitly, since only `gzip` was special-cased and everything else fell
+ * through to "raw bytes"; every codec this module doesn't implement now fails loudly instead).
  */
 
 export type CompressionType = 'none' | 'gzip' | 'snappy' | 'lz4' | 'zstd';
@@ -19,6 +35,47 @@ const COMPRESSION_CODES: Record<CompressionType, number> = {
   zstd: 4,
 };
 const COMPRESSION_BY_CODE: CompressionType[] = ['none', 'gzip', 'snappy', 'lz4', 'zstd'];
+
+/** Bytes a decompressed records section may expand to before `decodeRecordBatch` gives up,
+ * regardless of compression codec — a defense against a compression bomb in a malformed or
+ * hostile batch. Large enough that no legitimate batch should ever hit it (Kafka brokers
+ * themselves reject a batch anywhere near this size). */
+const DEFAULT_MAX_DECOMPRESSED_RECORDS_SIZE = 512 * 1024 * 1024;
+
+function compressRecords(rawRecords: Buffer, compression: CompressionType): Buffer {
+  switch (compression) {
+    case 'none':
+      return rawRecords;
+    case 'gzip':
+      return zlib.gzipSync(rawRecords);
+    case 'lz4':
+      return Buffer.from(lz4Compress(rawRecords));
+    case 'zstd':
+      return zstdCompress(rawRecords);
+    case 'snappy':
+      // Guarded against in encodeRecordBatch before this is ever reached.
+      throw new RangeError('compression snappy is not implemented');
+  }
+}
+
+function decompressRecords(
+  compressed: Buffer,
+  compression: CompressionType,
+  maxOutputSize: number,
+): Buffer {
+  switch (compression) {
+    case 'none':
+      return compressed;
+    case 'gzip':
+      return zlib.gunzipSync(compressed);
+    case 'lz4':
+      return Buffer.from(lz4Decompress(compressed, { maxOutputSize }));
+    case 'zstd':
+      return zstdDecompress(compressed, { maxOutputSize });
+    case 'snappy':
+      throw new RangeError('compression snappy is not implemented (decode)');
+  }
+}
 
 export interface RecordHeaderInput {
   readonly key: string;
@@ -35,8 +92,10 @@ export interface RecordInput {
 
 export interface EncodeRecordBatchOptions {
   readonly baseOffset?: bigint;
-  /** Only `none` and `gzip` are actually implementable without a native dependency (snappy/lz4/
-   * zstd need one); requesting them throws. */
+  /** `none`/`gzip`/`lz4`/`zstd` are implemented; `snappy` throws (no Ferrule sink selects it).
+   * `zstd` additionally throws if this runtime's `node:zlib` has no zstd support — check
+   * `isZstdSupported` from `@ferrule/codecs` ahead of time (e.g. at config validation) for a
+   * clearer, earlier error than this call site gives. */
   readonly compression?: CompressionType;
   readonly producerId?: bigint;
   readonly producerEpoch?: number;
@@ -80,9 +139,12 @@ export function encodeRecordBatch(
 ): Buffer {
   if (records.length === 0) throw new RangeError('a RecordBatch must contain at least one record');
   const compression = options.compression ?? 'none';
-  if (compression !== 'none' && compression !== 'gzip') {
+  if (compression === 'snappy') {
+    throw new RangeError('compression snappy is not implemented (no Kafka sink selects it)');
+  }
+  if (compression === 'zstd' && !isZstdSupported()) {
     throw new RangeError(
-      `compression ${compression} is not implemented (only "none" and "gzip" are)`,
+      'compression zstd is not supported by this runtime’s node:zlib (see isZstdSupported)',
     );
   }
   const baseOffset = options.baseOffset ?? 0n;
@@ -91,7 +153,7 @@ export function encodeRecordBatch(
   for (const r of records) if (r.timestamp > maxTimestamp) maxTimestamp = r.timestamp;
 
   const rawRecords = Buffer.concat(records.map((r, i) => encodeOneRecord(r, firstTimestamp, i)));
-  const recordsSection = compression === 'gzip' ? zlib.gzipSync(rawRecords) : rawRecords;
+  const recordsSection = compressRecords(rawRecords, compression);
 
   let attributes = COMPRESSION_CODES[compression];
   if (options.isTransactional === true) attributes |= 0x10;
@@ -156,9 +218,19 @@ export interface DecodedRecordBatch {
   readonly totalLength: number;
 }
 
+export interface DecodeRecordBatchOptions {
+  /** Bounds how large the decompressed `records` section may grow for `lz4`/`zstd` (a
+   * defense against a decompression bomb in a malformed or hostile batch); ignored for `none`/
+   * `gzip`. Default 512MiB. */
+  readonly maxDecompressedSize?: number;
+}
+
 /** Decodes one RecordBatch v2 starting at the beginning of `buf`. Verifies the CRC-32C but does
  * not throw on a mismatch (reported via `crcValid`) so a caller can decide how to react. */
-export function decodeRecordBatch(buf: Buffer): DecodedRecordBatch {
+export function decodeRecordBatch(
+  buf: Buffer,
+  options: DecodeRecordBatchOptions = {},
+): DecodedRecordBatch {
   const header = new KafkaReader(buf);
   const baseOffset = header.int64();
   const batchLength = header.int32();
@@ -185,8 +257,8 @@ export function decodeRecordBatch(buf: Buffer): DecodedRecordBatch {
   const baseSequence = body.int32();
   const recordsCount = body.int32();
   const compressedRecords = body.rest();
-  const rawRecords =
-    compression === 'gzip' ? zlib.gunzipSync(compressedRecords) : compressedRecords;
+  const maxDecompressedSize = options.maxDecompressedSize ?? DEFAULT_MAX_DECOMPRESSED_RECORDS_SIZE;
+  const rawRecords = decompressRecords(compressedRecords, compression, maxDecompressedSize);
 
   const recordsReader = new KafkaReader(rawRecords);
   const records: DecodedRecord[] = [];

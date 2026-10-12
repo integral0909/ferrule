@@ -12,37 +12,46 @@ import {
 import { defineSink, FixedConcurrencyLimiter, runBatchedSink } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
 import { HttpClient, ensureSuccess } from '../client.js';
-import { batchSchema, concurrencySchema, retrySchema, transportSchema } from '../schema.js';
+import {
+  batchSchema,
+  concurrencySchema,
+  retrySchema,
+  transportSchema,
+  withZstdSupportCheck,
+} from '../schema.js';
 import { buildRetryPolicy, eventContext } from '../support.js';
 import { compileFieldTemplate, type CompiledFieldTemplate } from '../templating.js';
 
 const LABEL_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
-export const lokiSinkOptions = transportSchema.extend({
-  /** Loki's base URL, e.g. `https://loki.internal:3100`. */
-  url: s.url({ protocols: ['http', 'https'] }),
-  push_path: s.string().default('/loki/api/v1/push'),
-  /** Sent as `X-Scope-OrgID` for multi-tenant Loki deployments. */
-  tenant: s.string().optional(),
-  /** Stream labels, as `name -> {{ field.path }}` templates. Label names must match
-   * `[a-zA-Z_][a-zA-Z0-9_]*`. */
-  labels: s.record(s.string()),
-  /** Template for the log line. Defaults to `.message` (or the whole event as JSON if absent). */
-  line: s.string().optional(),
-  /** Field holding a `Timestamp` to use as the entry's time. Defaults to when Ferrule received it. */
-  timestamp_field: s.fieldPath().optional(),
-  /** `sort` (default) sorts entries within a stream ascending by timestamp before sending, since
-   * Loki (without out-of-order ingestion enabled) rejects a decreasing timestamp within a stream.
-   * `passthrough` sends entries in arrival order and lets Loki apply its own policy. */
-  out_of_order: s.enum(['sort', 'passthrough']).default('sort'),
-  /** Caps the number of distinct label combinations (streams) this sink will track; events for a
-   * new combination beyond the cap are rejected rather than accepted into an unbounded set of
-   * streams. */
-  max_streams: s.integer({ min: 1 }).default(10_000),
-  batch: batchSchema,
-  retry: retrySchema,
-  concurrency: concurrencySchema,
-});
+export const lokiSinkOptions = withZstdSupportCheck(
+  transportSchema.extend({
+    /** Loki's base URL, e.g. `https://loki.internal:3100`. */
+    url: s.url({ protocols: ['http', 'https'] }),
+    push_path: s.string().default('/loki/api/v1/push'),
+    /** Sent as `X-Scope-OrgID` for multi-tenant Loki deployments. */
+    tenant: s.string().optional(),
+    /** Stream labels, as `name -> {{ field.path }}` templates. Label names must match
+     * `[a-zA-Z_][a-zA-Z0-9_]*`. */
+    labels: s.record(s.string()),
+    /** Template for the log line. Defaults to `.message` (or the whole event as JSON if absent). */
+    line: s.string().optional(),
+    /** Field holding a `Timestamp` to use as the entry's time. Defaults to when Ferrule received
+     * it. */
+    timestamp_field: s.fieldPath().optional(),
+    /** `sort` (default) sorts entries within a stream ascending by timestamp before sending,
+     * since Loki (without out-of-order ingestion enabled) rejects a decreasing timestamp within a
+     * stream. `passthrough` sends entries in arrival order and lets Loki apply its own policy. */
+    out_of_order: s.enum(['sort', 'passthrough']).default('sort'),
+    /** Caps the number of distinct label combinations (streams) this sink will track; events for
+     * a new combination beyond the cap are rejected rather than accepted into an unbounded set of
+     * streams. */
+    max_streams: s.integer({ min: 1 }).default(10_000),
+    batch: batchSchema,
+    retry: retrySchema,
+    concurrency: concurrencySchema,
+  }),
+);
 export type LokiSinkOptions = Infer<typeof lokiSinkOptions>;
 
 interface LokiPayload {

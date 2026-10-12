@@ -12,7 +12,13 @@ import { defineSink, FixedConcurrencyLimiter, runBatchedSink } from '@ferrule/ru
 import { s, type Infer } from '@ferrule/schema';
 import { HttpClient, ensureSuccess } from '../client.js';
 import { frameChunks } from '../framing.js';
-import { batchSchema, concurrencySchema, retrySchema, transportSchema } from '../schema.js';
+import {
+  batchSchema,
+  concurrencySchema,
+  retrySchema,
+  transportSchema,
+  withZstdSupportCheck,
+} from '../schema.js';
 import { buildRetryPolicy, eventContext } from '../support.js';
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -34,20 +40,22 @@ const columnMappingSchema = s.array(
   s.object({ field: s.fieldPath(), column: s.string().nonEmpty() }),
 );
 
-export const clickhouseSinkOptions = transportSchema.extend({
-  /** ClickHouse HTTP interface base URL, e.g. `http://clickhouse:8123`. */
-  url: s.url({ protocols: ['http', 'https'] }),
-  database: s.string().nonEmpty(),
-  table: s.string().nonEmpty(),
-  /** Explicit field -> column mapping. Defaults to passing every top-level field through under
-   * its own name. */
-  columns: columnMappingSchema.optional(),
-  /** Extra ClickHouse HTTP settings sent as query parameters, e.g. `{ async_insert: "1" }`. */
-  settings: s.record(s.string()).optional(),
-  batch: batchSchema,
-  retry: retrySchema,
-  concurrency: concurrencySchema,
-});
+export const clickhouseSinkOptions = withZstdSupportCheck(
+  transportSchema.extend({
+    /** ClickHouse HTTP interface base URL, e.g. `http://clickhouse:8123`. */
+    url: s.url({ protocols: ['http', 'https'] }),
+    database: s.string().nonEmpty(),
+    table: s.string().nonEmpty(),
+    /** Explicit field -> column mapping. Defaults to passing every top-level field through under
+     * its own name. */
+    columns: columnMappingSchema.optional(),
+    /** Extra ClickHouse HTTP settings sent as query parameters, e.g. `{ async_insert: "1" }`. */
+    settings: s.record(s.string()).optional(),
+    batch: batchSchema,
+    retry: retrySchema,
+    concurrency: concurrencySchema,
+  }),
+);
 export type ClickhouseSinkOptions = Infer<typeof clickhouseSinkOptions>;
 
 function buildRow(

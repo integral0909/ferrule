@@ -6,35 +6,44 @@ import { s, type Infer } from '@ferrule/schema';
 import { encodingSchema, splitCodecOptions } from '../../fragments.js';
 import { HttpClient, ensureSuccess } from '../client.js';
 import { contentTypeFor, frameChunks, type BatchFraming } from '../framing.js';
-import { batchSchema, concurrencySchema, retrySchema, transportSchemaNoAuth } from '../schema.js';
+import {
+  batchSchema,
+  concurrencySchema,
+  retrySchema,
+  transportSchemaNoAuth,
+  withZstdSupportCheck,
+} from '../schema.js';
 import { buildRetryPolicy, clockDate, eventContext } from '../support.js';
 import { sha256Hex, signV4, uriEncodePath } from '../sigv4.js';
 import { compileFieldTemplate, formatTimePattern } from '../templating.js';
 
-export const objectStorageSinkOptions = transportSchemaNoAuth.extend({
-  /** S3-compatible endpoint, e.g. `https://s3.us-east-1.amazonaws.com` or `http://localhost:9000`. */
-  endpoint: s.url({ protocols: ['http', 'https'] }),
-  bucket: s.string().nonEmpty(),
-  /** Object key template: `%Y/%m/%d/%H`-style time tokens plus `{{ field }}` references. A random
-   * suffix is always appended so concurrent batches never collide. */
-  key: s.string().default('%Y/%m/%d/%H/events'),
-  region: s.string().default('us-east-1'),
-  service: s.string().default('s3'),
-  addressing: s.enum(['path', 'virtual']).default('path'),
-  access_key_id: s.string().secret(),
-  secret_access_key: s.string().secret(),
-  session_token: s.string().secret().optional(),
-  /** Whether the key template's time tokens use the batch-flush wall clock, or the first event's
-   * own timestamp. */
-  time_source: s.enum(['batch', 'event']).default('batch'),
-  /** Codec used to encode each event; see `@ferrule/codecs`' registry for the full set. */
-  encoding: encodingSchema('ndjson'),
-  framing: s.enum(['ndjson', 'json_array', 'newline']).default('ndjson'),
-  content_type: s.string().optional(),
-  batch: batchSchema,
-  retry: retrySchema,
-  concurrency: concurrencySchema,
-});
+export const objectStorageSinkOptions = withZstdSupportCheck(
+  transportSchemaNoAuth.extend({
+    /** S3-compatible endpoint, e.g. `https://s3.us-east-1.amazonaws.com` or
+     * `http://localhost:9000`. */
+    endpoint: s.url({ protocols: ['http', 'https'] }),
+    bucket: s.string().nonEmpty(),
+    /** Object key template: `%Y/%m/%d/%H`-style time tokens plus `{{ field }}` references. A
+     * random suffix is always appended so concurrent batches never collide. */
+    key: s.string().default('%Y/%m/%d/%H/events'),
+    region: s.string().default('us-east-1'),
+    service: s.string().default('s3'),
+    addressing: s.enum(['path', 'virtual']).default('path'),
+    access_key_id: s.string().secret(),
+    secret_access_key: s.string().secret(),
+    session_token: s.string().secret().optional(),
+    /** Whether the key template's time tokens use the batch-flush wall clock, or the first
+     * event's own timestamp. */
+    time_source: s.enum(['batch', 'event']).default('batch'),
+    /** Codec used to encode each event; see `@ferrule/codecs`' registry for the full set. */
+    encoding: encodingSchema('ndjson'),
+    framing: s.enum(['ndjson', 'json_array', 'newline']).default('ndjson'),
+    content_type: s.string().optional(),
+    batch: batchSchema,
+    retry: retrySchema,
+    concurrency: concurrencySchema,
+  }),
+);
 export type ObjectStorageSinkOptions = Infer<typeof objectStorageSinkOptions>;
 
 interface Encoded {
@@ -91,7 +100,8 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
     const encoder = defaultCodecs.createEncoder(codec, codecOptions);
     const framing: BatchFraming = options.framing;
     const contentType = options.content_type ?? contentTypeFor(framing);
-    const gzip = options.compression === 'gzip';
+    const compressionSuffix =
+      options.compression === 'gzip' ? '.gz' : options.compression === 'zstd' ? '.zst' : undefined;
     const keyHasTemplate = /\{\{/.test(options.key);
 
     const client = new HttpClient({
@@ -111,7 +121,9 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
       let key = formatTimePattern(options.key, date);
       if (keyHasTemplate) key = compileFieldTemplate(key).render(eventContext(events[0]!));
       key = appendUniqueSuffix(key);
-      return gzip && !key.endsWith('.gz') ? `${key}.gz` : key;
+      return compressionSuffix !== undefined && !key.endsWith(compressionSuffix)
+        ? `${key}${compressionSuffix}`
+        : key;
     }
 
     function requestUrl(key: string): URL {

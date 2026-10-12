@@ -517,6 +517,18 @@ of CI. Run it with:
 node --experimental-strip-types packages/script/bench/throughput.ts
 ```
 
+`bench/worker-pool-throughput.ts` measures the same `compile`/`run` against real
+`worker_threads`: it runs a CPU-bound program (a hash chain, a regex scan, a sort) over 200,000
+events in-thread and then split across 1/2/4/`os.cpus().length` worker threads (compiling once
+per worker, as `@ferrule/operators`' `script` transform's `workers: <n>` option does via
+`@ferrule/runtime`'s `WorkerPool`), reporting events/sec and the speedup over in-thread at each
+worker count — see `packages/runtime/README.md`'s "Worker pool" for the mechanism this exercises.
+Also not part of CI. Run it with:
+
+```
+node --experimental-strip-types packages/script/bench/worker-pool-throughput.ts
+```
+
 ### Syntax
 
 `SourceFile` (name, text, `lineColumnAt`/`lineText`/etc.), `Span` (`{ start, end }`, half-open UTF-

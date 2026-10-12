@@ -185,6 +185,10 @@ export class MetricEvent {
         return size + this.value.samples.length * 16;
       case 'histogram':
         return size + 16 + this.value.buckets.length * 16;
+      case 'exponentialHistogram':
+        return (
+          size + 32 + (this.value.positive.counts.length + this.value.negative.counts.length) * 8
+        );
       case 'summary':
         return size + 16 + this.value.quantiles.length * 16;
     }

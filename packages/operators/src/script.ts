@@ -3,9 +3,11 @@ import {
   FerruleError,
   isLogEvent,
   isMetricEvent,
+  isSpanEvent,
   type Event,
   type LogEvent,
   type MetricEvent,
+  type SpanEvent,
 } from '@ferrule/core';
 import { s, type Infer } from '@ferrule/schema';
 import {
@@ -21,10 +23,14 @@ import {
 } from '@ferrule/runtime';
 import {
   applyViewToMetric,
+  applyViewToSpan,
   metricEventSchema,
   metricEventToView,
   metricReadonlyPaths,
   outcomeForError,
+  spanEventSchema,
+  spanEventToView,
+  spanReadonlyPaths,
   type AbortCause,
   type Outcome,
   type ResourceLimits,
@@ -34,32 +40,34 @@ import {
 import { compileScriptSource } from './util/scriptCompile.js';
 import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
 
+const EVENT_KINDS = ['log', 'metric', 'span'] as const;
+
 /**
- * `script` — runs a compiled Ferrule Script program over every log event (or, with `metrics:
- * true`, every metric event instead — see below). See `packages/script/README.md` for the
- * language; this transform is the pipeline-facing wrapper that compiles the program once at build
- * time (so a syntax or type error is reported during `ferrule validate`/pipeline startup, with the
- * same rendered code frames the language package produces) and runs it once per event at process
- * time.
+ * `script` — runs a compiled Ferrule Script program over every event of one kind, chosen by
+ * `event_kind` (default `log`). See `packages/script/README.md` for the language; this transform
+ * is the pipeline-facing wrapper that compiles the program once at build time (so a syntax or type
+ * error is reported during `ferrule validate`/pipeline startup, with the same rendered code frames
+ * the language package produces) and runs it once per event at process time.
  *
- * **One instance handles one event kind; the other kinds pass through.** By default this
- * transform runs its program over log events (span events always pass through — `@ferrule/script`
- * has no span view yet) and forwards metric/span events untouched (counted by
- * `script_passthrough_events_total`, tagged `kind`), exactly as before `metrics` existed. Setting
- * `metrics: true` flips that: the program is checked against the metric view instead
- * (`@ferrule/script`'s `metricEventSchema`/`metric/view.ts` — see `docs/language/design.md`'s
- * "Metric events"), runs over metric events, and log/span events pass through instead. A single
- * instance never runs the same program against both kinds — their field shapes have nothing in
- * common, so a script written for one would almost never also make sense for the other; put a
- * `split_by_kind` ahead of two `script` instances if a pipeline genuinely needs both.
+ * **One instance handles one event kind; the other kinds pass through**, counted by
+ * `script_passthrough_events_total` (tagged `kind`). `event_kind: log` (the default) checks and
+ * runs the program against log events directly; `event_kind: metric` checks it against the metric
+ * view instead (`@ferrule/script`'s `metricEventSchema`/`metric/view.ts` — see
+ * `docs/language/design.md`'s "Metric events"); `event_kind: span` checks it against the span view
+ * (`spanEventSchema`/`span/view.ts` — see design.md's "Span events"). A single instance never runs
+ * the same program against two kinds — their field shapes have nothing in common, so a script
+ * written for one would almost never also make sense for another; put a `split_by_kind` ahead of
+ * several `script` instances if a pipeline genuinely needs more than one.
  *
- * **A metric abort's error-port event is the metric's log-shaped view, not the `MetricEvent`
- * itself** — a `MetricEvent` has no field bag to attach `ferrule.error.*` to, so there is nowhere
- * else to put it; the view carries the metric's fields flat (`.name`, `.tags`, `.value`, ... — see
- * `@ferrule/script`'s `metric/schema.ts` for the exact shape, which is its own, script-facing
- * convention distinct from `metric_to_log`'s nested log representation), plus whatever the script
- * mutated before failing, and shares the original metric's finalizers so acknowledgement still
- * behaves exactly as if the metric itself had been pushed.
+ * **A metric or span abort's error-port event is that event's log-shaped view, not the
+ * `MetricEvent`/`SpanEvent` itself** — neither has a field bag of its own to attach
+ * `ferrule.error.*` to, so there is nowhere else to put it; the view carries the event's fields
+ * flat (`.name`, `.tags`, `.value`, ... for a metric; `.name`, `.kind`, `.attributes`, ... for a
+ * span — see `@ferrule/script`'s `metric/schema.ts`/`span/schema.ts` for the exact shapes, which
+ * are their own script-facing conventions, distinct from `metric_to_log`'s nested log
+ * representation), plus whatever the script mutated before failing, and shares the original
+ * event's finalizers so acknowledgement still behaves exactly as if the event itself had been
+ * pushed.
  *
  * **Outcomes.** Every processed event's `program.run(...)` produces one of:
  *
@@ -138,14 +146,14 @@ export const scriptOptions = s
       .boolean()
       .default(false)
       .describe('route drop()ped events to the `dropped` port instead of finishing them delivered'),
-    metrics: s
-      .boolean()
-      .default(false)
+    event_kind: s
+      .enum(EVENT_KINDS)
+      .default('log')
       .describe(
-        'run the program on metric events instead of log events (log/span events then pass ' +
-          'through unchanged). The program is checked against the metric view — see ' +
-          'docs/language/design.md §"Metric events" — instead of `input_schema`, which has no ' +
-          'effect here since metric fields are typed automatically.',
+        'which event kind the program runs on; the other kinds then pass through unchanged. ' +
+          "`metric`/`span` check the program against that kind's view instead of `input_schema` " +
+          '(see docs/language/design.md §"Metric events"/"Span events") — `input_schema` has no ' +
+          'effect unless `event_kind` is `log`, since metric/span fields are typed automatically.',
       ),
     limits: limitsOptions.default({}).describe('per-event resource limit overrides'),
   })
@@ -154,8 +162,8 @@ export const scriptOptions = s
     'exactly one of `source` or `file` must be given',
   )
   .refine(
-    (o) => !(o.metrics && o.input_schema !== undefined),
-    '`input_schema` types log fields; it has no effect when `metrics` is set',
+    (o) => o.event_kind === 'log' || o.input_schema === undefined,
+    '`input_schema` types log fields; it has no effect unless `event_kind` is `log`',
   );
 
 export type ScriptOptions = Infer<typeof scriptOptions>;
@@ -233,8 +241,15 @@ export const scriptTransform = defineTransform<ScriptOptions>({
     {
       title: 'Add a derived tag to every metric',
       config: {
-        metrics: true,
+        event_kind: 'metric',
         source: '.tags.service = "checkout"\n',
+      },
+    },
+    {
+      title: 'Drop health-check spans by attribute',
+      config: {
+        event_kind: 'span',
+        source: 'if .attributes.http_route == "/healthz" { drop }\n',
       },
     },
   ],
@@ -246,13 +261,22 @@ export const scriptTransform = defineTransform<ScriptOptions>({
       validateWrites?: boolean;
       readonlyPaths?: ReadonlyMap<string, string>;
     } = {};
-    if (options.metrics) {
-      compileOpts.inputSchema = metricEventSchema();
-      compileOpts.validateWrites = true;
-      compileOpts.readonlyPaths = metricReadonlyPaths();
-    } else {
-      const inputSchema = inputSchemaType(options.input_schema);
-      if (inputSchema !== undefined) compileOpts.inputSchema = inputSchema;
+    switch (options.event_kind) {
+      case 'metric':
+        compileOpts.inputSchema = metricEventSchema();
+        compileOpts.validateWrites = true;
+        compileOpts.readonlyPaths = metricReadonlyPaths();
+        break;
+      case 'span':
+        compileOpts.inputSchema = spanEventSchema();
+        compileOpts.validateWrites = true;
+        compileOpts.readonlyPaths = spanReadonlyPaths();
+        break;
+      case 'log': {
+        const inputSchema = inputSchemaType(options.input_schema);
+        if (inputSchema !== undefined) compileOpts.inputSchema = inputSchema;
+        break;
+      }
     }
     const program = compileScriptSource(sourceText, fileName, compileOpts);
     const limits = resolveLimitOverrides(options.limits);
@@ -267,11 +291,12 @@ export const scriptTransform = defineTransform<ScriptOptions>({
     let durationHistogram!: Histogram;
 
     /**
-     * Shared by the log and metric paths below: `errorLog` is a `LogEvent` either way — for a
-     * metric, that's its synthetic view, since a `MetricEvent` has no field bag of its own to
+     * Shared by the log/metric/span paths below: `errorLog` is a `LogEvent` either way — for a
+     * metric or span, that's its synthetic view, since neither has a field bag of its own to
      * attach `ferrule.error.*` to (see the module doc's "error-port event" note). `finishRejected`
-     * finishes the *original* event's finalizers, which for a metric means the `MetricEvent`
-     * itself, not the view, even though they currently share the same `Finalizers` instance.
+     * finishes the *original* event's finalizers, which for a metric/span means the
+     * `MetricEvent`/`SpanEvent` itself, not the view, even though they currently share the same
+     * `Finalizers` instance.
      */
     function handleAbort(
       aborted: Extract<Outcome, { kind: 'abort' }>,
@@ -374,6 +399,57 @@ export const scriptTransform = defineTransform<ScriptOptions>({
       }
     }
 
+    /**
+     * Runs the program against `span`'s view (`spanEventToView`). On `continue`,
+     * `applyViewToSpan` both validates and writes the result back into `span` itself — a failure
+     * there (an invalid `.kind`/`.status.code`, a deleted required field, ...) is routed exactly
+     * like a mid-run `abort`, same as `runMetric`.
+     */
+    function runSpan(spanEvent: SpanEvent, out: TransformOutput): void {
+      const view = spanEventToView(spanEvent);
+      const startedAtMs = ctx.clock.monotonic();
+      const outcome = program.run(view, { limits, clock: () => ctx.clock.now() });
+      durationHistogram.record((ctx.clock.monotonic() - startedAtMs) / 1000);
+
+      switch (outcome.kind) {
+        case 'continue': {
+          try {
+            applyViewToSpan(spanEvent, view, rootSpan);
+          } catch (error) {
+            // `applyViewToSpan` only ever throws a `ScriptSignal`, which `outcomeForError` always
+            // turns into an `abort` outcome — the `if` just lets TypeScript see that.
+            const asOutcome = outcomeForError(error, rootSpan);
+            if (asOutcome.kind === 'abort') {
+              handleAbort(asOutcome, view, out, () =>
+                spanEvent.metadata.finalizers.finish('rejected'),
+              );
+            }
+            return;
+          }
+          continueCounter.increment();
+          out.push(spanEvent, DEFAULT_PORT);
+          const [, ...extra] = outcome.events;
+          for (const extraEvent of extra) {
+            extraEvent.metadata.finalizers.merge(spanEvent.metadata.finalizers.clone());
+            out.push(extraEvent, DEFAULT_PORT);
+          }
+          return;
+        }
+        case 'drop': {
+          dropCounter.increment();
+          if (options.reroute_dropped) {
+            out.push(spanEvent, DROPPED_PORT);
+          } else {
+            spanEvent.metadata.finalizers.finish('delivered');
+          }
+          return;
+        }
+        case 'abort':
+          handleAbort(outcome, view, out, () => spanEvent.metadata.finalizers.finish('rejected'));
+          return;
+      }
+    }
+
     return {
       start(context) {
         ctx = context;
@@ -390,14 +466,25 @@ export const scriptTransform = defineTransform<ScriptOptions>({
       },
       process(events: Event[], out: TransformOutput) {
         for (const event of events) {
-          if (options.metrics) {
-            if (isMetricEvent(event)) {
-              runMetric(event, out);
-              continue;
-            }
-          } else if (isLogEvent(event)) {
-            runLog(event, out);
-            continue;
+          switch (options.event_kind) {
+            case 'log':
+              if (isLogEvent(event)) {
+                runLog(event, out);
+                continue;
+              }
+              break;
+            case 'metric':
+              if (isMetricEvent(event)) {
+                runMetric(event, out);
+                continue;
+              }
+              break;
+            case 'span':
+              if (isSpanEvent(event)) {
+                runSpan(event, out);
+                continue;
+              }
+              break;
           }
           ctx.metrics.counter('script_passthrough_events_total', { kind: event.kind }).increment();
           out.push(event, DEFAULT_PORT);

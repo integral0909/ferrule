@@ -170,6 +170,43 @@ describe('prometheus_remote_write sink', () => {
     expect(byName('latency_count')!.samples[0]!.value).toBe(6);
   });
 
+  it('converts an exponentialHistogram to explicit buckets before expanding (lossy edge conversion)', async () => {
+    server = await startCapturingServer();
+    const options = prometheusRemoteWriteSinkOptions.parse({ url: server.url });
+    const sink = await prometheusRemoteWriteSink.build(options, testBuildContext().ctx);
+    const harness = createTestSinkContext();
+    const run = sink.run(harness.ctx);
+    await harness.feed([
+      new MetricEvent({
+        name: 'latency',
+        kind: 'absolute',
+        value: {
+          type: 'exponentialHistogram',
+          scale: 0, // base = 2
+          zeroCount: 0,
+          zeroThreshold: 0,
+          positive: { offset: 0, counts: [2, 3] },
+          negative: { offset: 0, counts: [] },
+          count: 5,
+          sum: 4.2,
+        },
+      }),
+    ]);
+    harness.close();
+    await run;
+
+    const byName = (name: string, le?: string) =>
+      received[0]!.find(
+        (s) => s.labels['__name__'] === name && (le === undefined || s.labels['le'] === le),
+      );
+    // base^(i+1) for i = 0, 1 -> 2, 4; cumulative counts 2, 5.
+    expect(byName('latency_bucket', '2')!.samples[0]!.value).toBe(2);
+    expect(byName('latency_bucket', '4')!.samples[0]!.value).toBe(5);
+    expect(byName('latency_bucket', '+Inf')!.samples[0]!.value).toBe(5);
+    expect(byName('latency_sum')!.samples[0]!.value).toBe(4.2);
+    expect(byName('latency_count')!.samples[0]!.value).toBe(5);
+  });
+
   it('expands a summary into per-quantile series plus _sum/_count', async () => {
     server = await startCapturingServer();
     const options = prometheusRemoteWriteSinkOptions.parse({ url: server.url });

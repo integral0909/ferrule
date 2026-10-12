@@ -147,6 +147,15 @@ function metricValueToValue(value: MetricEvent['value']): Value {
         }),
       );
       break;
+    case 'exponentialHistogram':
+      out.set('scale', BigInt(value.scale));
+      out.set('zero_count', BigInt(value.zeroCount));
+      out.set('zero_threshold', value.zeroThreshold);
+      out.set('positive', exponentialBucketsValue(value.positive));
+      out.set('negative', exponentialBucketsValue(value.negative));
+      out.set('count', BigInt(value.count));
+      out.set('sum', value.sum);
+      break;
     case 'summary':
       out.set('count', BigInt(value.count));
       out.set('sum', value.sum);
@@ -162,6 +171,16 @@ function metricValueToValue(value: MetricEvent['value']): Value {
       break;
   }
   return out;
+}
+
+function exponentialBucketsValue(buckets: { offset: number; counts: number[] }): ValueMap {
+  const m: ValueMap = new Map();
+  m.set('offset', BigInt(buckets.offset));
+  m.set(
+    'counts',
+    buckets.counts.map((c) => BigInt(c)),
+  );
+  return m;
 }
 
 function metricToValue(event: MetricEvent): Value {

@@ -96,6 +96,37 @@ describe('eventToValue: MetricEvent', () => {
     expect(asMap(buckets[0]!).get('count')).toBe(2);
   });
 
+  it('renders an exponentialHistogram with its scale, zero bucket, and sparse buckets', () => {
+    const event = new MetricEvent({
+      name: 'latency',
+      kind: 'absolute',
+      value: {
+        type: 'exponentialHistogram',
+        scale: 2,
+        zeroCount: 1,
+        zeroThreshold: 0.25,
+        positive: { offset: 0, counts: [2, 3] },
+        negative: { offset: -1, counts: [1] },
+        count: 7,
+        sum: 4.5,
+      },
+    });
+    const decoded = asMap(decode(event));
+    const value = asMap(decoded.get('value')!);
+    expect(value.get('type')).toBe('exponentialHistogram');
+    expect(value.get('scale')).toBe(2n);
+    expect(value.get('zeroCount')).toBe(1);
+    expect(value.get('zeroThreshold')).toBe(0.25);
+    expect(value.get('count')).toBe(7);
+    expect(value.get('sum')).toBe(4.5);
+    const positive = asMap(value.get('positive')!);
+    expect(positive.get('offset')).toBe(0n);
+    expect(positive.get('counts')).toEqual([2, 3]);
+    const negative = asMap(value.get('negative')!);
+    expect(negative.get('offset')).toBe(-1n);
+    expect(negative.get('counts')).toEqual([1]);
+  });
+
   it('renders a set metric as its member values', () => {
     const event = new MetricEvent({
       name: 'unique_visitors',

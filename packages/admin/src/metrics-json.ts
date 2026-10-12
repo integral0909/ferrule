@@ -17,6 +17,17 @@ function valueToJson(value: MetricValue): MetricValueJson {
         count: value.count,
         sum: value.sum,
       };
+    case 'exponentialHistogram':
+      return {
+        type: 'exponentialHistogram',
+        scale: value.scale,
+        zeroCount: value.zeroCount,
+        zeroThreshold: value.zeroThreshold,
+        positive: { offset: value.positive.offset, counts: [...value.positive.counts] },
+        negative: { offset: value.negative.offset, counts: [...value.negative.counts] },
+        count: value.count,
+        sum: value.sum,
+      };
     case 'summary':
       return {
         type: 'summary',

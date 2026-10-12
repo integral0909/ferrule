@@ -103,7 +103,27 @@ function metricValuesEqual(a: MetricEvent['value'], b: MetricEvent['value']): bo
         sameNumberOrBothNaN(a.sum, bs.sum)
       );
     }
+    case 'exponentialHistogram': {
+      const be = b as typeof a;
+      return (
+        sameExponentialBuckets(a.positive, be.positive) &&
+        sameExponentialBuckets(a.negative, be.negative) &&
+        sameNumberOrBothNaN(a.scale, be.scale) &&
+        sameNumberOrBothNaN(a.zeroCount, be.zeroCount) &&
+        sameNumberOrBothNaN(a.zeroThreshold, be.zeroThreshold) &&
+        sameNumberOrBothNaN(a.count, be.count) &&
+        sameNumberOrBothNaN(a.sum, be.sum)
+      );
+    }
   }
+}
+
+function sameExponentialBuckets(
+  a: { offset: number; counts: number[] },
+  b: { offset: number; counts: number[] },
+): boolean {
+  if (a.offset !== b.offset || a.counts.length !== b.counts.length) return false;
+  return a.counts.every((c, i) => sameNumberOrBothNaN(c, b.counts[i]));
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {

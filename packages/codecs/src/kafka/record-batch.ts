@@ -42,6 +42,11 @@ export interface EncodeRecordBatchOptions {
   readonly producerEpoch?: number;
   readonly baseSequence?: number;
   readonly isTransactional?: boolean;
+  /** Marks this as a broker-internal transaction marker batch (abort/commit) rather than
+   * application data — real brokers write these, producers never do; exposed here only so test
+   * fixtures (the fake group-coordinator broker's seeded log, see `consumer.test.ts`) can
+   * construct one to exercise the consumer's control-batch skip logic. Default `false`. */
+  readonly isControl?: boolean;
 }
 
 function encodeOneRecord(record: RecordInput, firstTimestamp: bigint, offsetDelta: number): Buffer {
@@ -90,6 +95,7 @@ export function encodeRecordBatch(
 
   let attributes = COMPRESSION_CODES[compression];
   if (options.isTransactional === true) attributes |= 0x10;
+  if (options.isControl === true) attributes |= 0x20;
 
   const afterCrc = new KafkaWriter();
   afterCrc.int16(attributes);

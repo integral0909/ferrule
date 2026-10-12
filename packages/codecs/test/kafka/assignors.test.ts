@@ -176,9 +176,9 @@ describe('cooperativeStickyAssignor: a member joins mid-stream (incremental revo
     // Simulate every member reporting round 1's actual result as their new ownedPartitions.
     const round2 = cooperativeStickyAssignor.assign(
       new Map([
-        ['a', sub(['events'], round1.get('a')!)],
-        ['b', sub(['events'], round1.get('b')!)],
-        ['c', sub(['events'], round1.get('c')!)],
+        ['a', sub(['events'], round1.get('a'))],
+        ['b', sub(['events'], round1.get('b'))],
+        ['c', sub(['events'], round1.get('c'))],
       ]),
       new Map([['events', 4]]),
     );

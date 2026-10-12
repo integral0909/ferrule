@@ -441,7 +441,7 @@ describe('exponentialHistogram add/subtract', () => {
       sum: 9,
     });
     const delta = subtractMetricValues(current, prev);
-    expect(delta.kind).toBe('delta');
+    if (delta.kind !== 'delta') throw new Error('expected a delta');
     const value = delta.value as ExponentialHistogram;
     expect(value.count).toBe(4);
     expect(value.sum).toBe(4);

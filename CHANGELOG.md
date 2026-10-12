@@ -17,7 +17,14 @@ All notable changes to this project are documented here. The format follows
   tracking and flow narrowing, closure compiler with an optimizer and per-event resource limits,
   inline tests, and a standard library of about 95 functions.
 - `@ferrule/codecs`: streaming framers, protobuf and OTLP (protobuf and JSON), syslog, logfmt,
-  CSV, Prometheus text, StatsD, and a typed pattern engine.
+  CSV, Prometheus text, StatsD, a typed pattern engine, and a hand-written Kafka wire protocol
+  client — binary primitives, RecordBatch v2 (CRC-32C verified, gzip), murmur2 partitioning, and
+  every request/response codec the producer (`@ferrule/sinks`) and a full consumer group client
+  share: `FindCoordinator`, `JoinGroup`/`SyncGroup` with range and cooperative-sticky assignors
+  (the latter's incremental revocation verified across two rebalance generations), `Heartbeat`,
+  `LeaveGroup`, `OffsetFetch`/`OffsetCommit`, and `Fetch` with control/aborted-batch handling
+  (GitHub #14). This is the protocol client only — a `@ferrule/sources` Kafka source that uses the
+  consumer is a separate, later piece of work (GitHub #15).
 - `@ferrule/buffer`: crash-safe segmented write-ahead disk buffer with fault-injection tests, and
   a compact binary event encoding.
 - `@ferrule/runtime`: bounded channels, topology validation, graceful shutdown, hot reload, live

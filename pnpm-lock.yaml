@@ -101,6 +101,9 @@ importers:
 
   packages/codecs:
     dependencies:
+      '@ferrule/buffer':
+        specifier: workspace:*
+        version: link:../buffer
       '@ferrule/core':
         specifier: workspace:*
         version: link:../core
@@ -172,9 +175,6 @@ importers:
 
   packages/sinks:
     dependencies:
-      '@ferrule/buffer':
-        specifier: workspace:*
-        version: link:../buffer
       '@ferrule/codecs':
         specifier: workspace:*
         version: link:../codecs

@@ -4,9 +4,11 @@
  * "non-flexible" API versions, and the "compact" (unsigned-varint-length-prefixed) string/array
  * encodings plus the empty tagged-fields terminator used by newer, "flexible" versions (KIP-482).
  *
- * The unsigned-LEB128 + zigzag varint scheme below is the same one `@ferrule/codecs` implements
- * internally for protobuf, but that module keeps it private (not part of its public exports), so
- * it is reimplemented here rather than reached into across the package boundary.
+ * The unsigned-LEB128 + zigzag varint scheme below is conceptually the same one `../varint.ts`
+ * implements for protobuf in this package, but Kafka's `KafkaWriter`/`KafkaReader` need their own
+ * small, Kafka-flavoured surface (`compactString`, `emptyTaggedFields`, classic vs. compact
+ * variants side by side, ...) rather than `../varint.ts`'s lower-level, protobuf-shaped API, so it
+ * is kept as its own self-contained implementation here instead of layered on top of it.
  */
 
 const CONTINUATION = 0x80;

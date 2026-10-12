@@ -301,40 +301,15 @@ rather than wrapping `pg`.
 A hand-written Kafka producer, built from the protocol's binary message grammar rather than
 wrapping `kafkajs`.
 
-- **`primitives.ts`** — `KafkaWriter`/`KafkaReader`: fixed-width integers, the classic
-  length-prefixed string/bytes/array encodings, and the "compact" (unsigned-varint-length-prefixed)
-  string/array encodings plus the empty tagged-fields terminator that KIP-482 "flexible" API
-  versions use. The unsigned-LEB128 + zigzag varint scheme is implemented directly here (the
-  same one `@ferrule/codecs` uses internally for protobuf, but that module does not export it).
-- **`record-batch.ts`** — `encodeRecordBatch`/`decodeRecordBatch`: RecordBatch v2 (magic byte
-  `2`), with every per-record field (timestamp/offset deltas, key/value/header lengths) zigzag
-  varint-encoded and the batch's CRC-32C (`@ferrule/buffer`'s `crc32c`, over everything from the
-  `attributes` field through the end of the — possibly gzip-compressed — records section) computed
-  and verified. `decodeRecordBatch` exists for the test suite's fake broker and property tests,
-  not the production send path.
-- **`murmur2.ts`** — `murmur2` reproduces `org.apache.kafka.common.utils.Utils.murmur2` bit-for-bit
-  (Kafka's specific seed `0x9747b28c`, `h = seed ^ length` initialisation, `Math.imul` for Java's
-  32-bit signed overflow semantics), so a keyed record lands on the same partition a Java producer
-  would pick for the same key. `murmur2Partition` is the classic default partitioner
-  (`toPositive(murmur2(key)) % numPartitions`); `RoundRobinPartitioner`/`StickyPartitioner` (KIP-480
-  — stays on one partition until `onBatchComplete`) handle unkeyed records.
-- **`protocol.ts`** — request/response encode/decode for `ApiVersions` (key 18, v0, classic
-  header/body — real brokers always accept it that way, for version discovery before either side
-  knows the other speaks flexible headers), `Metadata` (key 3, v9, flexible), `InitProducerId`
-  (key 22, v4, flexible — the idempotent producer's bootstrap call) and `Produce` (key 0, v9,
-  flexible — chosen so the compact string/array and tagged-fields primitives are genuinely
-  exercised on the wire, not just unit-tested), and `SaslHandshake`/`SaslAuthenticate` (keys 17/36,
-  v1, classic).
-- **`sasl.ts`** — SASL/PLAIN (RFC 4616) and SASL/SCRAM-SHA-256 (reusing `stream/scram.ts`,
-  configured with the real SASL username this time, unlike PostgreSQL's empty one), run over
-  `SaslHandshake` + one or two `SaslAuthenticate` round trips before the connection is used for
-  anything else.
-- **`connection.ts`** — `KafkaBrokerConnection`: `Int32`-length-prefixed request/response framing
-  and correlation-ID-based request pipelining (up to `max_in_flight_requests_per_connection`
-  requests may be outstanding at once; responses are matched back to their request by
-  `correlation_id`, not by arrival order, since Kafka does not guarantee in-order responses across
-  pipelined requests). `sendOneWay` exists specifically for `acks=0` Produce requests, which the
-  broker never answers at all.
+The wire protocol itself — binary primitives, RecordBatch v2 encode/decode, murmur2 partitioning,
+every request/response codec (including the full consumer group protocol: `FindCoordinator`,
+`JoinGroup`/`SyncGroup`, `Heartbeat`, `LeaveGroup`, `OffsetFetch`/`OffsetCommit`, `Fetch`),
+broker connections, and SASL — lives in `@ferrule/codecs`'s `src/kafka/` (see that package's own
+README), not here: it is reusable wire-format code, and a future `@ferrule/sources` Kafka source
+needs every bit of it without depending on `@ferrule/sinks`. That package also has the consumer
+group client (`KafkaConsumer`) issue #14 added; this sink does not use it (producing and consuming
+are independent concerns). Only the two pieces below are specific to _this_ sink:
+
 - **`producer.ts`** — `KafkaProducer`: one connection per broker node (opened lazily), a metadata
   cache (topic → partition → leader, refreshed from any bootstrap broker and invalidated on a
   stale-leader error), and `send()`, which assigns every record's partition (murmur2 for a keyed

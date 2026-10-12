@@ -30,6 +30,7 @@ pipeline can select one by a configuration string.
 - [Prometheus text exposition format](#prometheus-text-exposition-format)
 - [StatsD / DogStatsD](#statsd--dogstatsd)
 - [Pattern engine](#pattern-engine)
+- [Kafka wire protocol](#kafka-wire-protocol)
 - [Codec registry](#codec-registry)
 - [Known gaps](#known-gaps)
 
@@ -298,6 +299,79 @@ heuristic, not a proof: it catches the common case of chaining greedy fragments 
 sufficiently creative custom pattern can still be slow, so treat user-supplied patterns as you
 would any other regular expression from an untrusted source.
 
+## Kafka wire protocol
+
+`src/kafka/` is a hand-written Kafka client — not a `Decoder`/`Encoder` pair like the rest of this
+package (there is no byte frame to decode into events; it is its own request/response protocol
+over a persistent connection), so it is not part of `defaultCodecs` and is used directly by name.
+It started as `@ferrule/sinks`'s Kafka producer's support code and moved here so a future Kafka
+_source_ (a separate package, `@ferrule/sources`, that must not depend on `@ferrule/sinks`) can
+reuse it without duplication:
+
+- **`primitives.ts`** — `KafkaWriter`/`KafkaReader`: fixed-width integers, the classic
+  length-prefixed string/bytes/array encodings, and the "compact" (unsigned-varint-length-prefixed)
+  encodings plus the empty tagged-fields terminator KIP-482 "flexible" API versions use.
+- **`record-batch.ts`** — `encodeRecordBatch`/`decodeRecordBatch`: RecordBatch v2 (magic byte `2`),
+  CRC-32C verified (`@ferrule/buffer`'s `crc32c`), `none`/`gzip` compression, and the
+  transactional/control-batch attribute bits a consumer needs to skip control batches and (under
+  `read_committed`) filter aborted-transaction data.
+- **`murmur2.ts`** — the classic default partitioner (`murmur2Partition`) and the
+  sticky/round-robin strategies for unkeyed records, bit-for-bit compatible with the Java client.
+- **`protocol.ts`** — request/response codecs for `ApiVersions`, `Metadata`, `InitProducerId`,
+  `Produce`, `SaslHandshake`/`SaslAuthenticate`, and the consumer group APIs: `FindCoordinator`,
+  `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup`, `OffsetFetch`, `OffsetCommit`, and `Fetch`.
+- **`consumer-protocol.ts`** — `ConsumerProtocolSubscription`/`ConsumerProtocolAssignment`: the
+  separate, classic-primitives binary schema embedded in `JoinGroup`'s `metadata` and `SyncGroup`'s
+  `assignment` fields (opaque to the broker), including `ownedPartitions` (version 1), which the
+  cooperative-sticky assignor needs.
+- **`assignors.ts`** — `rangeAssignor` (Kafka's classic `RangeAssignor`) and
+  `cooperativeStickyAssignor` (KIP-429: sticky, and cooperative — a partition moving between
+  members is omitted from both for one generation, so the old owner revokes and rejoins before the
+  new owner receives it). Both are pure functions from subscriptions to assignments.
+- **`connection.ts`** — `KafkaBrokerConnection`: TCP (optionally TLS, via the small
+  `KafkaTlsOptions` shape — this package does not depend on `@ferrule/sinks`'s own TLS option
+  schema, even though the two are structurally compatible) and correlation-ID-based request
+  pipelining.
+- **`sasl.ts`** — SASL/PLAIN and SASL/SCRAM-SHA-256 (reusing this package's own `scram.ts`).
+- **`consumer.ts`** — `KafkaConsumer`: the full consumer group client built on everything above.
+
+```ts
+const consumer = new KafkaConsumer({
+  bootstrapBrokers: [{ host: 'localhost', port: 9092 }],
+  groupId: 'my-group',
+  topics: ['events'],
+  assignor: 'cooperative_sticky', // or 'range' (default)
+  onRebalance: ({ assigned, revoked }) => {
+    /* flush state for `revoked` before it's handed to another member */
+  },
+});
+
+for (;;) {
+  const batches = await consumer.poll(); // PartitionBatch[], one per partition with new records
+  for (const batch of batches) {
+    /* ...process batch.records... */
+  }
+  await consumer.commit(
+    batches.map((b) => ({
+      topic: b.topic,
+      partition: b.partition,
+      offset: b.records[b.records.length - 1]!.offset + 1n,
+    })),
+  );
+}
+
+await consumer.close(); // sends LeaveGroup so the group rebalances immediately
+```
+
+`KafkaConsumer` manages group membership itself: `FindCoordinator` → `JoinGroup` → (the elected
+leader runs the configured assignor) → `SyncGroup` → stable, heartbeats on a third of the session
+timeout by default, and rejoins on `REBALANCE_IN_PROGRESS` or a lost membership error. It takes its
+own minimal `KafkaConsumerClock` (`now()`/`sleep()`), not `@ferrule/runtime`'s `Clock` — this
+package must not depend on that higher layer — so a caller with a runtime `Clock` adapts it.
+
+Wiring this into an actual `@ferrule/sources` Kafka source (a `SourceDefinition`, its option
+schema, checkpointing) is separate, later work; this package provides the protocol client only.
+
 ## Codec registry
 
 A uniform interface so a source or sink can pick a codec by name instead of importing modules
@@ -364,3 +438,13 @@ with `new CodecRegistry()`) to extend the set by name.
   compiler's own static check, not a hard runtime guarantee for arbitrary custom patterns.
 - RFC 3164 has no encoder (the format has no registered structure to encode back into reliably);
   only RFC 5424 round-trips through this package.
+- **Kafka**: no KIP-394 two-phase join (a `JoinGroup` from a brand-new member always succeeds on
+  the first try rather than requiring `UNKNOWN_MEMBER_ID` once and a retry with the assigned
+  member ID — a lenient-broker-compatible simplification); no incremental Fetch sessions (every
+  `Fetch` restates its full topic-partition set); no `ListOffsets`, so a partition with no prior
+  committed offset always starts from `0` rather than honouring an `earliest`/`latest` auto-reset
+  policy against the log's actual bounds; no static membership (`group.instance.id`); the
+  cooperative-sticky assignor's balancing pass is a greedy repeated max/min swap, exact for the
+  common case of every member subscribing to the same topics, not Kafka's precise sticky
+  optimizer. Tested against an in-repo fake broker (`packages/codecs/test/kafka/support/`), not a
+  real Kafka cluster.

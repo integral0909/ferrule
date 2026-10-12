@@ -1,5 +1,6 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
+import { FerruleError } from '@ferrule/core';
 import { tailSamplingTransform } from '@ferrule/operators';
 import { buildTransform, sealedBatch, spanEvent } from './helpers.js';
 
@@ -67,6 +68,76 @@ describe('tail_sampling', () => {
       ],
     });
     const span = spanEvent({ traceId: 1, spanId: 1, attributes: { http: { status_code: 500 } } });
+    transform.process([span], harness.out);
+    await harness.clock.advance(100);
+    transform.tick!(harness.clock.now(), harness.out);
+    expect(harness.pushed).toHaveLength(1);
+  });
+
+  it('script policy samples a trace whose span matches the expression', async () => {
+    const { transform, harness } = await buildTransform(tailSamplingTransform, {
+      quiet_period: 100,
+      policies: [{ type: 'script', condition: '.attributes.http_status_code == 500' }],
+    });
+    const span = spanEvent({ traceId: 1, spanId: 1, attributes: { http_status_code: 500 } });
+    transform.process([span], harness.out);
+    await harness.clock.advance(100);
+    transform.tick!(harness.clock.now(), harness.out);
+    expect(harness.pushed).toHaveLength(1);
+  });
+
+  it('script policy with scope: root only evaluates the root span', async () => {
+    const { transform, harness } = await buildTransform(tailSamplingTransform, {
+      quiet_period: 100,
+      policies: [{ type: 'script', condition: '.name == "child"', scope: 'root' }],
+    });
+    const root = spanEvent({ traceId: 1, spanId: 1, name: 'root' });
+    const child = spanEvent({ traceId: 1, spanId: 2, parentSpanId: 1, name: 'child' });
+    const batch = sealedBatch([root, child]);
+    transform.process([root, child], harness.out);
+    await harness.clock.advance(100);
+    transform.tick!(harness.clock.now(), harness.out);
+    expect(harness.pushed).toHaveLength(0); // the root doesn't match; the child is out of scope
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
+  it('script policy without a matching span does not sample the trace', async () => {
+    const { transform, harness } = await buildTransform(tailSamplingTransform, {
+      quiet_period: 100,
+      policies: [{ type: 'script', condition: '.attributes.http_status_code == 500' }],
+    });
+    const span = spanEvent({ traceId: 1, spanId: 1, attributes: { http_status_code: 200 } });
+    const batch = sealedBatch([span]);
+    transform.process([span], harness.out);
+    await harness.clock.advance(100);
+    transform.tick!(harness.clock.now(), harness.out);
+    expect(harness.pushed).toHaveLength(0);
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
+  it('rejects a type error in a script policy condition as a build-time compile error', async () => {
+    await expect(
+      buildTransform(tailSamplingTransform, {
+        quiet_period: 100,
+        policies: [{ type: 'script', condition: '.name < 1' }], // .name is string, not int
+      }),
+    ).rejects.toBeInstanceOf(FerruleError);
+  });
+
+  it('script policy composes with the declarative policies via or', async () => {
+    const { transform, harness } = await buildTransform(tailSamplingTransform, {
+      quiet_period: 100,
+      policies: [
+        {
+          type: 'or',
+          policies: [
+            { type: 'status_error' },
+            { type: 'script', condition: '.attributes.slow == true' },
+          ],
+        },
+      ],
+    });
+    const span = spanEvent({ traceId: 1, spanId: 1, status: 'ok', attributes: { slow: true } });
     transform.process([span], harness.out);
     await harness.clock.advance(100);
     transform.tick!(harness.clock.now(), harness.out);

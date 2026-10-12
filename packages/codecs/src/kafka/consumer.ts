@@ -486,9 +486,18 @@ export class KafkaConsumer {
 
       const newAssignment =
         sync.assignment.length === 0 ? [] : decodeConsumerProtocolAssignment(sync.assignment).partitions;
-      await this.applyAssignment(newAssignment);
+      const revokedCount = await this.applyAssignment(newAssignment);
       this.stable = true;
       this.ensureHeartbeatLoop();
+      // The cooperative protocol defers a moving partition's hand-off across two generations
+      // (see assignors.ts): this generation revoked it from its old owner without yet giving it
+      // to the new one. A member that just revoked something must rejoin immediately, rather
+      // than wait for its next heartbeat, so the group converges to the next (hopefully final)
+      // generation without unnecessary delay — exactly what a real KIP-429 client does.
+      if (revokedCount > 0 && this.assignor === cooperativeStickyAssignor) {
+        this.stable = false;
+        continue;
+      }
       return;
     }
   }
@@ -528,8 +537,10 @@ export class KafkaConsumer {
   }
 
   /** Diffs `newAssignment` against this member's previous holdings, fires `onRebalance`, fetches
-   * committed offsets for newly-gained partitions, and drops tracked offset state for lost ones. */
-  private async applyAssignment(newAssignment: readonly TopicPartitions[]): Promise<void> {
+   * committed offsets for newly-gained partitions, and drops tracked offset state for lost ones.
+   * Returns how many partitions were revoked, so the cooperative protocol's caller (see
+   * `joinAndSync`) knows whether it must rejoin immediately to complete a deferred hand-off. */
+  private async applyAssignment(newAssignment: readonly TopicPartitions[]): Promise<number> {
     const previous = new Set(flatten(this.owned).map((tp) => topicPartitionKey(tp.topic, tp.partition)));
     const next = flatten(newAssignment);
     const nextKeys = new Set(next.map((tp) => topicPartitionKey(tp.topic, tp.partition)));
@@ -544,6 +555,7 @@ export class KafkaConsumer {
       await this.options.onRebalance?.({ assigned, revoked });
     }
     if (assigned.length > 0) await this.fetchCommittedOffsets(assigned);
+    return revoked.length;
   }
 
   private async fetchCommittedOffsets(partitions: readonly TopicPartition[]): Promise<void> {

@@ -1,8 +1,11 @@
 import { readFileSync } from 'node:fs';
-import { FerruleError, isLogEvent, type Event, type LogEvent } from '@ferrule/core';
+import { decodeEventBatch, encodeEventBatch } from '@ferrule/buffer';
+import { FerruleError, isLogEvent, type Event, type LogEvent, type ValueMap } from '@ferrule/core';
 import { s, type Infer } from '@ferrule/schema';
 import {
   defineTransform,
+  resolveWorkerEntry,
+  WorkerPool,
   DEFAULT_PORT,
   ERROR_PORT,
   Metrics,
@@ -15,6 +18,11 @@ import {
 import type { AbortCause, ResourceLimits, Type } from '@ferrule/script';
 import { compileScriptSource } from './util/scriptCompile.js';
 import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
+import type {
+  ScriptWorkerInit,
+  ScriptWorkerOutcome,
+  ScriptWorkerResponseMeta,
+} from './worker/script-worker-protocol.js';
 
 /**
  * `script` — runs a compiled Ferrule Script program over every log event. See
@@ -51,6 +59,16 @@ import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
  *   always declared; a component that never wires it simply has those events counted as
  *   discarded (the runtime finishes an unwired port's events `delivered` automatically — see
  *   `packages/runtime/README.md`'s transform output routing).
+ *
+ * **`workers: <n>`** runs the program across `n` `worker_threads` (`@ferrule/runtime`'s
+ * `WorkerPool`) instead of in-thread: each batch's log events are split into up to `n`
+ * contiguous chunks, run concurrently (`processAsync`, not `process` — see
+ * `packages/runtime/README.md`'s "Asynchronous transforms"), and reattached to the original
+ * events by position once every chunk comes back. See `packages/operators/README.md`'s "Worker
+ * pool (CPU-heavy `script`)" for the full design, including what differs from the in-thread path
+ * (`now()`'s clock, a per-chunk rather than per-event duration sample, and `errored` rather than
+ * routed-to-`errors`/`drop_on_*` handling for a chunk whose worker crashed twice). `workers: 0`
+ * (the default) is the original, unchanged in-thread behaviour.
  */
 
 const DROPPED_PORT = 'dropped';
@@ -108,6 +126,13 @@ export const scriptOptions = s
       .default(false)
       .describe('route drop()ped events to the `dropped` port instead of finishing them delivered'),
     limits: limitsOptions.default({}).describe('per-event resource limit overrides'),
+    workers: s
+      .integer({ min: 0 })
+      .default(0)
+      .describe(
+        'run the program across N worker_threads, splitting each batch across them; 0 (the ' +
+          'default) runs in-thread. See the "Worker pool" section of the operators README.',
+      ),
   })
   .refine(
     (o) => (o.source === undefined) !== (o.file === undefined),
@@ -203,70 +228,244 @@ export const scriptTransform = defineTransform<ScriptOptions>({
     let discardedAbortCounter!: Counter;
     let discardedErrorCounter!: Counter;
     let durationHistogram!: Histogram;
+    let chunkFailureCounter!: Counter;
 
-    return {
-      start(context) {
-        ctx = context;
-        continueCounter = ctx.metrics.counter('script_events_total', { outcome: 'continue' });
-        dropCounter = ctx.metrics.counter('script_events_total', { outcome: 'drop' });
-        abortCounter = ctx.metrics.counter('script_events_total', { outcome: 'abort' });
-        discardedAbortCounter = ctx.metrics.counter(Metrics.discardedEvents, {
-          reason: 'script_abort',
+    // --- Outcome application: shared between the in-thread path (process) and the worker-pool
+    // path (processAsync) below, so the finalizer/metric/port rules are defined exactly once.
+    // `original` always carries the real finalizers (and, for the worker path, is a different
+    // object than the one that actually ran the script — see `applyChunkResult`); `fields` is
+    // whatever the run actually produced for it, which may be `original.fields` itself
+    // (in-thread: the script mutates `original` directly, so this is a no-op) or freshly decoded
+    // (worker path: `original`'s own fields are replaced with what came back over the wire).
+
+    function applyContinue(
+      original: LogEvent,
+      fields: ValueMap,
+      extras: readonly LogEvent[],
+    ): (out: TransformOutput) => void {
+      return (out: TransformOutput) => {
+        continueCounter.increment();
+        original.fields = fields;
+        out.push(original, DEFAULT_PORT);
+        for (const extraEvent of extras) {
+          extraEvent.metadata.finalizers.merge(original.metadata.finalizers.clone());
+          out.push(extraEvent, DEFAULT_PORT);
+        }
+      };
+    }
+
+    function applyDrop(original: LogEvent): (out: TransformOutput) => void {
+      return (out: TransformOutput) => {
+        dropCounter.increment();
+        if (options.reroute_dropped) {
+          out.push(original, DROPPED_PORT);
+        } else {
+          original.metadata.finalizers.finish('delivered');
+        }
+      };
+    }
+
+    function applyAbort(
+      original: LogEvent,
+      fields: ValueMap,
+      reason: string,
+      span: { start: number; end: number },
+      cause: AbortCause,
+    ): (out: TransformOutput) => void {
+      return (out: TransformOutput) => {
+        abortCounter.increment();
+        original.fields = fields;
+        const internal = isInternalAbort(cause);
+        const shouldDrop = internal ? options.drop_on_error : options.drop_on_abort;
+        if (shouldDrop) {
+          (internal ? discardedErrorCounter : discardedAbortCounter).increment();
+          original.metadata.finalizers.finish('rejected');
+        } else {
+          attachAbortMetadata(original, ctx.id, reason, span);
+          out.push(original, ERROR_PORT);
+        }
+      };
+    }
+
+    // --- In-thread path (workers: 0, the default) -------------------------------------------
+
+    function runInThread(log: LogEvent, out: TransformOutput): void {
+      const startedAtMs = ctx.clock.monotonic();
+      const outcome = program.run(log, { limits, clock: () => ctx.clock.now() });
+      durationHistogram.record((ctx.clock.monotonic() - startedAtMs) / 1000);
+      switch (outcome.kind) {
+        case 'continue': {
+          const [first, ...extra] = outcome.events;
+          applyContinue(log, (first ?? log).fields, extra)(out);
+          break;
+        }
+        case 'drop':
+          applyDrop(log)(out);
+          break;
+        case 'abort':
+          applyAbort(log, log.fields, outcome.reason, outcome.span, outcome.cause)(out);
+          break;
+      }
+    }
+
+    // --- Worker-pool path (workers: N > 0) ----------------------------------------------------
+
+    let pool: WorkerPool<ScriptWorkerInit, undefined, ScriptWorkerResponseMeta> | undefined;
+    if (options.workers > 0) {
+      const url = resolveWorkerEntry(import.meta.url, 'worker/script-worker-entry.ts');
+      const init: ScriptWorkerInit = {
+        source: sourceText,
+        fileName,
+        inputSchema: options.input_schema,
+        limits,
+      };
+      pool = new WorkerPool<ScriptWorkerInit, undefined, ScriptWorkerResponseMeta>({
+        url,
+        workerCount: options.workers,
+        init,
+      });
+    }
+
+    /** Runs one chunk through the pool. Never throws: a failed submission (crash-then-crash,
+     *  the pool closing, or `ctx.signal` aborting while still queued) finishes the chunk's
+     *  events `errored` itself and returns `undefined`, since by that point nothing is known
+     *  about what, if anything, the chunk's events actually had done to them. */
+    async function runChunk(
+      chunk: readonly LogEvent[],
+    ): Promise<{ meta: ScriptWorkerResponseMeta; payload: Uint8Array } | undefined> {
+      try {
+        return await pool!.submit(
+          { meta: undefined, payload: encodeEventBatch(chunk) },
+          ctx.signal,
+        );
+      } catch (error) {
+        chunkFailureCounter.increment();
+        ctx.logger.warn('script worker chunk failed; finishing its events errored', {
+          error: error instanceof Error ? error.message : String(error),
+          chunkSize: chunk.length,
         });
-        discardedErrorCounter = ctx.metrics.counter(Metrics.discardedEvents, {
-          reason: 'script_error',
-        });
-        durationHistogram = ctx.metrics.histogram('script_run_duration_seconds');
-      },
-      process(events: Event[], out: TransformOutput) {
-        for (const event of events) {
-          if (!isLogEvent(event)) {
-            ctx.metrics
-              .counter('script_passthrough_events_total', { kind: event.kind })
-              .increment();
-            out.push(event, DEFAULT_PORT);
-            continue;
+        for (const event of chunk) event.metadata.finalizers.finish('errored');
+        return undefined;
+      }
+    }
+
+    function applyChunkResult(
+      chunk: readonly LogEvent[],
+      result: { meta: ScriptWorkerResponseMeta; payload: Uint8Array },
+      out: TransformOutput,
+    ): void {
+      const outputEvents = decodeEventBatch(result.payload) as LogEvent[];
+      let cursor = 0;
+      for (let i = 0; i < chunk.length; i++) {
+        const original = chunk[i]!;
+        const outcome: ScriptWorkerOutcome = result.meta.outcomes[i]!;
+        switch (outcome.kind) {
+          case 'continue': {
+            const primary = outputEvents[cursor++]!;
+            const extras: LogEvent[] = [];
+            for (let k = 0; k < outcome.extraCount; k++) extras.push(outputEvents[cursor++]!);
+            applyContinue(original, primary.fields, extras)(out);
+            break;
           }
-          const log = event;
-          const startedAtMs = ctx.clock.monotonic();
-          const outcome = program.run(log, { limits, clock: () => ctx.clock.now() });
-          durationHistogram.record((ctx.clock.monotonic() - startedAtMs) / 1000);
-
-          switch (outcome.kind) {
-            case 'continue': {
-              continueCounter.increment();
-              const [first, ...extra] = outcome.events;
-              out.push(first ?? log, DEFAULT_PORT);
-              for (const extraEvent of extra) {
-                extraEvent.metadata.finalizers.merge(log.metadata.finalizers.clone());
-                out.push(extraEvent, DEFAULT_PORT);
-              }
-              break;
-            }
-            case 'drop': {
-              dropCounter.increment();
-              if (options.reroute_dropped) {
-                out.push(log, DROPPED_PORT);
-              } else {
-                log.metadata.finalizers.finish('delivered');
-              }
-              break;
-            }
-            case 'abort': {
-              abortCounter.increment();
-              const internal = isInternalAbort(outcome.cause);
-              const shouldDrop = internal ? options.drop_on_error : options.drop_on_abort;
-              if (shouldDrop) {
-                (internal ? discardedErrorCounter : discardedAbortCounter).increment();
-                log.metadata.finalizers.finish('rejected');
-              } else {
-                attachAbortMetadata(log, ctx.id, outcome.reason, outcome.span);
-                out.push(log, ERROR_PORT);
-              }
-              break;
-            }
+          case 'drop':
+            applyDrop(original)(out);
+            break;
+          case 'abort': {
+            const primary = outputEvents[cursor++]!;
+            applyAbort(original, primary.fields, outcome.reason, outcome.span, outcome.cause)(out);
+            break;
           }
         }
+      }
+    }
+
+    /** Splits `logEvents` into up to `options.workers` contiguous chunks (never more chunks
+     *  than events, so a small batch doesn't dispatch empty work to idle workers). */
+    function chunkForWorkers(logEvents: readonly LogEvent[]): LogEvent[][] {
+      const chunkCount = Math.min(options.workers, logEvents.length);
+      const chunkSize = Math.ceil(logEvents.length / chunkCount);
+      const chunks: LogEvent[][] = [];
+      for (let i = 0; i < logEvents.length; i += chunkSize) {
+        chunks.push(logEvents.slice(i, i + chunkSize));
+      }
+      return chunks;
+    }
+
+    const start = (context: TransformContext): void => {
+      ctx = context;
+      continueCounter = ctx.metrics.counter('script_events_total', { outcome: 'continue' });
+      dropCounter = ctx.metrics.counter('script_events_total', { outcome: 'drop' });
+      abortCounter = ctx.metrics.counter('script_events_total', { outcome: 'abort' });
+      discardedAbortCounter = ctx.metrics.counter(Metrics.discardedEvents, {
+        reason: 'script_abort',
+      });
+      discardedErrorCounter = ctx.metrics.counter(Metrics.discardedEvents, {
+        reason: 'script_error',
+      });
+      durationHistogram = ctx.metrics.histogram('script_run_duration_seconds');
+      chunkFailureCounter = ctx.metrics.counter('script_worker_chunk_failures_total');
+    };
+
+    function passthrough(event: Event, out: TransformOutput): void {
+      ctx.metrics.counter('script_passthrough_events_total', { kind: event.kind }).increment();
+      out.push(event, DEFAULT_PORT);
+    }
+
+    if (options.workers === 0) {
+      return {
+        start,
+        process(events: Event[], out: TransformOutput) {
+          for (const event of events) {
+            if (!isLogEvent(event)) {
+              passthrough(event, out);
+              continue;
+            }
+            runInThread(event, out);
+          }
+        },
+      };
+    }
+
+    return {
+      start,
+      async processAsync(events: Event[], out: TransformOutput) {
+        const logEvents: LogEvent[] = [];
+        for (const event of events) {
+          if (!isLogEvent(event)) {
+            passthrough(event, out);
+            continue;
+          }
+          logEvents.push(event);
+        }
+        if (logEvents.length === 0) return;
+
+        const chunks = chunkForWorkers(logEvents);
+        const startedAtMs = ctx.clock.monotonic();
+        const results = await Promise.all(chunks.map((chunk) => runChunk(chunk)));
+        const elapsedSeconds = (ctx.clock.monotonic() - startedAtMs) / 1000;
+        // One aggregate sample per event, since chunks ran concurrently: this is not a per-event
+        // measurement the way the in-thread path's is, only a rough per-event share of the
+        // batch's wall time — see packages/operators/README.md's "Worker pool" section.
+        for (let i = 0; i < logEvents.length; i++) {
+          durationHistogram.record(elapsedSeconds / logEvents.length);
+        }
+
+        for (let i = 0; i < chunks.length; i++) {
+          const result = results[i];
+          if (result === undefined) continue; // already finished errored in runChunk
+          applyChunkResult(chunks[i]!, result, out);
+        }
+      },
+      // `Transform.flush` is typed to return `void`, but `pipeline.ts` actually awaits whatever
+      // it returns (`rc.mutex.run<T>(fn: () => T | Promise<T>)`) before considering the
+      // transform stopped — the same way `tick`/`process` are allowed to be synchronous-looking
+      // but secretly async elsewhere in this codebase. Closing the pool here, not in
+      // `processAsync` itself, means it only happens once, when this transform instance's own
+      // run loop ends (shutdown, or being retired by a reload) — see `component.ts`'s "Called
+      // once when the transform stops" and `pipeline.ts`'s `runTransform`.
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises -- verified above: pipeline.ts awaits this
+      async flush() {
+        await pool?.close();
       },
     };
   },

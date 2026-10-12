@@ -282,6 +282,12 @@ export const DIAGNOSTIC_CATALOG: readonly DiagnosticCatalogEntry[] = [
     'A literal pattern is repeated in the same `match`.',
   ),
   entry(
+    'E311',
+    'error',
+    'assignment to read-only field',
+    'A path write targets a field a validated schema (e.g. the metric view) marks read-only.',
+  ),
+  entry(
     'E401',
     'error',
     'unhandled fallible expression',

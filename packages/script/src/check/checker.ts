@@ -29,6 +29,7 @@ import type {
   NullLiteral,
   ObjectLiteral,
   ObjectPattern,
+  PathExpr,
   Pattern,
   Program,
   Statement,
@@ -73,6 +74,8 @@ export function check(program: Program, options: CheckOptions = {}): CheckResult
   const checker = new Checker(
     options.registry ?? createDefaultRegistry(),
     options.inputSchema ?? anyType,
+    options.validateWrites ?? false,
+    options.readonlyPaths ?? EMPTY_READONLY_PATHS,
   );
   checker.run(program);
   const types = checker.types;
@@ -90,6 +93,8 @@ interface Narrowing {
   readonly type: Type;
 }
 
+const EMPTY_READONLY_PATHS: ReadonlyMap<string, string> = new Map();
+
 class Checker {
   readonly diagnostics: Diagnostic[] = [];
   readonly types = new Map<Expr, ExprType>();
@@ -101,6 +106,8 @@ class Checker {
   constructor(
     private readonly registry: FunctionRegistry,
     private readonly inputSchema: Type,
+    private readonly validateWrites: boolean = false,
+    private readonly readonlyPaths: ReadonlyMap<string, string> = EMPTY_READONLY_PATHS,
   ) {}
 
   run(program: Program): void {
@@ -241,7 +248,11 @@ class Checker {
   private checkAssignTarget(target: Expr, scope: Scope, valueType: Type): void {
     switch (target.kind) {
       case 'path':
-        return; // paths are `any`-typed and always writable
+        // Default: paths are `any`-typed and always writable (design.md §3's known limitation
+        // that writes aren't checked against `inputSchema`). A caller that opted into
+        // `validateWrites` (the metric view) gets real validation instead.
+        if (this.validateWrites) this.checkPathAssignTarget(target, valueType);
+        return;
       case 'identifier': {
         const binding = scope.lookup(target.name);
         if (binding === undefined) {
@@ -275,6 +286,35 @@ class Checker {
         return;
       default:
         return; // parser already reported E108 for anything else
+    }
+  }
+
+  /**
+   * Validates a path write against `inputSchema` when `validateWrites` is set (see
+   * {@link CheckOptions.validateWrites}): a top-level field in `readonlyPaths` is never
+   * assignable, and otherwise the assigned value must be a subtype of the path's schema-declared
+   * type (an open `rest`/`any` along the way stays permissive, same as a read).
+   */
+  private checkPathAssignTarget(target: PathExpr, valueType: Type): void {
+    const first = target.segments[0];
+    if (target.segments.length === 1 && typeof first === 'string') {
+      const message = this.readonlyPaths.get(first);
+      if (message !== undefined) {
+        this.error('E311', message, target.span);
+        return;
+      }
+    }
+    const resolved = resolveWritePathType(this.inputSchema, target.segments);
+    if (resolved.error !== undefined) {
+      this.error('E302', resolved.error, target.span);
+      return;
+    }
+    if (resolved.type.kind !== 'any' && !isSubtype(valueType, resolved.type)) {
+      this.error(
+        'E301',
+        `cannot assign a value of type \`${formatType(valueType)}\` to a field of type \`${formatType(resolved.type)}\``,
+        target.span,
+      );
     }
   }
 
@@ -1060,6 +1100,54 @@ function pathType(schema: Type, segments: readonly (string | number)[]): Type {
     current = current.element;
   }
   return current;
+}
+
+interface WritePathResolution {
+  readonly type: Type;
+  readonly error?: undefined;
+}
+
+interface WritePathError {
+  readonly type?: undefined;
+  readonly error: string;
+}
+
+/**
+ * Like {@link pathType}, but for a write target under `validateWrites`: walking into a concrete,
+ * non-object/array shape, or past a closed object's known fields with no `rest`, is a hard error
+ * (a precise "no such field" message) instead of silently typing the write `null`/`any` — a schema
+ * that is meant to validate writes has to say when a write target doesn't exist at all.
+ */
+function resolveWritePathType(
+  schema: Type,
+  segments: readonly (string | number)[],
+): WritePathResolution | WritePathError {
+  let current = schema;
+  for (const segment of segments) {
+    if (current.kind === 'any') return { type: anyType };
+    if (typeof segment === 'string') {
+      if (current.kind !== 'object') {
+        return { error: `cannot assign through a field of type \`${formatType(current)}\`` };
+      }
+      const field = current.fields.get(segment);
+      if (field !== undefined) {
+        current = field;
+        continue;
+      }
+      if (current.rest !== undefined) {
+        current = current.rest;
+        continue;
+      }
+      const suggestion = didYouMean(segment, [...current.fields.keys()]);
+      const hint = suggestion === undefined ? '' : ` (did you mean '.${suggestion}'?)`;
+      return { error: `type \`${formatType(current)}\` has no field '${segment}'${hint}` };
+    }
+    if (current.kind !== 'array') {
+      return { error: `cannot index into type \`${formatType(current)}\` with \`[]\`` };
+    }
+    current = current.element;
+  }
+  return { type: current };
 }
 
 function typeIncludesNull(type: Type): boolean {

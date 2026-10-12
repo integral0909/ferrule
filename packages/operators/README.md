@@ -7,7 +7,8 @@ trace tail sampling, event-kind splitting, and metric tag helpers — configured
 plain, typed options.
 
 Node.js standard library only — no runtime dependencies beyond `@ferrule/core`, `@ferrule/schema`,
-`@ferrule/runtime`, and `@ferrule/script`.
+`@ferrule/runtime`, `@ferrule/script`, and `@ferrule/buffer` (the last only for `script`'s
+`workers: <n>` option, to encode/decode events crossing a worker thread boundary).
 
 ```ts
 import { builtinOperators } from '@ferrule/operators';
@@ -94,6 +95,7 @@ so a syntax or type error is reported immediately with the same rendered code fr
 | `drop_on_error`   | boolean                       | `false` | resource-limit/internal-error abort: drop+count vs. route to `errors`                                                           |
 | `reroute_dropped` | boolean                       | `false` | route `drop()`ped events to the `dropped` port instead of finishing them                                                        |
 | `limits`          | object                        | `{}`    | per-event resource limit overrides (`max_string_length`, `max_collection_size`, `max_regex_input_length`, `max_emitted_events`) |
+| `workers`         | integer ≥ 0                   | `0`     | run the program across `N` `worker_threads`; `0` runs in-thread — see "Worker pool" below                                       |
 
 `input_schema` is a **flat** field → type-name map (`null`/`bool`/`int`/`float`/`string`/`bytes`/
 `timestamp`/`array`/`object`/`any`), converted to a Ferrule object type (`objectType(fields,
@@ -137,6 +139,69 @@ transforms:
     type: console # or any sink
     inputs: [shape.errors]
 ```
+
+### Worker pool (CPU-heavy `script`)
+
+`workers: <n>` (`n > 0`) runs the program across `n` `worker_threads`, via `@ferrule/runtime`'s
+`WorkerPool`, instead of in the pipeline's own event loop — see `docs/architecture.md` §4.3 and
+`packages/runtime/README.md`'s "Worker pool" for the pool itself. This makes `script` a
+`processAsync` transform, not a `process` one (see `packages/runtime/README.md`'s "Asynchronous
+transforms"); `workers: 0` (the default) is the original `process`-based, in-thread transform,
+unchanged.
+
+**Compiling in each worker, not shipping the compiled program.** A compiled program is a tree of
+JavaScript closures, which cannot cross a `worker_threads` boundary — not even approximately, the
+way the binary event codec lets an `Event` cross one. Each worker instead gets the program's
+_source text_ once, as `workerData`, and compiles its own copy at startup; the main thread already
+compiled (and type-checked) the same source at build time, so this is a one-time cost per
+long-lived worker, never a per-batch one, and a compile failure here would only mean
+`@ferrule/script` behaved non-deterministically between the two compiles — a bug, not a data
+problem, so it is allowed to crash the worker rather than being reported as an `Outcome`.
+
+**Splitting a batch, not overlapping batches.** The runtime still hands `processAsync` one batch
+at a time — the asynchronous contract doesn't change that (see "Asynchronous transforms" above);
+parallelism instead comes from splitting one batch's log events into up to `n` contiguous chunks
+and running them through the pool concurrently. Metric/span events (which never go through the
+program at all, worker or not) are handled directly, without chunking.
+
+**What crosses the wire, and what stays on the main thread.** Each chunk's events are encoded
+with `@ferrule/buffer`'s codec and sent as the pool request's `payload` — no structured cloning of
+event graphs. A worker's response pairs a flat, codec-encoded sequence of output events with one
+outcome per original event (`continue`'s `extraCount`, or `abort`'s `reason`/`span`/`cause` — see
+`packages/operators/src/worker/script-worker-protocol.ts`), which is enough for the main thread to
+walk both in lockstep and reconstruct exactly what the in-thread path would have produced. The
+_original_ event objects — and so their finalizers, which the codec deliberately never carries
+(see `packages/buffer/FORMAT.md` §1.3) — never leave the main thread: a worker's result only ever
+replaces an original event's `fields`, the same object (and the same finalizers) the batch arrived
+with keeps flowing onward. This is also what makes `abort`'s `ferrule.error.*` metadata land on an
+event with working finalizers either way.
+
+**A crashed chunk's events finish `errored`.** `WorkerPool` already retries a crashed request once
+on a fresh worker (see its own README section); if that retry also fails — or `submit` otherwise
+rejects, including `ctx.signal` aborting while a chunk is still queued — `script` finishes that
+chunk's events `errored` directly, the same way the runtime force-finalizes events still sitting
+in a channel past the shutdown deadline, rather than routing them through `drop_on_abort`/
+`drop_on_error`/the `errors` port: nothing is actually known about what, if anything, happened to
+them.
+
+**Known differences from the in-thread path**, both deliberate trade-offs for not threading
+per-event state across the worker boundary:
+
+- `now()` reads the real wall clock (`Timestamp.now()`) in a worker, not `ctx.clock` — a
+  `ManualClock` reading isn't worth propagating across the thread boundary for CPU-bound work, so
+  a program whose result depends on `now()` can observe a different (but still real) moment per
+  chunk than the in-thread path would have, and chunks of the same batch can observe different
+  moments from each other.
+- `script_run_duration_seconds` records one sample per event equal to the _chunk's_ wall-clock
+  time divided by its event count, not each event's own run time — chunks run concurrently, so
+  there is no meaningful single "start" and "end" per event the way the in-thread path has.
+
+A property test (`packages/operators/test/script-workers.test.ts`) checks a corpus of
+representative programs against randomly generated input events, asserting the worker-pool path
+(`workers: 3`) produces byte-identical output to the in-thread path (`workers: 0`) — port, fields,
+and finalizer-visible outcome all included. `packages/script/bench/worker-pool-throughput.ts`
+benchmarks the underlying mechanism (`@ferrule/script`'s `compile`/`run` across real
+`worker_threads`) and shows throughput scaling with worker count on a CPU-bound program.
 
 ## `filter`
 

@@ -29,5 +29,4 @@ Planned work, roughly in priority order:
 - **Kafka source** (consumer groups, offset commits driven by acknowledgements).
 - **Exponential histograms end to end.** Decoding is supported; encoding always produces
   explicit-bucket histograms.
-- **More compression codecs** for Kafka and HTTP (lz4, zstd).
 - **Idempotent Kafka producer** to avoid duplicates on partial batch retries.

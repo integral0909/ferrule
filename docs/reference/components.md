@@ -992,41 +992,41 @@ Inserts events into ClickHouse via its HTTP interface (JSONEachRow).
 
 **Options:**
 
-| Option                   | Type                   | Default    | Required | Secret | Description                                                            | Constraints                |
-| ------------------------ | ---------------------- | ---------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
-| `tls`                    | object                 |            | no       |        | TLS options for this connection.                                       |                            |
-| `tls.enabled`            | boolean                |            | no       |        |                                                                        |                            |
-| `tls.ca_file`            | string                 |            | no       |        |                                                                        |                            |
-| `tls.cert_file`          | string                 |            | no       |        |                                                                        |                            |
-| `tls.key_file`           | string                 |            | no       |        |                                                                        |                            |
-| `tls.verify_certificate` | boolean                | `true`     | no       |        |                                                                        |                            |
-| `tls.server_name`        | string                 |            | no       |        |                                                                        |                            |
-| `proxy`                  | object                 |            | no       |        | Outgoing proxy configuration.                                          |                            |
-| `proxy.use_env`          | boolean                | `true`     | no       |        |                                                                        |                            |
-| `proxy.url`              | url                    |            | no       |        |                                                                        | protocols=["http","https"] |
-| `timeout`                | duration               | `30000`    | no       |        | Per-request timeout.                                                   | minMs=1                    |
-| `max_response_size`      | byte_size              | `10485760` | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
-| `compression`            | enum("none", "gzip")   | `"none"`   | no       |        | Compresses the request body before sending.                            |                            |
-| `headers`                | record<string, string> |            | no       |        | Extra static headers sent with every request.                          |                            |
-| `max_sockets`            | integer                | `16`       | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
-| `auth`                   | tagged_union           |            | no       |        | Authenticates outgoing requests.                                       |                            |
-| `url`                    | url                    |            | yes      |        |                                                                        | protocols=["http","https"] |
-| `database`               | string                 |            | yes      |        |                                                                        | minLength=1                |
-| `table`                  | string                 |            | yes      |        |                                                                        | minLength=1                |
-| `columns`                | object[]               |            | no       |        |                                                                        |                            |
-| `columns[].field`        | field_path             |            | yes      |        |                                                                        |                            |
-| `columns[].column`       | string                 |            | yes      |        |                                                                        | minLength=1                |
-| `settings`               | record<string, string> |            | no       |        |                                                                        |                            |
-| `batch`                  | object                 |            | no       |        | Groups events into batches before delivering them.                     |                            |
-| `batch.max_events`       | integer                |            | no       |        |                                                                        | min=1                      |
-| `batch.max_size`         | byte_size              |            | no       |        |                                                                        |                            |
-| `batch.timeout`          | duration               | `1000`     | no       |        |                                                                        | minMs=1                    |
-| `retry`                  | object                 |            | no       |        | Retry behaviour for transient delivery failures.                       |                            |
-| `retry.initial_backoff`  | duration               | `100`      | no       |        |                                                                        | minMs=1                    |
-| `retry.max_backoff`      | duration               | `30000`    | no       |        |                                                                        | minMs=1                    |
-| `retry.max_attempts`     | integer                |            | no       |        |                                                                        | min=1                      |
-| `retry.max_duration`     | duration               |            | no       |        |                                                                        | minMs=1                    |
-| `concurrency`            | integer                | `4`        | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
+| Option                   | Type                         | Default    | Required | Secret | Description                                                            | Constraints                |
+| ------------------------ | ---------------------------- | ---------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
+| `tls`                    | object                       |            | no       |        | TLS options for this connection.                                       |                            |
+| `tls.enabled`            | boolean                      |            | no       |        |                                                                        |                            |
+| `tls.ca_file`            | string                       |            | no       |        |                                                                        |                            |
+| `tls.cert_file`          | string                       |            | no       |        |                                                                        |                            |
+| `tls.key_file`           | string                       |            | no       |        |                                                                        |                            |
+| `tls.verify_certificate` | boolean                      | `true`     | no       |        |                                                                        |                            |
+| `tls.server_name`        | string                       |            | no       |        |                                                                        |                            |
+| `proxy`                  | object                       |            | no       |        | Outgoing proxy configuration.                                          |                            |
+| `proxy.use_env`          | boolean                      | `true`     | no       |        |                                                                        |                            |
+| `proxy.url`              | url                          |            | no       |        |                                                                        | protocols=["http","https"] |
+| `timeout`                | duration                     | `30000`    | no       |        | Per-request timeout.                                                   | minMs=1                    |
+| `max_response_size`      | byte_size                    | `10485760` | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
+| `compression`            | enum("none", "gzip", "zstd") | `"none"`   | no       |        | Compresses the request body before sending.                            |                            |
+| `headers`                | record<string, string>       |            | no       |        | Extra static headers sent with every request.                          |                            |
+| `max_sockets`            | integer                      | `16`       | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
+| `auth`                   | tagged_union                 |            | no       |        | Authenticates outgoing requests.                                       |                            |
+| `url`                    | url                          |            | yes      |        |                                                                        | protocols=["http","https"] |
+| `database`               | string                       |            | yes      |        |                                                                        | minLength=1                |
+| `table`                  | string                       |            | yes      |        |                                                                        | minLength=1                |
+| `columns`                | object[]                     |            | no       |        |                                                                        |                            |
+| `columns[].field`        | field_path                   |            | yes      |        |                                                                        |                            |
+| `columns[].column`       | string                       |            | yes      |        |                                                                        | minLength=1                |
+| `settings`               | record<string, string>       |            | no       |        |                                                                        |                            |
+| `batch`                  | object                       |            | no       |        | Groups events into batches before delivering them.                     |                            |
+| `batch.max_events`       | integer                      |            | no       |        |                                                                        | min=1                      |
+| `batch.max_size`         | byte_size                    |            | no       |        |                                                                        |                            |
+| `batch.timeout`          | duration                     | `1000`     | no       |        |                                                                        | minMs=1                    |
+| `retry`                  | object                       |            | no       |        | Retry behaviour for transient delivery failures.                       |                            |
+| `retry.initial_backoff`  | duration                     | `100`      | no       |        |                                                                        | minMs=1                    |
+| `retry.max_backoff`      | duration                     | `30000`    | no       |        |                                                                        | minMs=1                    |
+| `retry.max_attempts`     | integer                      |            | no       |        |                                                                        | min=1                      |
+| `retry.max_duration`     | duration                     |            | no       |        |                                                                        | minMs=1                    |
+| `concurrency`            | integer                      | `4`        | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
 
 **Examples:**
 
@@ -1081,39 +1081,39 @@ Writes events to Elasticsearch via the bulk API, one status per event.
 
 **Options:**
 
-| Option                   | Type                    | Default    | Required | Secret | Description                                                            | Constraints                |
-| ------------------------ | ----------------------- | ---------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
-| `tls`                    | object                  |            | no       |        | TLS options for this connection.                                       |                            |
-| `tls.enabled`            | boolean                 |            | no       |        |                                                                        |                            |
-| `tls.ca_file`            | string                  |            | no       |        |                                                                        |                            |
-| `tls.cert_file`          | string                  |            | no       |        |                                                                        |                            |
-| `tls.key_file`           | string                  |            | no       |        |                                                                        |                            |
-| `tls.verify_certificate` | boolean                 | `true`     | no       |        |                                                                        |                            |
-| `tls.server_name`        | string                  |            | no       |        |                                                                        |                            |
-| `proxy`                  | object                  |            | no       |        | Outgoing proxy configuration.                                          |                            |
-| `proxy.use_env`          | boolean                 | `true`     | no       |        |                                                                        |                            |
-| `proxy.url`              | url                     |            | no       |        |                                                                        | protocols=["http","https"] |
-| `timeout`                | duration                | `30000`    | no       |        | Per-request timeout.                                                   | minMs=1                    |
-| `max_response_size`      | byte_size               | `10485760` | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
-| `compression`            | enum("none", "gzip")    | `"none"`   | no       |        | Compresses the request body before sending.                            |                            |
-| `headers`                | record<string, string>  |            | no       |        | Extra static headers sent with every request.                          |                            |
-| `max_sockets`            | integer                 | `16`       | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
-| `auth`                   | tagged_union            |            | no       |        | Authenticates outgoing requests.                                       |                            |
-| `url`                    | url                     |            | yes      |        |                                                                        | protocols=["http","https"] |
-| `index`                  | string                  |            | yes      |        |                                                                        | minLength=1                |
-| `id_field`               | field_path              |            | no       |        |                                                                        |                            |
-| `action`                 | enum("index", "create") | `"index"`  | no       |        |                                                                        |                            |
-| `data_stream`            | boolean                 | `false`    | no       |        |                                                                        |                            |
-| `batch`                  | object                  |            | no       |        | Groups events into batches before delivering them.                     |                            |
-| `batch.max_events`       | integer                 |            | no       |        |                                                                        | min=1                      |
-| `batch.max_size`         | byte_size               |            | no       |        |                                                                        |                            |
-| `batch.timeout`          | duration                | `1000`     | no       |        |                                                                        | minMs=1                    |
-| `retry`                  | object                  |            | no       |        | Retry behaviour for transient delivery failures.                       |                            |
-| `retry.initial_backoff`  | duration                | `100`      | no       |        |                                                                        | minMs=1                    |
-| `retry.max_backoff`      | duration                | `30000`    | no       |        |                                                                        | minMs=1                    |
-| `retry.max_attempts`     | integer                 |            | no       |        |                                                                        | min=1                      |
-| `retry.max_duration`     | duration                |            | no       |        |                                                                        | minMs=1                    |
-| `concurrency`            | integer                 | `4`        | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
+| Option                   | Type                         | Default    | Required | Secret | Description                                                            | Constraints                |
+| ------------------------ | ---------------------------- | ---------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
+| `tls`                    | object                       |            | no       |        | TLS options for this connection.                                       |                            |
+| `tls.enabled`            | boolean                      |            | no       |        |                                                                        |                            |
+| `tls.ca_file`            | string                       |            | no       |        |                                                                        |                            |
+| `tls.cert_file`          | string                       |            | no       |        |                                                                        |                            |
+| `tls.key_file`           | string                       |            | no       |        |                                                                        |                            |
+| `tls.verify_certificate` | boolean                      | `true`     | no       |        |                                                                        |                            |
+| `tls.server_name`        | string                       |            | no       |        |                                                                        |                            |
+| `proxy`                  | object                       |            | no       |        | Outgoing proxy configuration.                                          |                            |
+| `proxy.use_env`          | boolean                      | `true`     | no       |        |                                                                        |                            |
+| `proxy.url`              | url                          |            | no       |        |                                                                        | protocols=["http","https"] |
+| `timeout`                | duration                     | `30000`    | no       |        | Per-request timeout.                                                   | minMs=1                    |
+| `max_response_size`      | byte_size                    | `10485760` | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
+| `compression`            | enum("none", "gzip", "zstd") | `"none"`   | no       |        | Compresses the request body before sending.                            |                            |
+| `headers`                | record<string, string>       |            | no       |        | Extra static headers sent with every request.                          |                            |
+| `max_sockets`            | integer                      | `16`       | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
+| `auth`                   | tagged_union                 |            | no       |        | Authenticates outgoing requests.                                       |                            |
+| `url`                    | url                          |            | yes      |        |                                                                        | protocols=["http","https"] |
+| `index`                  | string                       |            | yes      |        |                                                                        | minLength=1                |
+| `id_field`               | field_path                   |            | no       |        |                                                                        |                            |
+| `action`                 | enum("index", "create")      | `"index"`  | no       |        |                                                                        |                            |
+| `data_stream`            | boolean                      | `false`    | no       |        |                                                                        |                            |
+| `batch`                  | object                       |            | no       |        | Groups events into batches before delivering them.                     |                            |
+| `batch.max_events`       | integer                      |            | no       |        |                                                                        | min=1                      |
+| `batch.max_size`         | byte_size                    |            | no       |        |                                                                        |                            |
+| `batch.timeout`          | duration                     | `1000`     | no       |        |                                                                        | minMs=1                    |
+| `retry`                  | object                       |            | no       |        | Retry behaviour for transient delivery failures.                       |                            |
+| `retry.initial_backoff`  | duration                     | `100`      | no       |        |                                                                        | minMs=1                    |
+| `retry.max_backoff`      | duration                     | `30000`    | no       |        |                                                                        | minMs=1                    |
+| `retry.max_attempts`     | integer                      |            | no       |        |                                                                        | min=1                      |
+| `retry.max_duration`     | duration                     |            | no       |        |                                                                        | minMs=1                    |
+| `concurrency`            | integer                      | `4`        | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
 
 **Examples:**
 
@@ -1181,7 +1181,7 @@ Delivers batches of events to an HTTP(S) endpoint.
 | `proxy.url`              | url                                           |                      | no       |        |                                                                                       | protocols=["http","https"] |
 | `timeout`                | duration                                      | `30000`              | no       |        | Per-request timeout.                                                                  | minMs=1                    |
 | `max_response_size`      | byte_size                                     | `10485760`           | no       |        | Maximum bytes read from a response body before the request is aborted.                |                            |
-| `compression`            | enum("none", "gzip")                          | `"none"`             | no       |        | Compresses the request body before sending.                                           |                            |
+| `compression`            | enum("none", "gzip", "zstd")                  | `"none"`             | no       |        | Compresses the request body before sending.                                           |                            |
 | `headers`                | record<string, string>                        |                      | no       |        | Extra static headers sent with every request.                                         |                            |
 | `max_sockets`            | integer                                       | `16`                 | no       |        | Maximum sockets kept alive per host.                                                  | min=1                      |
 | `auth`                   | tagged_union                                  |                      | no       |        | Authenticates outgoing requests.                                                      |                            |
@@ -1222,42 +1222,42 @@ Produces events to Kafka via a hand-written protocol client (RecordBatch v2, mur
 
 **Options:**
 
-| Option                                  | Type                           | Default            | Required | Secret | Description                                                                           | Constraints |
-| --------------------------------------- | ------------------------------ | ------------------ | -------- | ------ | ------------------------------------------------------------------------------------- | ----------- |
-| `brokers`                               | socket_address[]               |                    | yes      |        |                                                                                       | minItems=1  |
-| `client_id`                             | string                         | `"ferrule"`        | no       |        |                                                                                       |             |
-| `tls`                                   | object                         |                    | no       |        | TLS options for this connection.                                                      |             |
-| `tls.enabled`                           | boolean                        |                    | no       |        |                                                                                       |             |
-| `tls.ca_file`                           | string                         |                    | no       |        |                                                                                       |             |
-| `tls.cert_file`                         | string                         |                    | no       |        |                                                                                       |             |
-| `tls.key_file`                          | string                         |                    | no       |        |                                                                                       |             |
-| `tls.verify_certificate`                | boolean                        | `true`             | no       |        |                                                                                       |             |
-| `tls.server_name`                       | string                         |                    | no       |        |                                                                                       |             |
-| `sasl`                                  | object                         |                    | no       |        |                                                                                       |             |
-| `sasl.mechanism`                        | enum("PLAIN", "SCRAM-SHA-256") |                    | yes      |        |                                                                                       |             |
-| `sasl.username`                         | string                         |                    | yes      |        |                                                                                       |             |
-| `sasl.password`                         | string                         |                    | yes      | yes    |                                                                                       |             |
-| `topic`                                 | string                         |                    | yes      |        |                                                                                       | minLength=1 |
-| `key`                                   | string                         |                    | no       |        |                                                                                       |             |
-| `headers`                               | record<string, string>         |                    | no       |        |                                                                                       |             |
-| `encoding`                              | object                         | `{"codec":"json"}` | no       |        | Encoder configuration. Extra keys are passed through to the codec as its own options. |             |
-| `encoding.codec`                        | string                         | `"json"`           | no       |        | Codec used to serialise each event.                                                   |             |
-| `acks`                                  | enum("0", "1", "-1")           | `"-1"`             | no       |        |                                                                                       |             |
-| `compression`                           | enum("none", "gzip")           | `"none"`           | no       |        |                                                                                       |             |
-| `partitioner`                           | enum("round_robin", "sticky")  | `"sticky"`         | no       |        |                                                                                       |             |
-| `connect_timeout`                       | duration                       | `10000`            | no       |        |                                                                                       |             |
-| `request_timeout`                       | duration                       | `30000`            | no       |        |                                                                                       |             |
-| `max_in_flight_requests_per_connection` | integer                        | `5`                | no       |        |                                                                                       | min=1       |
-| `idempotent`                            | boolean                        | `true`             | no       |        |                                                                                       |             |
-| `batch`                                 | object                         |                    | no       |        | Groups events into batches before delivering them.                                    |             |
-| `batch.max_events`                      | integer                        |                    | no       |        |                                                                                       | min=1       |
-| `batch.max_size`                        | byte_size                      |                    | no       |        |                                                                                       |             |
-| `batch.timeout`                         | duration                       | `1000`             | no       |        |                                                                                       | minMs=1     |
-| `retry`                                 | object                         |                    | no       |        | Retry behaviour for transient delivery failures.                                      |             |
-| `retry.initial_backoff`                 | duration                       | `100`              | no       |        |                                                                                       | minMs=1     |
-| `retry.max_backoff`                     | duration                       | `30000`            | no       |        |                                                                                       | minMs=1     |
-| `retry.max_attempts`                    | integer                        |                    | no       |        |                                                                                       | min=1       |
-| `retry.max_duration`                    | duration                       |                    | no       |        |                                                                                       | minMs=1     |
+| Option                                  | Type                                | Default            | Required | Secret | Description                                                                           | Constraints |
+| --------------------------------------- | ----------------------------------- | ------------------ | -------- | ------ | ------------------------------------------------------------------------------------- | ----------- |
+| `brokers`                               | socket_address[]                    |                    | yes      |        |                                                                                       | minItems=1  |
+| `client_id`                             | string                              | `"ferrule"`        | no       |        |                                                                                       |             |
+| `tls`                                   | object                              |                    | no       |        | TLS options for this connection.                                                      |             |
+| `tls.enabled`                           | boolean                             |                    | no       |        |                                                                                       |             |
+| `tls.ca_file`                           | string                              |                    | no       |        |                                                                                       |             |
+| `tls.cert_file`                         | string                              |                    | no       |        |                                                                                       |             |
+| `tls.key_file`                          | string                              |                    | no       |        |                                                                                       |             |
+| `tls.verify_certificate`                | boolean                             | `true`             | no       |        |                                                                                       |             |
+| `tls.server_name`                       | string                              |                    | no       |        |                                                                                       |             |
+| `sasl`                                  | object                              |                    | no       |        |                                                                                       |             |
+| `sasl.mechanism`                        | enum("PLAIN", "SCRAM-SHA-256")      |                    | yes      |        |                                                                                       |             |
+| `sasl.username`                         | string                              |                    | yes      |        |                                                                                       |             |
+| `sasl.password`                         | string                              |                    | yes      | yes    |                                                                                       |             |
+| `topic`                                 | string                              |                    | yes      |        |                                                                                       | minLength=1 |
+| `key`                                   | string                              |                    | no       |        |                                                                                       |             |
+| `headers`                               | record<string, string>              |                    | no       |        |                                                                                       |             |
+| `encoding`                              | object                              | `{"codec":"json"}` | no       |        | Encoder configuration. Extra keys are passed through to the codec as its own options. |             |
+| `encoding.codec`                        | string                              | `"json"`           | no       |        | Codec used to serialise each event.                                                   |             |
+| `acks`                                  | enum("0", "1", "-1")                | `"-1"`             | no       |        |                                                                                       |             |
+| `compression`                           | enum("none", "gzip", "lz4", "zstd") | `"none"`           | no       |        |                                                                                       |             |
+| `partitioner`                           | enum("round_robin", "sticky")       | `"sticky"`         | no       |        |                                                                                       |             |
+| `connect_timeout`                       | duration                            | `10000`            | no       |        |                                                                                       |             |
+| `request_timeout`                       | duration                            | `30000`            | no       |        |                                                                                       |             |
+| `max_in_flight_requests_per_connection` | integer                             | `5`                | no       |        |                                                                                       | min=1       |
+| `idempotent`                            | boolean                             | `true`             | no       |        |                                                                                       |             |
+| `batch`                                 | object                              |                    | no       |        | Groups events into batches before delivering them.                                    |             |
+| `batch.max_events`                      | integer                             |                    | no       |        |                                                                                       | min=1       |
+| `batch.max_size`                        | byte_size                           |                    | no       |        |                                                                                       |             |
+| `batch.timeout`                         | duration                            | `1000`             | no       |        |                                                                                       | minMs=1     |
+| `retry`                                 | object                              |                    | no       |        | Retry behaviour for transient delivery failures.                                      |             |
+| `retry.initial_backoff`                 | duration                            | `100`              | no       |        |                                                                                       | minMs=1     |
+| `retry.max_backoff`                     | duration                            | `30000`            | no       |        |                                                                                       | minMs=1     |
+| `retry.max_attempts`                    | integer                             |                    | no       |        |                                                                                       | min=1       |
+| `retry.max_duration`                    | duration                            |                    | no       |        |                                                                                       | minMs=1     |
 
 **Examples:**
 
@@ -1281,42 +1281,42 @@ Pushes log lines to a Loki-compatible push API, partitioned by label set.
 
 **Options:**
 
-| Option                   | Type                        | Default               | Required | Secret | Description                                                            | Constraints                |
-| ------------------------ | --------------------------- | --------------------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
-| `tls`                    | object                      |                       | no       |        | TLS options for this connection.                                       |                            |
-| `tls.enabled`            | boolean                     |                       | no       |        |                                                                        |                            |
-| `tls.ca_file`            | string                      |                       | no       |        |                                                                        |                            |
-| `tls.cert_file`          | string                      |                       | no       |        |                                                                        |                            |
-| `tls.key_file`           | string                      |                       | no       |        |                                                                        |                            |
-| `tls.verify_certificate` | boolean                     | `true`                | no       |        |                                                                        |                            |
-| `tls.server_name`        | string                      |                       | no       |        |                                                                        |                            |
-| `proxy`                  | object                      |                       | no       |        | Outgoing proxy configuration.                                          |                            |
-| `proxy.use_env`          | boolean                     | `true`                | no       |        |                                                                        |                            |
-| `proxy.url`              | url                         |                       | no       |        |                                                                        | protocols=["http","https"] |
-| `timeout`                | duration                    | `30000`               | no       |        | Per-request timeout.                                                   | minMs=1                    |
-| `max_response_size`      | byte_size                   | `10485760`            | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
-| `compression`            | enum("none", "gzip")        | `"none"`              | no       |        | Compresses the request body before sending.                            |                            |
-| `headers`                | record<string, string>      |                       | no       |        | Extra static headers sent with every request.                          |                            |
-| `max_sockets`            | integer                     | `16`                  | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
-| `auth`                   | tagged_union                |                       | no       |        | Authenticates outgoing requests.                                       |                            |
-| `url`                    | url                         |                       | yes      |        |                                                                        | protocols=["http","https"] |
-| `push_path`              | string                      | `"/loki/api/v1/push"` | no       |        |                                                                        |                            |
-| `tenant`                 | string                      |                       | no       |        |                                                                        |                            |
-| `labels`                 | record<string, string>      |                       | yes      |        |                                                                        |                            |
-| `line`                   | string                      |                       | no       |        |                                                                        |                            |
-| `timestamp_field`        | field_path                  |                       | no       |        |                                                                        |                            |
-| `out_of_order`           | enum("sort", "passthrough") | `"sort"`              | no       |        |                                                                        |                            |
-| `max_streams`            | integer                     | `10000`               | no       |        |                                                                        | min=1                      |
-| `batch`                  | object                      |                       | no       |        | Groups events into batches before delivering them.                     |                            |
-| `batch.max_events`       | integer                     |                       | no       |        |                                                                        | min=1                      |
-| `batch.max_size`         | byte_size                   |                       | no       |        |                                                                        |                            |
-| `batch.timeout`          | duration                    | `1000`                | no       |        |                                                                        | minMs=1                    |
-| `retry`                  | object                      |                       | no       |        | Retry behaviour for transient delivery failures.                       |                            |
-| `retry.initial_backoff`  | duration                    | `100`                 | no       |        |                                                                        | minMs=1                    |
-| `retry.max_backoff`      | duration                    | `30000`               | no       |        |                                                                        | minMs=1                    |
-| `retry.max_attempts`     | integer                     |                       | no       |        |                                                                        | min=1                      |
-| `retry.max_duration`     | duration                    |                       | no       |        |                                                                        | minMs=1                    |
-| `concurrency`            | integer                     | `4`                   | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
+| Option                   | Type                         | Default               | Required | Secret | Description                                                            | Constraints                |
+| ------------------------ | ---------------------------- | --------------------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
+| `tls`                    | object                       |                       | no       |        | TLS options for this connection.                                       |                            |
+| `tls.enabled`            | boolean                      |                       | no       |        |                                                                        |                            |
+| `tls.ca_file`            | string                       |                       | no       |        |                                                                        |                            |
+| `tls.cert_file`          | string                       |                       | no       |        |                                                                        |                            |
+| `tls.key_file`           | string                       |                       | no       |        |                                                                        |                            |
+| `tls.verify_certificate` | boolean                      | `true`                | no       |        |                                                                        |                            |
+| `tls.server_name`        | string                       |                       | no       |        |                                                                        |                            |
+| `proxy`                  | object                       |                       | no       |        | Outgoing proxy configuration.                                          |                            |
+| `proxy.use_env`          | boolean                      | `true`                | no       |        |                                                                        |                            |
+| `proxy.url`              | url                          |                       | no       |        |                                                                        | protocols=["http","https"] |
+| `timeout`                | duration                     | `30000`               | no       |        | Per-request timeout.                                                   | minMs=1                    |
+| `max_response_size`      | byte_size                    | `10485760`            | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
+| `compression`            | enum("none", "gzip", "zstd") | `"none"`              | no       |        | Compresses the request body before sending.                            |                            |
+| `headers`                | record<string, string>       |                       | no       |        | Extra static headers sent with every request.                          |                            |
+| `max_sockets`            | integer                      | `16`                  | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
+| `auth`                   | tagged_union                 |                       | no       |        | Authenticates outgoing requests.                                       |                            |
+| `url`                    | url                          |                       | yes      |        |                                                                        | protocols=["http","https"] |
+| `push_path`              | string                       | `"/loki/api/v1/push"` | no       |        |                                                                        |                            |
+| `tenant`                 | string                       |                       | no       |        |                                                                        |                            |
+| `labels`                 | record<string, string>       |                       | yes      |        |                                                                        |                            |
+| `line`                   | string                       |                       | no       |        |                                                                        |                            |
+| `timestamp_field`        | field_path                   |                       | no       |        |                                                                        |                            |
+| `out_of_order`           | enum("sort", "passthrough")  | `"sort"`              | no       |        |                                                                        |                            |
+| `max_streams`            | integer                      | `10000`               | no       |        |                                                                        | min=1                      |
+| `batch`                  | object                       |                       | no       |        | Groups events into batches before delivering them.                     |                            |
+| `batch.max_events`       | integer                      |                       | no       |        |                                                                        | min=1                      |
+| `batch.max_size`         | byte_size                    |                       | no       |        |                                                                        |                            |
+| `batch.timeout`          | duration                     | `1000`                | no       |        |                                                                        | minMs=1                    |
+| `retry`                  | object                       |                       | no       |        | Retry behaviour for transient delivery failures.                       |                            |
+| `retry.initial_backoff`  | duration                     | `100`                 | no       |        |                                                                        | minMs=1                    |
+| `retry.max_backoff`      | duration                     | `30000`               | no       |        |                                                                        | minMs=1                    |
+| `retry.max_attempts`     | integer                      |                       | no       |        |                                                                        | min=1                      |
+| `retry.max_duration`     | duration                     |                       | no       |        |                                                                        | minMs=1                    |
+| `concurrency`            | integer                      | `4`                   | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
 
 **Examples:**
 
@@ -1352,7 +1352,7 @@ Writes batches of events as objects to an S3-compatible store, SigV4-signed.
 | `proxy.url`              | url                                     |                        | no       |        |                                                                                       | protocols=["http","https"] |
 | `timeout`                | duration                                | `30000`                | no       |        | Per-request timeout.                                                                  | minMs=1                    |
 | `max_response_size`      | byte_size                               | `10485760`             | no       |        | Maximum bytes read from a response body before the request is aborted.                |                            |
-| `compression`            | enum("none", "gzip")                    | `"none"`               | no       |        | Compresses the request body before sending.                                           |                            |
+| `compression`            | enum("none", "gzip", "zstd")            | `"none"`               | no       |        | Compresses the request body before sending.                                           |                            |
 | `headers`                | record<string, string>                  |                        | no       |        | Extra static headers sent with every request.                                         |                            |
 | `max_sockets`            | integer                                 | `16`                   | no       |        | Maximum sockets kept alive per host.                                                  | min=1                      |
 | `endpoint`               | url                                     |                        | yes      |        |                                                                                       | protocols=["http","https"] |
@@ -1414,7 +1414,7 @@ Exports events to an OTLP/HTTP collector (logs, metrics, or traces).
 | `proxy.url`              | url                               |              | no       |        |                                                                        | protocols=["http","https"] |
 | `timeout`                | duration                          | `30000`      | no       |        | Per-request timeout.                                                   | minMs=1                    |
 | `max_response_size`      | byte_size                         | `10485760`   | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
-| `compression`            | enum("none", "gzip")              | `"none"`     | no       |        | Compresses the request body before sending.                            |                            |
+| `compression`            | enum("none", "gzip", "zstd")      | `"none"`     | no       |        | Compresses the request body before sending.                            |                            |
 | `headers`                | record<string, string>            |              | no       |        | Extra static headers sent with every request.                          |                            |
 | `max_sockets`            | integer                           | `16`         | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
 | `auth`                   | tagged_union                      |              | no       |        | Authenticates outgoing requests.                                       |                            |
@@ -1536,36 +1536,36 @@ Writes metrics to a Prometheus remote-write endpoint.
 
 **Options:**
 
-| Option                   | Type                   | Default    | Required | Secret | Description                                                            | Constraints                |
-| ------------------------ | ---------------------- | ---------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
-| `tls`                    | object                 |            | no       |        | TLS options for this connection.                                       |                            |
-| `tls.enabled`            | boolean                |            | no       |        |                                                                        |                            |
-| `tls.ca_file`            | string                 |            | no       |        |                                                                        |                            |
-| `tls.cert_file`          | string                 |            | no       |        |                                                                        |                            |
-| `tls.key_file`           | string                 |            | no       |        |                                                                        |                            |
-| `tls.verify_certificate` | boolean                | `true`     | no       |        |                                                                        |                            |
-| `tls.server_name`        | string                 |            | no       |        |                                                                        |                            |
-| `proxy`                  | object                 |            | no       |        | Outgoing proxy configuration.                                          |                            |
-| `proxy.use_env`          | boolean                | `true`     | no       |        |                                                                        |                            |
-| `proxy.url`              | url                    |            | no       |        |                                                                        | protocols=["http","https"] |
-| `timeout`                | duration               | `30000`    | no       |        | Per-request timeout.                                                   | minMs=1                    |
-| `max_response_size`      | byte_size              | `10485760` | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
-| `compression`            | enum("none", "gzip")   | `"none"`   | no       |        | Compresses the request body before sending.                            |                            |
-| `headers`                | record<string, string> |            | no       |        | Extra static headers sent with every request.                          |                            |
-| `max_sockets`            | integer                | `16`       | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
-| `auth`                   | tagged_union           |            | no       |        | Authenticates outgoing requests.                                       |                            |
-| `url`                    | url                    |            | yes      |        |                                                                        | protocols=["http","https"] |
-| `stale_bound`            | duration               | `300000`   | no       |        |                                                                        | minMs=1                    |
-| `batch`                  | object                 |            | no       |        | Groups events into batches before delivering them.                     |                            |
-| `batch.max_events`       | integer                |            | no       |        |                                                                        | min=1                      |
-| `batch.max_size`         | byte_size              |            | no       |        |                                                                        |                            |
-| `batch.timeout`          | duration               | `1000`     | no       |        |                                                                        | minMs=1                    |
-| `retry`                  | object                 |            | no       |        | Retry behaviour for transient delivery failures.                       |                            |
-| `retry.initial_backoff`  | duration               | `100`      | no       |        |                                                                        | minMs=1                    |
-| `retry.max_backoff`      | duration               | `30000`    | no       |        |                                                                        | minMs=1                    |
-| `retry.max_attempts`     | integer                |            | no       |        |                                                                        | min=1                      |
-| `retry.max_duration`     | duration               |            | no       |        |                                                                        | minMs=1                    |
-| `concurrency`            | integer                | `4`        | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
+| Option                   | Type                         | Default    | Required | Secret | Description                                                            | Constraints                |
+| ------------------------ | ---------------------------- | ---------- | -------- | ------ | ---------------------------------------------------------------------- | -------------------------- |
+| `tls`                    | object                       |            | no       |        | TLS options for this connection.                                       |                            |
+| `tls.enabled`            | boolean                      |            | no       |        |                                                                        |                            |
+| `tls.ca_file`            | string                       |            | no       |        |                                                                        |                            |
+| `tls.cert_file`          | string                       |            | no       |        |                                                                        |                            |
+| `tls.key_file`           | string                       |            | no       |        |                                                                        |                            |
+| `tls.verify_certificate` | boolean                      | `true`     | no       |        |                                                                        |                            |
+| `tls.server_name`        | string                       |            | no       |        |                                                                        |                            |
+| `proxy`                  | object                       |            | no       |        | Outgoing proxy configuration.                                          |                            |
+| `proxy.use_env`          | boolean                      | `true`     | no       |        |                                                                        |                            |
+| `proxy.url`              | url                          |            | no       |        |                                                                        | protocols=["http","https"] |
+| `timeout`                | duration                     | `30000`    | no       |        | Per-request timeout.                                                   | minMs=1                    |
+| `max_response_size`      | byte_size                    | `10485760` | no       |        | Maximum bytes read from a response body before the request is aborted. |                            |
+| `compression`            | enum("none", "gzip", "zstd") | `"none"`   | no       |        | Compresses the request body before sending.                            |                            |
+| `headers`                | record<string, string>       |            | no       |        | Extra static headers sent with every request.                          |                            |
+| `max_sockets`            | integer                      | `16`       | no       |        | Maximum sockets kept alive per host.                                   | min=1                      |
+| `auth`                   | tagged_union                 |            | no       |        | Authenticates outgoing requests.                                       |                            |
+| `url`                    | url                          |            | yes      |        |                                                                        | protocols=["http","https"] |
+| `stale_bound`            | duration                     | `300000`   | no       |        |                                                                        | minMs=1                    |
+| `batch`                  | object                       |            | no       |        | Groups events into batches before delivering them.                     |                            |
+| `batch.max_events`       | integer                      |            | no       |        |                                                                        | min=1                      |
+| `batch.max_size`         | byte_size                    |            | no       |        |                                                                        |                            |
+| `batch.timeout`          | duration                     | `1000`     | no       |        |                                                                        | minMs=1                    |
+| `retry`                  | object                       |            | no       |        | Retry behaviour for transient delivery failures.                       |                            |
+| `retry.initial_backoff`  | duration                     | `100`      | no       |        |                                                                        | minMs=1                    |
+| `retry.max_backoff`      | duration                     | `30000`    | no       |        |                                                                        | minMs=1                    |
+| `retry.max_attempts`     | integer                      |            | no       |        |                                                                        | min=1                      |
+| `retry.max_duration`     | duration                     |            | no       |        |                                                                        | minMs=1                    |
+| `concurrency`            | integer                      | `4`        | no       |        | Number of batches this sink may deliver concurrently.                  | min=1                      |
 
 **Examples:**
 

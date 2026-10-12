@@ -203,6 +203,50 @@ Guidelines that follow directly from the contract in `component.ts`:
   testable with `ManualClock` and so the runtime's shutdown deadlines stay coherent with a
   component's own timers.
 
+### Asynchronous transforms
+
+`process` is a synchronous call: nothing else in the pipeline runs while it does, which is
+exactly what makes it cheap. Most transforms should implement it. Implement `processAsync`
+instead only when a batch genuinely needs to await something — a lookup against an external
+service, a compiled script that awaits a promise, eventually handing the batch to a
+`worker_threads` pool for CPU-heavy work — so that wait doesn't block the event loop for every
+other component in the pipeline:
+
+```ts
+const enrich = defineTransform({
+  kind: 'transform',
+  type: 'enrich',
+  description: 'looks up a field from an external cache before forwarding each event',
+  options: s.object({}),
+  accepts: ['log'],
+  build: (_options, ctx) => ({
+    async processAsync(events, out) {
+      for (const event of events) {
+        const log = event as LogEvent;
+        const key = log.get('user_id');
+        if (typeof key === 'string') log.set('plan', await lookupPlan(key, ctx.signal));
+        out.push(event, DEFAULT_PORT);
+      }
+    },
+  }),
+});
+```
+
+A transform implements **exactly one** of `process` / `processAsync`; implementing both, or
+neither, fails the component at build time with a clear `FerruleError`
+(`E_TRANSFORM_CONTRACT`) rather than the runtime guessing which one was meant.
+
+Ownership and finalizer rules are identical either way: a transform still owns the events it
+receives and must either push every one onward or finish its finalizers before returning (or,
+for `processAsync`, before the returned promise resolves). The runtime awaits `processAsync`
+between batches, exactly as if it were a slow `process`: the next batch is not read, a due
+`tick()` is not run, and `flush()` is not called until the current call resolves, so per-input
+ordering and backpressure on the transform's inbox are unaffected — a `processAsync` transform
+just doesn't block the event loop while it waits. If the pipeline shuts down (or a reload retires
+the component) while a batch is in flight, `processAsync` must watch `ctx.signal` (captured in
+`start`) and return once it aborts, the same way a long-running `Source.run()` or `Sink.run()`
+must, or the shutdown deadline has nothing to force past.
+
 ### Build time vs run time
 
 `build(options, ctx)` runs during validation, before anything starts, and again for every reload.

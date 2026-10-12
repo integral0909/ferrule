@@ -155,16 +155,20 @@ and reported).
 
 ### 4.3 Execution
 
-Ferrule runs on a single Node.js event loop per process by default. Transforms are
-synchronous functions over batches of events, which keeps per-event overhead low and ordering
-deterministic. To use more cores, run several Ferrule processes and split inputs between them
-(for example several file sources over disjoint globs, or several instances behind a load
-balancer).
+Ferrule runs on a single Node.js event loop per process by default. A transform implements
+exactly one of two contracts: `process`, a synchronous function over a batch of events, which
+keeps per-event overhead low and ordering trivially deterministic; or `processAsync`, for a
+transform that must await something per batch (an external lookup, eventually a `worker_threads`
+pool) without blocking the event loop for every other component while it does. The runtime awaits
+`processAsync` between batches the same way it would a slow `process` call — the next batch, a
+due `tick()`, and `flush()` all wait for it — so ordering and backpressure on that transform's
+inbox are identical either way; only the event loop is free in between. To use more cores, run
+several Ferrule processes and split inputs between them (for example several file sources over
+disjoint globs, or several instances behind a load balancer).
 
-A `worker_threads` pool for CPU-heavy transforms is planned. The binary event encoding in
-`@ferrule/buffer` was designed so events can cross thread boundaries without structured cloning;
-what remains is an asynchronous variant of the transform contract so a transform can await its
-worker.
+A `worker_threads` pool for CPU-heavy transforms is planned, now that the asynchronous transform
+contract exists for it to await. The binary event encoding in `@ferrule/buffer` was designed so
+events can cross thread boundaries without structured cloning.
 
 ### 4.4 Disk buffer
 

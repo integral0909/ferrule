@@ -22,8 +22,13 @@ export const KafkaErrorCode = {
   CLUSTER_AUTHORIZATION_FAILED: 31,
   UNSUPPORTED_SASL_MECHANISM: 33,
   ILLEGAL_SASL_STATE: 34,
-  SASL_AUTHENTICATION_FAILED: 58,
+  OUT_OF_ORDER_SEQUENCE_NUMBER: 45,
+  DUPLICATE_SEQUENCE_NUMBER: 46,
+  INVALID_PRODUCER_EPOCH: 47,
   KAFKA_STORAGE_ERROR: 56,
+  SASL_AUTHENTICATION_FAILED: 58,
+  UNKNOWN_PRODUCER_ID: 59,
+  PRODUCER_FENCED: 90,
 } as const;
 
 /**
@@ -60,6 +65,31 @@ export function isRetriableErrorCode(code: number): boolean {
 
 export function needsMetadataRefresh(code: number): boolean {
   return STALE_METADATA_CODES.has(code);
+}
+
+/** The idempotent producer's broker-side dedup signal: this exact sequence range has already
+ * been appended (typically because an earlier attempt's response was lost, e.g. to a connection
+ * drop, and the producer retried). Treated as success, not an error. */
+export function isDuplicateSequenceErrorCode(code: number): boolean {
+  return code === KafkaErrorCode.DUPLICATE_SEQUENCE_NUMBER;
+}
+
+/**
+ * Error codes where the idempotent producer's (producerId, epoch, sequence) state can no longer
+ * be trusted: a sequence gap was detected, the epoch no longer matches what the broker has on
+ * file, or another producer instance with the same identity has fenced this one out. Resending
+ * the same batch under the same identity is not safe (the broker's dedup window is keyed by
+ * producer ID + epoch, and this response means that bookkeeping has diverged), so the only
+ * recovery is a fresh producer ID — see `KafkaProducer`'s handling of these codes, which finishes
+ * the affected batch's events `errored` rather than risking either a duplicate or reordering.
+ */
+export function needsProducerIdReset(code: number): boolean {
+  return (
+    code === KafkaErrorCode.OUT_OF_ORDER_SEQUENCE_NUMBER ||
+    code === KafkaErrorCode.INVALID_PRODUCER_EPOCH ||
+    code === KafkaErrorCode.PRODUCER_FENCED ||
+    code === KafkaErrorCode.UNKNOWN_PRODUCER_ID
+  );
 }
 
 function errorCodeName(code: number): string {

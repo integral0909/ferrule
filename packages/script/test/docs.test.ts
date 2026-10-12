@@ -7,6 +7,8 @@ import {
   metricEventSchema,
   metricReadonlyPaths,
   parseAndCheck,
+  spanEventSchema,
+  spanReadonlyPaths,
   type CheckOptions,
 } from '@ferrule/script';
 import { describe, expect, it } from 'vitest';
@@ -19,18 +21,25 @@ import { describe, expect, it } from 'vitest';
  * Convention: a block fenced ```ferrule must check clean. A block fenced ```ferrule-error is
  * documenting a *deliberate* error (e.g. design.md's fallibility examples might one day show what
  * an unhandled `T!` diagnostic looks like) and is asserted to produce at least one error instead —
- * use this tag rather than leaving a broken example unlabeled. ```ferrule-metric and
- * ```ferrule-metric-error are the same two conventions, but checked against the metric view
- * (`metricEventSchema`/`metricReadonlyPaths`, see design.md's "Metric events") instead of the
- * log-oriented default — design.md's metric examples use these so `.tags.env = 1` actually is
- * checked as the type error the prose claims it is, rather than passing trivially under the
- * default `any`-rooted schema.
+ * use this tag rather than leaving a broken example unlabeled. ```ferrule-metric/
+ * ```ferrule-metric-error and ```ferrule-span/```ferrule-span-error are the same two conventions,
+ * but checked against the metric view (`metricEventSchema`/`metricReadonlyPaths`, see design.md's
+ * "Metric events") or span view (`spanEventSchema`/`spanReadonlyPaths`, see design.md's "Span
+ * events") instead of the log-oriented default — design.md's metric/span examples use these so
+ * `.tags.env = 1` or `.annotations = []` actually are checked as the type errors the prose claims
+ * they are, rather than passing trivially under the default `any`-rooted schema.
  */
 
 const METRIC_CHECK_OPTIONS: CheckOptions = {
   inputSchema: metricEventSchema(),
   validateWrites: true,
   readonlyPaths: metricReadonlyPaths(),
+};
+
+const SPAN_CHECK_OPTIONS: CheckOptions = {
+  inputSchema: spanEventSchema(),
+  validateWrites: true,
+  readonlyPaths: spanReadonlyPaths(),
 };
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -75,7 +84,14 @@ function allDocBlocks(): FencedBlock[] {
   });
 }
 
-const CHECKED_LANGS = ['ferrule', 'ferrule-error', 'ferrule-metric', 'ferrule-metric-error'];
+const CHECKED_LANGS = [
+  'ferrule',
+  'ferrule-error',
+  'ferrule-metric',
+  'ferrule-metric-error',
+  'ferrule-span',
+  'ferrule-span-error',
+];
 
 describe('doc examples: ```ferrule blocks type-check, ```ferrule-error blocks do not', () => {
   const blocks = allDocBlocks().filter((b) => CHECKED_LANGS.includes(b.lang));
@@ -90,11 +106,19 @@ describe('doc examples: ```ferrule blocks type-check, ```ferrule-error blocks do
     expect(blocks.some((b) => b.lang === 'ferrule-metric')).toBe(true);
   });
 
+  it('found at least one ```ferrule-span block to check', () => {
+    expect(blocks.some((b) => b.lang === 'ferrule-span')).toBe(true);
+  });
+
   for (const block of blocks) {
     const label = `${block.file}:${block.line}`;
     const isMetric = block.lang === 'ferrule-metric' || block.lang === 'ferrule-metric-error';
-    const shouldError = block.lang === 'ferrule-error' || block.lang === 'ferrule-metric-error';
-    const checkOptions = isMetric ? METRIC_CHECK_OPTIONS : {};
+    const isSpan = block.lang === 'ferrule-span' || block.lang === 'ferrule-span-error';
+    const shouldError =
+      block.lang === 'ferrule-error' ||
+      block.lang === 'ferrule-metric-error' ||
+      block.lang === 'ferrule-span-error';
+    const checkOptions = isMetric ? METRIC_CHECK_OPTIONS : isSpan ? SPAN_CHECK_OPTIONS : {};
 
     if (shouldError) {
       it(`${label} (${block.lang}) fails to parse or type-check`, () => {

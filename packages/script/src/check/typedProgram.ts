@@ -38,4 +38,21 @@ export interface CheckOptions {
    * declared".
    */
   readonly inputSchema?: Type;
+  /**
+   * When `true`, `.a.b = expr` is checked against `inputSchema` like a read would be (an expected
+   * type the assigned value must be a subtype of, or a "no such field" error for a closed shape),
+   * instead of the default "paths are always writable" permissiveness design.md's §3 known
+   * limitations documents for logs (where an event's fields are genuinely open-ended and a write
+   * is expected to create intermediate structure). Default `false`. Metric programs
+   * (`metric/schema.js`'s `metricEventSchema`) set this; log programs leave it unset so existing
+   * `input_schema`-declared pipelines keep today's behavior.
+   */
+  readonly validateWrites?: boolean;
+  /**
+   * Top-level field names (single-segment paths) that can be read but never assigned, each mapped
+   * to the diagnostic message explaining why. Ignored unless {@link validateWrites} is set. Used
+   * by the metric view for its value-type discriminator (`metricReadonlyPaths`): changing which
+   * variant a metric's value is isn't supported (see `docs/language/design.md`'s "Metric events").
+   */
+  readonly readonlyPaths?: ReadonlyMap<string, string>;
 }

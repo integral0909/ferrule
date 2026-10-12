@@ -467,18 +467,29 @@ exceeded: ...', span }` — a distinct, greppable reason prefix, not a separate 
 Override any of them per call via `program.run(event, { limits: { maxStringLength: 4096 } })`
 (`RunOptions.limits` is a `Partial<ResourceLimits>`, merged over the defaults).
 
-### Execution model: logs only
+### Execution model: logs directly, metrics through a view, spans not yet
 
-`CompiledProgram.run` accepts a `LogEvent` and nothing else — `MetricEvent`/`SpanEvent` are a
-compile-time (TypeScript) type error at the call site, not a runtime check. This milestone's
-standard library (path reads/writes, `is_*`, string/collection functions, ...) is built entirely
-around `LogEvent`'s `fields: ValueMap`; metric/span events have a structured, typed shape
-(`MetricValue`, `SpanKind`, attributes, ...) that a transform language would want first-class
-accessors for (`.value`, `.tags`, `.duration`, ...), which is a substantial enough design surface
-of its own — matching design.md's "small surface, rich library" principle — to defer to a later
-milestone rather than bolt onto this one as an untyped escape hatch. A caller that needs to run a
-Ferrule Script transform on metrics/spans today should convert them to a `LogEvent` representation
-first (or wait for that milestone); there is no supported way to do it through this package.
+`CompiledProgram.run` itself still accepts only a `LogEvent` — `MetricEvent`/`SpanEvent` are a
+compile-time (TypeScript) type error at the call site, not a runtime check. The standard library
+(path reads/writes, `is_*`, string/collection functions, ...) is built entirely around `LogEvent`'s
+`fields: ValueMap`; a metric or span event has a structured, typed shape instead (`MetricValue`,
+`SpanKind`, attributes, ...) that would want first-class accessors of its own — a substantial
+enough design surface, matching design.md's "small surface, rich library" principle, that bolting
+it onto the compiler directly was not worth it.
+
+A **metric** event gets that accessor story a layer up instead: `metric/schema.ts`'s
+`metricEventSchema()` is an `inputSchema` (paired with `validateWrites: true` and
+`metricReadonlyPaths()`) that types `.name`, `.namespace`, `.tags`, `.kind`, `.value_type`, and
+every value-type's own field(s) (`.value`, `.values`, `.samples`/`.statistic`,
+`.buckets`/`.count`/`.sum`, `.quantiles`/`.count`/`.sum`) — see `docs/language/design.md`'s
+"Metric events" for the full shape — and `metric/view.ts`'s `metricEventToView`/
+`applyViewToMetric` build the `LogEvent`-shaped view a compiled program actually runs against and
+convert the result back into the real `MetricEvent`, fully re-validated (not just type-checked:
+see that section's "every other field's write is _also_ validated" paragraph). `script`'s
+`metrics: true` option (`packages/operators/src/script.ts`) is the pipeline-facing wrapper around
+this. A **span** event has no such view yet; a caller that needs to run a Ferrule Script transform
+on spans today should convert them to a `LogEvent` representation first (or wait for a future
+milestone) — there is no supported way to do it through this package.
 
 ### Inline tests
 
@@ -599,4 +610,14 @@ LSP or CLI built on this package).
   function cannot be named `match` — the parser cannot tell `match(x)` (a call) apart from `match
 (x) { ... }` (a match expression with a parenthesized subject) without deeper lookahead than the
   rest of the grammar needs. `matches(value, pattern)` is the closest available name.
-- **`CompiledProgram.run` accepts only `LogEvent`** — see "Execution model: logs only" above.
+- **`CompiledProgram.run` itself accepts only `LogEvent`; a metric event goes through a view, and
+  a span event has no view at all yet** — see "Execution model" above.
+- **The metric view's per-value-type fields are typed together, not narrowed to the event's actual
+  type.** `.value`, `.buckets`, `.quantiles`, etc. are all precisely typed regardless of
+  `.value_type`, so reading or writing one that does not apply reads back `null`/has no effect
+  rather than being a compile-time error — declaring the metric's specific value type up front
+  (and narrowing the view to just its fields) is a natural, currently unimplemented follow-up; see
+  `metric/schema.ts`'s module doc.
+- **Changing a metric's value type is not supported.** `.value_type` is read-only
+  (`metricReadonlyPaths`); there is no way to turn a counter into a histogram from inside a
+  program. Route the event through a different series or a separate derivation step instead.

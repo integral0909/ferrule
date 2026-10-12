@@ -1,0 +1,1 @@
+Hello, Ferrule! This is a small test string for LZ4 interop.

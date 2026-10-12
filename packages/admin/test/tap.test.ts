@@ -79,10 +79,13 @@ describe('GET /tap/:component', () => {
 
   it('stops after ?limit= events', async () => {
     const events = Array.from({ length: 5 }, (_, i) => LogEvent.fromMessage(`m${i}`));
-    const h = await createAdminHarness(undefined, [{ events, delayMs: 10 }]);
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [{ events, delayMs: 10 }]);
     cleanup = h.stop;
 
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?limit=3`);
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(10);
     const lines = await readLines(res, 3);
     // The server closes the stream once the limit is reached; give it a moment, then confirm no
     // further data (and that the connection ended).
@@ -174,11 +177,15 @@ describe('GET /tap/:component', () => {
   it('?sample= drops roughly the complementary fraction of events (statistical, wide margin)', async () => {
     const total = 300;
     const events = Array.from({ length: total }, (_, i) => LogEvent.fromMessage(`m${i}`));
-    const h = await createAdminHarness(undefined, [{ events, delayMs: 10 }]);
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [{ events, delayMs: 10 }]);
     cleanup = h.stop;
 
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?sample=0.1`);
-    // The whole batch is published essentially at once; give it a generous window to arrive.
+    // Publish only once the subscription exists, so no event can be missed for timing reasons.
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(10);
+    // The whole batch is published at once; give it a generous window to arrive.
     const lines = await collectLinesForMs(res, 500);
     req.destroy();
 

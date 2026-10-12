@@ -511,11 +511,11 @@ ttl: 1m
 
 ## `filter`
 
-Keeps log events for which a Ferrule Script boolean expression is true.
+Keeps events of one kind for which a Ferrule Script boolean expression is true.
 
-**Accepts:** log
+**Accepts:** log, span
 
-**Produces:** log
+**Produces:** log, span
 
 **Output ports:**
 
@@ -523,11 +523,12 @@ Keeps log events for which a Ferrule Script boolean expression is true.
 
 **Options:**
 
-| Option         | Type                                                                                                           | Default  | Required | Secret | Description                                                                                                                                                               | Constraints |
-| -------------- | -------------------------------------------------------------------------------------------------------------- | -------- | -------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `condition`    | string                                                                                                         |          | yes      |        | a Ferrule Script boolean expression                                                                                                                                       | minLength=1 |
-| `on_error`     | enum("keep", "drop")                                                                                           | `"drop"` | no       |        | what to do when the condition aborts (an explicit abort() or an any-typed runtime mismatch, not a handled Failure): keep the event as if it matched, or drop it (default) |             |
-| `input_schema` | record<string, enum("null", "bool", "int", "float", "string", "bytes", "timestamp", "array", "object", "any")> |          | no       |        | declarative field -> type map used to type .field paths in the condition                                                                                                  |             |
+| Option         | Type                                                                                                           | Default  | Required | Secret | Description                                                                                                                                                                                                                                                            | Constraints |
+| -------------- | -------------------------------------------------------------------------------------------------------------- | -------- | -------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `condition`    | string                                                                                                         |          | yes      |        | a Ferrule Script boolean expression                                                                                                                                                                                                                                    | minLength=1 |
+| `on_error`     | enum("keep", "drop")                                                                                           | `"drop"` | no       |        | what to do when the condition aborts (an explicit abort() or an any-typed runtime mismatch, not a handled Failure): keep the event as if it matched, or drop it (default)                                                                                              |             |
+| `input_schema` | record<string, enum("null", "bool", "int", "float", "string", "bytes", "timestamp", "array", "object", "any")> |          | no       |        | declarative field -> type map used to type .field paths in the condition                                                                                                                                                                                               |             |
+| `event_kind`   | enum("log", "span")                                                                                            | `"log"`  | no       |        | which event kind the condition runs against; the other kind then passes through unchanged. `span` checks the condition against the span view (see docs/language/design.md §"Span events") instead of `input_schema`, which has no effect unless `event_kind` is `log`. |             |
 
 **Examples:**
 
@@ -536,6 +537,14 @@ Keeps log events for which a Ferrule Script boolean expression is true.
 ```yaml
 type: filter
 condition: .status < 400
+```
+
+**Drop health-check spans by attribute**
+
+```yaml
+type: filter
+event_kind: span
+condition: .attributes.http_route != "/healthz"
 ```
 
 ## `log_to_metric`
@@ -687,11 +696,11 @@ on_error: keep
 
 ## `route`
 
-Sends log events to every named route whose Ferrule Script condition matches.
+Sends events of one kind to every named route whose Ferrule Script condition matches.
 
-**Accepts:** log
+**Accepts:** log, span
 
-**Produces:** log
+**Produces:** log, span
 
 **Output ports:**
 
@@ -702,15 +711,16 @@ Sends log events to every named route whose Ferrule Script condition matches.
 
 **Options:**
 
-| Option               | Type                                                                                                           | Default        | Required | Secret | Description                                                                                                            | Constraints |
-| -------------------- | -------------------------------------------------------------------------------------------------------------- | -------------- | -------- | ------ | ---------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `routes`             | object[]                                                                                                       |                | yes      |        | named routes, tested in order                                                                                          | minItems=1  |
-| `routes[].name`      | string                                                                                                         |                | yes      |        | route name; also this route's output port                                                                              | minLength=1 |
-| `routes[].condition` | string                                                                                                         |                | yes      |        | a Ferrule Script boolean expression                                                                                    | minLength=1 |
-| `on_error`           | enum("keep", "drop")                                                                                           | `"drop"`       | no       |        | what an aborted route condition means for that route: keep = counts as matched, drop = counts as not matched (default) |             |
-| `route_unmatched`    | boolean                                                                                                        | `true`         | no       |        | route events matching no route to `unmatched_port`; if false, drop and count them                                      |             |
-| `unmatched_port`     | string                                                                                                         | `"_unmatched"` | no       |        | port for events matching no route (used only when route_unmatched is true)                                             | minLength=1 |
-| `input_schema`       | record<string, enum("null", "bool", "int", "float", "string", "bytes", "timestamp", "array", "object", "any")> |                | no       |        | declarative field -> type map used to type .field paths in every condition                                             |             |
+| Option               | Type                                                                                                           | Default        | Required | Secret | Description                                                                                                                                                                                                                                                                | Constraints |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- | -------------- | -------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `routes`             | object[]                                                                                                       |                | yes      |        | named routes, tested in order                                                                                                                                                                                                                                              | minItems=1  |
+| `routes[].name`      | string                                                                                                         |                | yes      |        | route name; also this route's output port                                                                                                                                                                                                                                  | minLength=1 |
+| `routes[].condition` | string                                                                                                         |                | yes      |        | a Ferrule Script boolean expression                                                                                                                                                                                                                                        | minLength=1 |
+| `on_error`           | enum("keep", "drop")                                                                                           | `"drop"`       | no       |        | what an aborted route condition means for that route: keep = counts as matched, drop = counts as not matched (default)                                                                                                                                                     |             |
+| `route_unmatched`    | boolean                                                                                                        | `true`         | no       |        | route events matching no route to `unmatched_port`; if false, drop and count them                                                                                                                                                                                          |             |
+| `unmatched_port`     | string                                                                                                         | `"_unmatched"` | no       |        | port for events matching no route (used only when route_unmatched is true)                                                                                                                                                                                                 | minLength=1 |
+| `input_schema`       | record<string, enum("null", "bool", "int", "float", "string", "bytes", "timestamp", "array", "object", "any")> |                | no       |        | declarative field -> type map used to type .field paths in every condition                                                                                                                                                                                                 |             |
+| `event_kind`         | enum("log", "span")                                                                                            | `"log"`        | no       |        | which event kind every condition runs against; the other kind then passes through unchanged. `span` checks every condition against the span view (see docs/language/design.md §"Span events") instead of `input_schema`, which has no effect unless `event_kind` is `log`. |             |
 
 **Examples:**
 
@@ -768,7 +778,7 @@ exclude:
 
 ## `script`
 
-Runs a compiled Ferrule Script program over log events, or (with `metrics`) metric events.
+Runs a compiled Ferrule Script program over one event kind (`event_kind`: log, metric, or span).
 
 **Accepts:** log, metric, span
 
@@ -781,20 +791,20 @@ Runs a compiled Ferrule Script program over log events, or (with `metrics`) metr
 
 **Options:**
 
-| Option                          | Type                                                                                                           | Default | Required | Secret | Description                                                                                                                                                                                                                                                                                            | Constraints |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------- | -------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
-| `source`                        | string                                                                                                         |         | no       |        | inline Ferrule Script source                                                                                                                                                                                                                                                                           | minLength=1 |
-| `file`                          | string                                                                                                         |         | no       |        | path to a .fer file, read once at build time                                                                                                                                                                                                                                                           | minLength=1 |
-| `input_schema`                  | record<string, enum("null", "bool", "int", "float", "string", "bytes", "timestamp", "array", "object", "any")> |         | no       |        | declarative field -> type map (e.g. { status: int, message: string }) used to type .field paths; fields not listed stay `any`. See docs/language/design.md §3.                                                                                                                                         |             |
-| `drop_on_abort`                 | boolean                                                                                                        | `false` | no       |        | when a deliberate abort()/type-mismatch abort happens: finish the event `rejected` and count it (true), or route it to the `errors` port (false, the default)                                                                                                                                          |             |
-| `drop_on_error`                 | boolean                                                                                                        | `false` | no       |        | when a resource-limit or internal-error abort happens (Outcome.cause `limit`/`internal`, see @ferrule/script): finish the event `rejected` and count it (true), or route it to the `errors` port (false, the default)                                                                                  |             |
-| `reroute_dropped`               | boolean                                                                                                        | `false` | no       |        | route drop()ped events to the `dropped` port instead of finishing them delivered                                                                                                                                                                                                                       |             |
-| `metrics`                       | boolean                                                                                                        | `false` | no       |        | run the program on metric events instead of log events (log/span events then pass through unchanged). The program is checked against the metric view — see docs/language/design.md §"Metric events" — instead of `input_schema`, which has no effect here since metric fields are typed automatically. |             |
-| `limits`                        | object                                                                                                         | `{}`    | no       |        | per-event resource limit overrides                                                                                                                                                                                                                                                                     |             |
-| `limits.max_string_length`      | integer                                                                                                        |         | no       |        | override for the string-length resource limit                                                                                                                                                                                                                                                          | min=1       |
-| `limits.max_collection_size`    | integer                                                                                                        |         | no       |        | override for the array/object size resource limit                                                                                                                                                                                                                                                      | min=1       |
-| `limits.max_regex_input_length` | integer                                                                                                        |         | no       |        | override for the regex subject-length resource limit                                                                                                                                                                                                                                                   | min=1       |
-| `limits.max_emitted_events`     | integer                                                                                                        |         | no       |        | override for the maximum number of events emit() may add                                                                                                                                                                                                                                               | min=1       |
+| Option                          | Type                                                                                                           | Default | Required | Secret | Description                                                                                                                                                                                                                                                                                                                                         | Constraints |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------- | -------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `source`                        | string                                                                                                         |         | no       |        | inline Ferrule Script source                                                                                                                                                                                                                                                                                                                        | minLength=1 |
+| `file`                          | string                                                                                                         |         | no       |        | path to a .fer file, read once at build time                                                                                                                                                                                                                                                                                                        | minLength=1 |
+| `input_schema`                  | record<string, enum("null", "bool", "int", "float", "string", "bytes", "timestamp", "array", "object", "any")> |         | no       |        | declarative field -> type map (e.g. { status: int, message: string }) used to type .field paths; fields not listed stay `any`. See docs/language/design.md §3.                                                                                                                                                                                      |             |
+| `drop_on_abort`                 | boolean                                                                                                        | `false` | no       |        | when a deliberate abort()/type-mismatch abort happens: finish the event `rejected` and count it (true), or route it to the `errors` port (false, the default)                                                                                                                                                                                       |             |
+| `drop_on_error`                 | boolean                                                                                                        | `false` | no       |        | when a resource-limit or internal-error abort happens (Outcome.cause `limit`/`internal`, see @ferrule/script): finish the event `rejected` and count it (true), or route it to the `errors` port (false, the default)                                                                                                                               |             |
+| `reroute_dropped`               | boolean                                                                                                        | `false` | no       |        | route drop()ped events to the `dropped` port instead of finishing them delivered                                                                                                                                                                                                                                                                    |             |
+| `event_kind`                    | enum("log", "metric", "span")                                                                                  | `"log"` | no       |        | which event kind the program runs on; the other kinds then pass through unchanged. `metric`/`span` check the program against that kind's view instead of `input_schema` (see docs/language/design.md §"Metric events"/"Span events") — `input_schema` has no effect unless `event_kind` is `log`, since metric/span fields are typed automatically. |             |
+| `limits`                        | object                                                                                                         | `{}`    | no       |        | per-event resource limit overrides                                                                                                                                                                                                                                                                                                                  |             |
+| `limits.max_string_length`      | integer                                                                                                        |         | no       |        | override for the string-length resource limit                                                                                                                                                                                                                                                                                                       | min=1       |
+| `limits.max_collection_size`    | integer                                                                                                        |         | no       |        | override for the array/object size resource limit                                                                                                                                                                                                                                                                                                   | min=1       |
+| `limits.max_regex_input_length` | integer                                                                                                        |         | no       |        | override for the regex subject-length resource limit                                                                                                                                                                                                                                                                                                | min=1       |
+| `limits.max_emitted_events`     | integer                                                                                                        |         | no       |        | override for the maximum number of events emit() may add                                                                                                                                                                                                                                                                                            | min=1       |
 
 **Examples:**
 
@@ -809,8 +819,16 @@ source: ".status = upcase(.status) ?? \"unknown\"\nif .level == \"debug\" { drop
 
 ```yaml
 type: script
-metrics: true
+event_kind: metric
 source: ".tags.service = \"checkout\"\n"
+```
+
+**Drop health-check spans by attribute**
+
+```yaml
+type: script
+event_kind: span
+source: "if .attributes.http_route == \"/healthz\" { drop }\n"
 ```
 
 ## `split_by_kind`
@@ -881,6 +899,8 @@ policies:
   - type: latency
     threshold: 500ms
     scope: any
+  - type: script
+    condition: .attributes.http_route == "/checkout"
   - type: probabilistic
     rate: 0.05
 ```

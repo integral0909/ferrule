@@ -222,6 +222,7 @@ export const tailSamplingTransform = defineTransform<TailSamplingOptions>({
         policies: [
           { type: 'status_error' },
           { type: 'latency', threshold: '500ms', scope: 'any' },
+          { type: 'script', condition: '.attributes.http_route == "/checkout"' },
           { type: 'probabilistic', rate: 0.05 },
         ],
       },

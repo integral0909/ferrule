@@ -219,7 +219,7 @@ export const scriptTransform = defineTransform<ScriptOptions>({
   kind: 'transform',
   type: 'script',
   description:
-    'Runs a compiled Ferrule Script program over log events, or (with `metrics`) metric events.',
+    'Runs a compiled Ferrule Script program over one event kind (`event_kind`: log, metric, or span).',
   options: scriptOptions,
   accepts: ['log', 'metric', 'span'],
   outputs: (options): readonly OutputPort[] => {

@@ -80,38 +80,39 @@ transform (see `packages/runtime/README.md`):
 
 ## `script`
 
-Runs a compiled [Ferrule Script](../script/README.md) program over every log event. The program
-is parsed, checked, and compiled once at **build time** (validation, before the pipeline starts),
-so a syntax or type error is reported immediately with the same rendered code frames
-`ferrule validate`/the language package produce, as a thrown `FerruleError`.
+Runs a compiled [Ferrule Script](../script/README.md) program over every event of one kind
+(`event_kind`). The program is parsed, checked, and compiled once at **build time** (validation,
+before the pipeline starts), so a syntax or type error is reported immediately with the same
+rendered code frames `ferrule validate`/the language package produce, as a thrown `FerruleError`.
 
 | Option            | Type                          | Default | Description                                                                                                                     |
 | ----------------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `source`          | string                        | —       | inline Ferrule Script source (exactly one of `source`/`file`)                                                                   |
 | `file`            | string                        | —       | path to a `.fer` file, read once at build time                                                                                  |
-| `input_schema`    | map of field name → type name | —       | see below                                                                                                                       |
+| `input_schema`    | map of field name → type name | —       | see below; only applies when `event_kind` is `log`                                                                              |
 | `drop_on_abort`   | boolean                       | `false` | deliberate `abort()`/type-mismatch: drop+count vs. route to `errors`                                                            |
 | `drop_on_error`   | boolean                       | `false` | resource-limit/internal-error abort: drop+count vs. route to `errors`                                                           |
 | `reroute_dropped` | boolean                       | `false` | route `drop()`ped events to the `dropped` port instead of finishing them                                                        |
-| `metrics`         | boolean                       | `false` | run the program over metric events instead of log events (log/span then pass through); see below                                |
+| `event_kind`      | `log` \| `metric` \| `span`   | `log`   | which event kind the program runs on; see below                                                                                 |
 | `limits`          | object                        | `{}`    | per-event resource limit overrides (`max_string_length`, `max_collection_size`, `max_regex_input_length`, `max_emitted_events`) |
 
 `input_schema` is a **flat** field → type-name map (`null`/`bool`/`int`/`float`/`string`/`bytes`/
 `timestamp`/`array`/`object`/`any`), converted to a Ferrule object type (`objectType(fields,
 anyType)`): it types the top-level fields it names; anything else stays `any`, and named
 `array`/`object` fields stay fully open (no nested element typing) — see
-`docs/language/design.md` §3 for the default-`any` behaviour this narrows. It only applies to log
-events; it is rejected at config time together with `metrics: true`.
+`docs/language/design.md` §3 for the default-`any` behaviour this narrows. It has no effect unless
+`event_kind` is `log`; it is rejected at config time otherwise.
 
 **One instance runs its program over exactly one event kind; the other kinds pass through**,
-counted by `script_passthrough_events_total` (tagged `kind`). By default that's log events (span
-events always pass through — `@ferrule/script` has no span view); setting `metrics: true` checks
-and runs the program against the metric view instead (`docs/language/design.md`'s "Metric events",
-`@ferrule/script`'s `metric/schema.ts`/`metric/view.ts`) and flips the passthrough to log/span. A
-metric that aborts (including a write the script produced that doesn't validate once the program
-finishes, e.g. a non-string tag value) routes the metric's log-shaped view — not the `MetricEvent`,
-which has no field bag to attach `ferrule.error.*` to — to the `errors` port, sharing the original
-metric's finalizers.
+counted by `script_passthrough_events_total` (tagged `kind`). `event_kind: log` (the default)
+runs the program over log events directly. `event_kind: metric` checks and runs it against the
+metric view instead (`docs/language/design.md`'s "Metric events", `@ferrule/script`'s
+`metric/schema.ts`/`metric/view.ts`). `event_kind: span` checks and runs it against the span view
+(design.md's "Span events", `@ferrule/script`'s `span/schema.ts`/`span/view.ts`). A metric or span
+that aborts (including a write the script produced that doesn't validate once the program
+finishes, e.g. a non-string tag value or an unrecognised `.kind`) routes that event's log-shaped
+view — not the `MetricEvent`/`SpanEvent`, neither of which has a field bag to attach
+`ferrule.error.*` to — to the `errors` port, sharing the original event's finalizers.
 
 **Outcomes**, per `CompiledProgram.run`'s `Outcome`:
 
@@ -129,8 +130,8 @@ metric's finalizers.
   `ferrule.error.transform` (this component's ID).
 
 Metrics: `script_events_total` (tag `outcome: continue|drop|abort`) and
-`script_run_duration_seconds` (a histogram), both recorded per processed event (log, or metric
-with `metrics: true`).
+`script_run_duration_seconds` (a histogram), both recorded per processed event of the configured
+`event_kind`.
 
 ```yaml
 transforms:
@@ -147,20 +148,28 @@ transforms:
   tag_metrics:
     type: script
     inputs: [raw_metrics]
-    metrics: true
+    event_kind: metric
     source: |
       .tags.service = "checkout"
+  drop_health_checks:
+    type: script
+    inputs: [raw_spans]
+    event_kind: span
+    source: |
+      if .attributes.http_route == "/healthz" { drop }
 ```
 
 ## `filter`
 
-Keeps log events for which a Ferrule Script boolean **expression** (not a full program) is true.
+Keeps events of one kind (`event_kind`) for which a Ferrule Script boolean **expression** (not a
+full program) is true; the other kind passes through unchanged.
 
-| Option         | Type                          | Default | Description                                          |
-| -------------- | ----------------------------- | ------- | ---------------------------------------------------- |
-| `condition`    | string                        | —       | a Ferrule Script boolean expression                  |
-| `on_error`     | `keep` \| `drop`              | `drop`  | what an aborted condition means (see below)          |
-| `input_schema` | map of field name → type name | —       | same shape as `script`'s, used to type the condition |
+| Option         | Type                          | Default | Description                                            |
+| -------------- | ----------------------------- | ------- | ------------------------------------------------------ |
+| `condition`    | string                        | —       | a Ferrule Script boolean expression                    |
+| `on_error`     | `keep` \| `drop`              | `drop`  | what an aborted condition means (see below)            |
+| `input_schema` | map of field name → type name | —       | same shape as `script`'s, used to type the condition   |
+| `event_kind`   | `log` \| `span`               | `log`   | which event kind the condition runs against; see below |
 
 **Compilation approach.** `condition` is spliced into a tiny synthetic program that uses the
 language's own control flow rather than a scratch field: `if !((<condition>) ?? <on_error
@@ -177,6 +186,10 @@ matched; `drop` (the default) finishes it `rejected` — this is "bad data", the
 permanent-failure semantics `remap_fields`'s `on_error: drop` uses — and counts it under
 `component_discarded_events_total` (`reason: condition_aborted`).
 
+`event_kind: span` compiles `condition` against the span view instead (`docs/language/design.md`'s
+"Span events"); `input_schema` has no effect in that case. The other event kind passes through
+unchanged, counted by `filter_passthrough_events_total` (tagged `kind`).
+
 Known limitation: a compile error's reported position is an offset into the synthetic wrapper
 source, not `condition` alone — the code frame still shows the right text and column, with the
 wrapper visible around it.
@@ -187,12 +200,18 @@ transforms:
     type: filter
     inputs: [app_logs]
     condition: '.status >= 500'
+  drop_health_checks:
+    type: filter
+    inputs: [raw_spans]
+    event_kind: span
+    condition: '.attributes.http_route != "/healthz"'
 ```
 
 ## `route`
 
-Sends each log event to every named route whose Ferrule Script condition is true, using the same
-compilation approach as `filter` (one wrapped program per route). A route's port is its own name.
+Sends each event of one kind (`event_kind`) to every named route whose Ferrule Script condition is
+true, using the same compilation approach as `filter` (one wrapped program per route). A route's
+port is its own name; the other event kind passes through unchanged.
 
 | Option            | Type                           | Default        | Description                                                        |
 | ----------------- | ------------------------------ | -------------- | ------------------------------------------------------------------ |
@@ -201,15 +220,21 @@ compilation approach as `filter` (one wrapped program per route). A route's port
 | `route_unmatched` | boolean                        | `true`         | route events matching no route to `unmatched_port`                 |
 | `unmatched_port`  | string                         | `"_unmatched"` | port for events matching no route (used only if `route_unmatched`) |
 | `input_schema`    | map of field name → type name  | —              | same shape as `script`'s, used to type every condition             |
+| `event_kind`      | `log` \| `span`                | `log`          | which event kind every condition runs against; see below           |
 
-Every route's condition is evaluated independently against the **original** event: a condition is
-a single expression, and the grammar has no way to put an assignment statement inside an
-expression, so no route's condition can mutate a field another route reads. An event matching
-several routes is fanned out to all of them — the first match reuses the original event object,
-every later match is `LogEvent.clone()` (which already clones finalizers), so the upstream batch
-acknowledges only once every copy finishes. A route condition that calls `emit()` is a known,
-documented gap: the extra event is discarded, since with several routes possibly matching there is
-no single obvious port for it — write route conditions as pure predicates.
+Every route's condition is evaluated independently against the **original** event (or, for
+`event_kind: span`, a fresh read-only view of it): a condition is a single expression, and the
+grammar has no way to put an assignment statement inside an expression, so no route's condition
+can mutate a field another route reads. An event matching several routes is fanned out to all of
+them — the first match reuses the original event object, every later match is `.clone()` (which
+already clones finalizers), so the upstream batch acknowledges only once every copy finishes. A
+route condition that calls `emit()` is a known, documented gap: the extra event is discarded,
+since with several routes possibly matching there is no single obvious port for it — write route
+conditions as pure predicates.
+
+`event_kind: span` compiles every condition against the span view instead
+(`docs/language/design.md`'s "Span events"); `input_schema` has no effect in that case. The other
+event kind passes through unchanged, counted by `route_passthrough_events_total` (tagged `kind`).
 
 ```yaml
 transforms:
@@ -520,14 +545,19 @@ composable policies, combined with OR.
 
 Policies (`type` discriminates):
 
-| `type`               | Fields                                                                | Samples when...                                                             |
-| -------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `status_error`       | —                                                                     | any span in the trace has `status: error`                                   |
-| `latency`            | `threshold` (duration), `scope` (`root`\|`any`, default `root`)       | a span's duration is ≥ `threshold`                                          |
-| `probabilistic`      | `rate` (0–1)                                                          | deterministically, by hashing the trace ID                                  |
-| `attribute`          | `condition` (field condition), `scope` (`root`\|`any`, default `any`) | a span matches; field paths use `attributes.*`/`resource.*`/`name`/`status` |
-| `rate_limit`         | `spans_per_second`                                                    | a shared token bucket has budget for the trace's spans                      |
-| `and` / `or` / `not` | `policies` / `policies` / `policy`                                    | logical composition of nested policies                                      |
+| `type`               | Fields                                                                          | Samples when...                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `status_error`       | —                                                                               | any span in the trace has `status: error`                                                       |
+| `latency`            | `threshold` (duration), `scope` (`root`\|`any`, default `root`)                 | a span's duration is ≥ `threshold`                                                              |
+| `probabilistic`      | `rate` (0–1)                                                                    | deterministically, by hashing the trace ID                                                      |
+| `attribute`          | `condition` (field condition), `scope` (`root`\|`any`, default `any`)           | a span matches; field paths use `attributes.*`/`resource.*`/`name`/`status`                     |
+| `script`             | `condition` (Ferrule Script expression), `scope` (`root`\|`any`, default `any`) | a span matches, evaluated against the span view (see `docs/language/design.md`'s "Span events") |
+| `rate_limit`         | `spans_per_second`                                                              | a shared token bucket has budget for the trace's spans                                          |
+| `and` / `or` / `not` | `policies` / `policies` / `policy`                                              | logical composition of nested policies                                                          |
+
+`script` is the same kind of condition `filter`/`route`'s `event_kind: span` compile — a single
+Ferrule Script boolean expression, checked at build time — for sampling rules the fixed
+`attribute` condition tree can't express (arithmetic, several attributes combined, regexes).
 
 Memory is bounded without losing spans: `max_spans_per_trace`, `max_bytes`, and `max_traces` all
 force an _earlier_ decision for the affected trace (using whatever spans it has so far) rather
@@ -544,6 +574,7 @@ transforms:
     policies:
       - { type: status_error }
       - { type: latency, threshold: 500ms, scope: any }
+      - { type: script, condition: '.attributes.http_route == "/checkout"' }
       - { type: probabilistic, rate: 0.05 }
 ```
 
@@ -603,14 +634,15 @@ transforms:
 
 - `script`'s `input_schema` is a flat field → type-name map; there is no nested object/array
   element typing (a named `array`/`object` field stays fully open).
-- `script` never runs the same program against both log and metric events — `metrics: true`
-  switches which kind it handles, it doesn't add a second one — and span events have no view at
-  all yet, so they always pass through untouched (see the script package README's "Execution
-  model").
+- `script` never runs the same program against two event kinds at once — `event_kind` switches
+  which one it handles, it doesn't add a second one (see the script package README's "Execution
+  model"); put a `split_by_kind` ahead of several `script` instances if a pipeline needs more than
+  one.
 - The metric view types every value-type's field(s) together rather than narrowing to the event's
   actual `.value_type`; declaring the specific value type up front (to make, say, `.buckets` a
   compile-time error on a counter) is a documented, currently unimplemented follow-up
-  (`@ferrule/script`'s `metric/schema.ts`).
+  (`@ferrule/script`'s `metric/schema.ts`). The span view has the same kind of gap for `.scope` (a
+  span's `InstrumentationScope`): it isn't exposed at all yet (`span/schema.ts`).
 - `filter`/`route` compile `condition` inside a synthetic wrapper program
   (`if !((<condition>) ?? <fallback>) { drop }`); a compile error's position is reported against
   that wrapper, not the bare `condition` string.

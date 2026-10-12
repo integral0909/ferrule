@@ -467,7 +467,7 @@ exceeded: ...', span }` — a distinct, greppable reason prefix, not a separate 
 Override any of them per call via `program.run(event, { limits: { maxStringLength: 4096 } })`
 (`RunOptions.limits` is a `Partial<ResourceLimits>`, merged over the defaults).
 
-### Execution model: logs directly, metrics through a view, spans not yet
+### Execution model: logs directly, metrics and spans through a view
 
 `CompiledProgram.run` itself still accepts only a `LogEvent` — `MetricEvent`/`SpanEvent` are a
 compile-time (TypeScript) type error at the call site, not a runtime check. The standard library
@@ -486,10 +486,18 @@ every value-type's own field(s) (`.value`, `.values`, `.samples`/`.statistic`,
 `applyViewToMetric` build the `LogEvent`-shaped view a compiled program actually runs against and
 convert the result back into the real `MetricEvent`, fully re-validated (not just type-checked:
 see that section's "every other field's write is _also_ validated" paragraph). `script`'s
-`metrics: true` option (`packages/operators/src/script.ts`) is the pipeline-facing wrapper around
-this. A **span** event has no such view yet; a caller that needs to run a Ferrule Script transform
-on spans today should convert them to a `LogEvent` representation first (or wait for a future
-milestone) — there is no supported way to do it through this package.
+`event_kind: metric` option (`packages/operators/src/script.ts`) is the pipeline-facing wrapper
+around this.
+
+A **span** event gets the same two-module split: `span/schema.ts`'s `spanEventSchema()` types
+`.trace_id`/`.span_id`/`.parent_span_id` (read-only hex strings), `.trace_state`, `.name`, `.kind`,
+`.start_time`/`.end_time`, the derived, read-only `.duration`, `.status`, `.attributes`,
+`.resource`, and the read-only `.annotations`/`.links` — see design.md's "Span events" — and
+`span/view.ts`'s `spanEventToView`/`applyViewToSpan` build/apply the matching `LogEvent`-shaped
+view, the same "checker types it, write-back validates it" split the metric view uses. `script`'s
+`event_kind: span` option runs a full program against it; `filter`/`route`'s `event_kind: span`
+and `tail_sampling`'s `script` policy type check a single boolean _expression_ against it instead,
+with nothing written back (the grammar has no assignment expression).
 
 ### Inline tests
 
@@ -610,8 +618,8 @@ LSP or CLI built on this package).
   function cannot be named `match` — the parser cannot tell `match(x)` (a call) apart from `match
 (x) { ... }` (a match expression with a parenthesized subject) without deeper lookahead than the
   rest of the grammar needs. `matches(value, pattern)` is the closest available name.
-- **`CompiledProgram.run` itself accepts only `LogEvent`; a metric event goes through a view, and
-  a span event has no view at all yet** — see "Execution model" above.
+- **`CompiledProgram.run` itself accepts only `LogEvent`; a metric or span event goes through a
+  view instead** — see "Execution model" above.
 - **The metric view's per-value-type fields are typed together, not narrowed to the event's actual
   type.** `.value`, `.buckets`, `.quantiles`, etc. are all precisely typed regardless of
   `.value_type`, so reading or writing one that does not apply reads back `null`/has no effect
@@ -621,3 +629,7 @@ LSP or CLI built on this package).
 - **Changing a metric's value type is not supported.** `.value_type` is read-only
   (`metricReadonlyPaths`); there is no way to turn a counter into a histogram from inside a
   program. Route the event through a different series or a separate derivation step instead.
+- **The span view doesn't expose `.scope` (a span's `InstrumentationScope`).** A program can read
+  and write every other `SpanEvent` field (see design.md's "Span events"), but not a span's
+  instrumentation scope name/version/attributes — a documented, currently unimplemented follow-up;
+  see `span/schema.ts`'s module doc.

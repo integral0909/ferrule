@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { LogEvent } from '@ferrule/core';
-import { KafkaAuthError } from '../../src/kafka/errors.js';
+import { KafkaAuthError } from '@ferrule/codecs';
 import { KafkaProducer } from '../../src/kafka/producer.js';
 import { FakeKafkaBroker } from './support/fake-kafka-broker.js';
 

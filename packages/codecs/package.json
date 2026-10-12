@@ -1,7 +1,7 @@
 {
   "name": "@ferrule/codecs",
   "version": "0.1.0",
-  "description": "Wire formats and framing for Ferrule: protobuf/OTLP, syslog, logfmt, Prometheus text, StatsD, CSV, and more.",
+  "description": "Wire formats and framing for Ferrule: protobuf/OTLP, syslog, logfmt, Prometheus text, StatsD, Kafka, and more.",
   "license": "Apache-2.0",
   "author": "Fredrik Ahman <fredrik.fullstackdev@gmail.com>",
   "repository": {
@@ -29,6 +29,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@ferrule/buffer": "workspace:*",
     "@ferrule/core": "workspace:*"
   }
 }

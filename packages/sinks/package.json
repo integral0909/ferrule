@@ -29,7 +29,6 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@ferrule/buffer": "workspace:*",
     "@ferrule/codecs": "workspace:*",
     "@ferrule/core": "workspace:*",
     "@ferrule/runtime": "workspace:*",

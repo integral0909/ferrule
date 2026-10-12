@@ -1,8 +1,7 @@
+import { readFileSync } from 'node:fs';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
-import type { TlsOptions } from '../fragments.js';
-import { writeWithBackpressure } from '../stream/backpressure-write.js';
-import { resolveTlsConnectOptions } from '../stream/wire-transport.js';
+import { FerruleError } from '@ferrule/core';
 import { KafkaWriter } from './primitives.js';
 import {
   ApiKey,
@@ -18,13 +17,31 @@ import { performSaslAuth, type KafkaSaslOptions } from './sasl.js';
  * to `maxInFlightRequests` requests may be outstanding at once; responses are matched back to
  * their request by `correlation_id` regardless of the order the broker answers in, since Kafka
  * does not guarantee in-order responses across different APIs on a pipelined connection).
+ *
+ * Used by both the producer (`@ferrule/sinks`'s `kafka/producer.ts`) and the consumer group
+ * client (`./consumer.ts`, in this package) — the only client-identity difference between them is
+ * which requests they send, not how bytes reach the broker.
  */
+
+/** The subset of TLS options this connection needs, structurally compatible with
+ * `@ferrule/sinks`'s `TlsOptions` schema fragment (and anything else shaped like it) without this
+ * package depending on that one — `@ferrule/codecs` is a lower layer than `@ferrule/sinks`, and a
+ * future `@ferrule/sources` Kafka source will have its own, differently-shaped option schema that
+ * should be just as usable here. */
+export interface KafkaTlsOptions {
+  readonly enabled?: boolean;
+  readonly ca_file?: string;
+  readonly cert_file?: string;
+  readonly key_file?: string;
+  readonly verify_certificate?: boolean;
+  readonly server_name?: string;
+}
 
 export interface KafkaConnectionOptions {
   readonly host: string;
   readonly port: number;
   readonly clientId?: string;
-  readonly tls?: TlsOptions;
+  readonly tls?: KafkaTlsOptions;
   readonly connectTimeoutMs?: number;
   readonly maxInFlightRequests?: number;
   readonly sasl?: KafkaSaslOptions;
@@ -194,9 +211,9 @@ export class KafkaBrokerConnection {
     if (this.terminalError !== undefined) return;
     this.terminalError = error instanceof Error ? error : new Error(String(error));
     // An unexpected socket error or close makes this connection permanently unusable, exactly
-    // like an explicit `close()` — without this, `KafkaProducer.getOrConnect`'s `!isClosed` reuse
-    // check would hand back a dead connection on the very next send, whose `write()` either
-    // throws or (worse) silently never resolves, instead of opening a fresh one.
+    // like an explicit `close()` — without this, a caller's reuse check would hand back a dead
+    // connection on the very next send, whose `write()` either throws or (worse) silently never
+    // resolves, instead of opening a fresh one.
     this.closed = true;
     for (const [, pending] of this.pending) pending.reject(this.terminalError);
     this.pending.clear();
@@ -250,15 +267,47 @@ function dialTcp(host: string, port: number, timeoutMs: number): Promise<net.Soc
   });
 }
 
+/** The subset of Node's `tls.connect()` options a raw-socket TLS dial needs, resolved from
+ * {@link KafkaTlsOptions}. Mirrors `@ferrule/sinks`'s `resolveTlsConnectOptions` (shared there by
+ * every sink that dials a raw TCP/TLS socket itself), kept as this package's own small copy rather
+ * than imported from `@ferrule/sinks` — `@ferrule/codecs` is a lower layer than `@ferrule/sinks`
+ * and must not depend on it. */
+function resolveTlsConnectOptions(
+  tlsOptions: KafkaTlsOptions,
+  defaultServerName: string,
+): { ca?: Buffer; cert?: Buffer; key?: Buffer; rejectUnauthorized: boolean; servername: string } {
+  return {
+    ...(tlsOptions.ca_file !== undefined ? { ca: readTlsFile(tlsOptions.ca_file, 'CA') } : {}),
+    ...(tlsOptions.cert_file !== undefined
+      ? { cert: readTlsFile(tlsOptions.cert_file, 'client certificate') }
+      : {}),
+    ...(tlsOptions.key_file !== undefined
+      ? { key: readTlsFile(tlsOptions.key_file, 'client private key') }
+      : {}),
+    rejectUnauthorized: tlsOptions.verify_certificate ?? true,
+    servername: tlsOptions.server_name ?? defaultServerName,
+  };
+}
+
+function readTlsFile(path: string, kind: string): Buffer {
+  try {
+    return readFileSync(path);
+  } catch (cause) {
+    throw new FerruleError('E_KAFKA_TLS_FILE', `cannot read ${kind} file ${JSON.stringify(path)}`, {
+      cause,
+    });
+  }
+}
+
 function negotiateTls(
   raw: net.Socket,
   host: string,
-  tlsOptions: TlsOptions,
+  tlsOptions: KafkaTlsOptions,
 ): Promise<tls.TLSSocket> {
   return new Promise((resolve, reject) => {
     const socket = tls.connect({
       socket: raw,
-      ...resolveTlsConnectOptions(tlsOptions, host, 'E_KAFKA_TLS_FILE'),
+      ...resolveTlsConnectOptions(tlsOptions, host),
     });
     const onSecure = (): void => {
       cleanup();
@@ -273,6 +322,43 @@ function negotiateTls(
       socket.off('error', onError);
     };
     socket.once('secureConnect', onSecure);
+    socket.once('error', onError);
+  });
+}
+
+/** Writes `chunk` to `socket`, resolving once it is safe to write again: immediately if the
+ * socket's internal buffer has room (`write` returned `true`), or after the next `'drain'` event
+ * otherwise — the Node-documented way to respect a writable stream's backpressure. A self-contained
+ * copy of `@ferrule/sinks`'s `writeWithBackpressure` (same reasoning as `resolveTlsConnectOptions`
+ * above: this package must not depend on `@ferrule/sinks`). */
+function writeWithBackpressure(socket: Socket, chunk: Buffer): Promise<void> {
+  let ok: boolean;
+  try {
+    ok = socket.write(chunk);
+  } catch (error) {
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- propagates the socket's thrown value as-is
+    return Promise.reject(error);
+  }
+  if (ok) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      socket.removeListener('drain', onDrain);
+      socket.removeListener('error', onError);
+    };
+    const onDrain = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+    socket.once('drain', onDrain);
     socket.once('error', onError);
   });
 }

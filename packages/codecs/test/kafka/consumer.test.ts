@@ -293,6 +293,48 @@ describe('KafkaConsumer: a member leaves mid-stream', () => {
   });
 });
 
+describe('KafkaConsumer: onRebalance callback', () => {
+  it('can call commit() for a revoked partition without deadlocking', async () => {
+    // `onRebalance` fires mid-`joinAndSync()`, before that call has returned — a caller that
+    // calls `commit()` from inside it (e.g. to persist a revoked partition's acknowledged
+    // offset before releasing it, exactly what a Kafka *source* needs to do) must not have that
+    // `commit()` wait on the very `joinAndSync()` call it is nested inside, or it would hang
+    // forever. Regression test for that deadlock.
+    const clock = new ManualClock();
+    broker = new FakeGroupCoordinatorBroker({ partitionCounts: { events: 2 } });
+    await broker.listen();
+
+    let committedDuringRebalance: Promise<void> | undefined;
+    const a = makeConsumer(broker, 'g14b', ['events'], clock, {
+      onRebalance: ({ revoked }) => {
+        if (revoked.length === 0) return;
+        committedDuringRebalance = a.commit(
+          revoked.map((tp) => ({ topic: tp.topic, partition: tp.partition, offset: 9n })),
+        );
+      },
+    });
+    await a.poll();
+    expect(a.assignment).toHaveLength(2);
+
+    const b = makeConsumer(broker, 'g14b', ['events'], clock);
+    const bPoll = b.poll();
+    await settleUntil(clock, HEARTBEAT_MS, bPoll);
+    await bPoll;
+    // `a`'s own rejoin (triggered by its heartbeat loop, independent of `bPoll`'s own timing)
+    // may not have reached `onRebalance` yet even though `b`'s side of the same rebalance has
+    // already settled; keep stepping until it has.
+    await settleWhile(clock, HEARTBEAT_MS, () => committedDuringRebalance !== undefined);
+    expect(a.assignment).toHaveLength(1);
+    expect(b.assignment).toHaveLength(1);
+
+    expect(committedDuringRebalance).toBeDefined();
+    await committedDuringRebalance; // would hang forever if this deadlocked
+
+    const revokedPartition = [0, 1].find((p) => !a.assignment.some((tp) => tp.partition === p))!;
+    expect(broker.committedOffset('g14b', 'events', revokedPartition)).toBe(9n);
+  });
+});
+
 describe('KafkaConsumer: offsets', () => {
   it('commit() persists offsets that a fresh consumer resumes from after a restart', async () => {
     const clock = new ManualClock();

@@ -976,6 +976,13 @@ export class FakeGroupCoordinatorBroker {
     batch[batch.length - 1] = (batch[batch.length - 1]! + 1) & 0xff;
   }
 
+  /** This group's actual committed offset for `topic`-`partition` as this broker holds it right
+   * now (`undefined` if nothing has ever been committed) — for assertions, bypassing the
+   * client-side round trip an `OffsetFetch` call would otherwise require. */
+  committedOffset(groupId: string, topic: string, partition: number): bigint | undefined {
+    return this.state.groups.get(groupId)?.offsets.get(tpKey(topic, partition));
+  }
+
   async close(): Promise<void> {
     await new Promise<void>((resolve) => {
       this.server.close(() => resolve());

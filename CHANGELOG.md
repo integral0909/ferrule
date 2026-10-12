@@ -11,6 +11,12 @@ All notable changes to this project are documented here. The format follows
 - `@ferrule/core`: value model with distinct integer and float kinds, nanosecond timestamps,
   field paths, a lossless bounded JSON codec, log/metric/span events, metric arithmetic, and
   end-to-end delivery acknowledgements.
+- `@ferrule/core`/`@ferrule/codecs`: a lossless exponential-histogram `MetricValue` (scale, zero
+  count/threshold, sparse positive/negative buckets), with merge and delta support across
+  differing scales (downscaling to the coarser one), and lossless OTLP `ExponentialHistogram`
+  decode/encode (protobuf and JSON) in place of the previous decode-only explicit-bucket
+  expansion. Prometheus text/remote write and StatsD, which have no exponential-scale
+  representation, convert at the edge with the new `exponentialHistogramToHistogram` helper.
 - `@ferrule/schema`: typed option schemas that report every issue with its path, suggest fixes
   for typos, and redact secrets.
 - `@ferrule/script`: Ferrule Script — parser with error recovery, type checker with fallibility

@@ -320,8 +320,9 @@ wrapping `kafkajs`.
   — stays on one partition until `onBatchComplete`) handle unkeyed records.
 - **`protocol.ts`** — request/response encode/decode for `ApiVersions` (key 18, v0, classic
   header/body — real brokers always accept it that way, for version discovery before either side
-  knows the other speaks flexible headers), `Metadata` (key 3, v9, flexible) and `Produce` (key 0,
-  v9, flexible — chosen so the compact string/array and tagged-fields primitives are genuinely
+  knows the other speaks flexible headers), `Metadata` (key 3, v9, flexible), `InitProducerId`
+  (key 22, v4, flexible — the idempotent producer's bootstrap call) and `Produce` (key 0, v9,
+  flexible — chosen so the compact string/array and tagged-fields primitives are genuinely
   exercised on the wire, not just unit-tested), and `SaslHandshake`/`SaslAuthenticate` (keys 17/36,
   v1, classic).
 - **`sasl.ts`** — SASL/PLAIN (RFC 4616) and SASL/SCRAM-SHA-256 (reusing `stream/scram.ts`,
@@ -341,10 +342,36 @@ wrapping `kafkajs`.
   broker, and issues at most one `Produce` request per broker involved regardless of how many
   topic-partitions it touches. Finishes each record's event `delivered`/`rejected` directly as its
   own partition's response arrives; a retryable per-partition error is thrown (without finishing
-  those events) so the sink's `RetryPolicy` resends — which may re-send records a partition already
-  accepted, an accepted consequence of the pipeline's at-least-once contract, since idempotence is
-  out of scope here. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
+  those events) so the sink's `RetryPolicy` resends. Partition assignment and, with `idempotent:
+true`, the sequence reservation below are both computed once per distinct batch (keyed by the
+  identity of the `OutgoingRecord[]` array `runBatchedSink` passes back in on every retry of the
+  same batch) and reused on every subsequent retry, rather than recomputed — a prerequisite for
+  idempotence, and a correctness fix in its own right for the sticky/round-robin partitioners,
+  which are stateful and would otherwise assign a retried batch to a different partition than its
+  first attempt. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
   dependency, per CONTRIBUTING.md's dependency policy) and are rejected at encode time.
+
+  **Idempotent production** (`idempotent: true`, the default): `InitProducerId` (key 22) fetches a
+  producer ID and epoch, lazily, before the first batch; every `RecordBatch` then carries that
+  producer ID/epoch and a per-partition base sequence number, reserved once per batch (see above)
+  and reused unchanged on every retry, so a retry after a partial failure resends the exact same
+  sequence range rather than appending a duplicate. `DUPLICATE_SEQUENCE_NUMBER` from the broker is
+  treated as success (the broker already has this exact batch, typically because an earlier
+  attempt's response was lost — e.g. the connection dropped — and the producer retried). An
+  `OUT_OF_ORDER_SEQUENCE_NUMBER`, `INVALID_PRODUCER_EPOCH`, or `PRODUCER_FENCED` response means
+  this producer's (ID, epoch, sequence) bookkeeping can no longer be trusted — a gap, a stale
+  epoch, or another producer instance has fenced this one out — and resending under the same
+  identity is not safe, since an earlier attempt of the same data may _also_ have been accepted
+  under the old identity; rather than risk a duplicate (by blindly retrying) or an out-of-order
+  write (by resending under a reset identity while an earlier attempt might still be in flight),
+  the affected batch's events are finished `errored` directly and the producer ID and every
+  partition's sequence counter are reset, so whatever is produced next starts clean. Idempotence
+  requires `acks: "-1"` and `max_in_flight_requests_per_connection` of at most 5 — a broker's dedup
+  window only covers the last 5 unacknowledged batches per partition — both validated by
+  `kafkaSinkOptionsSchema` (and defensively by `KafkaProducer`'s own constructor) before anything
+  is sent. Transactional production (multi-partition atomic writes, KIP-98's other half) is not
+  implemented — only the simpler idempotent-but-not-transactional mode this issue scoped.
+
 - **`sink.ts`** — topic/key/header templates (`stream/template.ts`), an `acks` schema of
   `'0' | '1' | '-1'` (mapped to the numeric wire value), the shared `encoding`/`batch`/`retry`
   fragments, and the same `runBatchedSink` + never-throws-in-`encode` pattern as
@@ -357,8 +384,22 @@ Every protocol client is tested against an in-process fake server built from the
 primitives, not mocks: `test/stream/support/fake-postgres-server.ts` (an async request/response
 pump per connection — trust/cleartext/MD5/SCRAM-SHA-256 auth, the simple and extended query
 protocols, `COPY` with byte-for-byte capture and a configurable server-side accept/reject
-decision) and `test/stream/support/fake-kafka-broker.ts` (`ApiVersions`/`Metadata`/`Produce`/SASL,
-decoding and CRC-verifying every `RecordBatch` it receives). `test/stream/support/scram-server.ts`
+decision) and `test/stream/support/fake-kafka-broker.ts`
+(`ApiVersions`/`Metadata`/`InitProducerId`/`Produce`/SASL, decoding and CRC-verifying every
+`RecordBatch` it receives). For idempotent production specifically, the fake broker tracks a
+producer ID/epoch per `InitProducerId` call and the last acknowledged sequence number per
+(producer, topic, partition) — shared across every connection it accepts, since that bookkeeping
+is cluster state on a real broker, not connection state — and deduplicates exactly like a real
+broker would: a batch whose sequence range is entirely at or before what was already acknowledged
+is rejected with `DUPLICATE_SEQUENCE_NUMBER` (and not re-applied) rather than appended again, and a
+batch leaving a gap gets `OUT_OF_ORDER_SEQUENCE_NUMBER`. Its `onProduce` test hook can also return
+`disconnectAfter: true` to apply a write and then destroy the connection _before_ sending any
+response — simulating the exact ambiguous-outcome failure (and, bundled with per-partition error
+injection, the "partial batch failure" from GitHub issue #17) that idempotent production exists to
+handle — and `kafka-idempotent.test.ts`/`kafka-sink.test.ts` assert that neither scenario ever
+produces a duplicate record, via `appliedRecords` (the fake broker's post-dedup view of what was
+actually written, as opposed to `receivedBatches`, which logs every wire attempt including
+rejected duplicates). `test/stream/support/scram-server.ts`
 is a from-scratch SCRAM-SHA-256 _server_-side verifier shared by both fakes, so the client in
 `stream/scram.ts` is checked against an independent implementation, not just against itself; the
 RFC 7677 §3 published test vector is asserted exactly (`scram.test.ts`). `murmur2` is
@@ -379,9 +420,13 @@ themselves are genuine (if fast, loopback) async I/O.
   specific magic numbers for named inputs, to avoid asserting a value from memory that could
   itself be wrong.
 - **Kafka compression** supports `none` and `gzip` only (no snappy/lz4/zstd, which need a native
-  dependency this project avoids); **idempotent/transactional production** is not implemented
-  (not required by the task); a partial batch failure can cause an already-accepted partition's
-  records to be resent on retry.
+  dependency this project avoids).
+- **Transactional Kafka production** (multi-partition atomic writes, the other half of KIP-98) is
+  not implemented — only idempotent (duplicate-free retries within a single partition) production,
+  which is what `idempotent: true` (the default) enables; see `producer.ts` above for its
+  `InitProducerId`/sequence-number design and its documented handling of
+  `OUT_OF_ORDER_SEQUENCE_NUMBER`/`INVALID_PRODUCER_EPOCH`/`PRODUCER_FENCED` (reset the producer ID
+  and finish the affected batch `errored` rather than risk a duplicate or a reordering).
 - **PostgreSQL extended query protocol** supports text-format parameters and results only (no
   binary format), and does not use prepared-statement caching (`Parse` targets the unnamed
   statement every call) — sufficient for the sink's own `COPY`-based inserts, which are the

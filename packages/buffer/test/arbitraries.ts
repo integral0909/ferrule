@@ -10,6 +10,7 @@ import {
   type Bucket,
   type Event,
   type EventMetadata,
+  type ExponentialBuckets,
   type InstrumentationScope,
   type MetadataInit,
   type MetricValue,
@@ -103,6 +104,11 @@ const arbQuantile: fc.Arbitrary<Quantile> = fc.record({
   value: arbFiniteFloat,
 });
 
+const arbExponentialBuckets: fc.Arbitrary<ExponentialBuckets> = fc.record({
+  offset: fc.integer({ min: -1000, max: 1000 }),
+  counts: fc.array(arbFiniteFloat, { maxLength: 5 }),
+});
+
 export const arbMetricValue: fc.Arbitrary<MetricValue> = fc.oneof(
   fc.record({ type: fc.constant('counter' as const), value: arbFiniteFloat }),
   fc.record({ type: fc.constant('gauge' as const), value: arbFiniteFloat }),
@@ -117,6 +123,16 @@ export const arbMetricValue: fc.Arbitrary<MetricValue> = fc.oneof(
   fc.record({
     type: fc.constant('histogram' as const),
     buckets: fc.array(arbBucket, { maxLength: 5 }),
+    count: arbFiniteFloat,
+    sum: arbFiniteFloat,
+  }),
+  fc.record({
+    type: fc.constant('exponentialHistogram' as const),
+    scale: fc.integer({ min: -11, max: 20 }),
+    zeroCount: arbFiniteFloat,
+    zeroThreshold: arbFiniteFloat,
+    positive: arbExponentialBuckets,
+    negative: arbExponentialBuckets,
     count: arbFiniteFloat,
     sum: arbFiniteFloat,
   }),

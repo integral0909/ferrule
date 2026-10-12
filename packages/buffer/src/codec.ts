@@ -8,6 +8,7 @@ import {
   type Bucket,
   type Event,
   type EventMetadata,
+  type ExponentialBuckets,
   type InstrumentationScope,
   type MetadataInit,
   type MetricValue,
@@ -39,7 +40,12 @@ import { CodecLimitExceededError, CodecMalformedError, CodecVersionError } from 
  * escape to the caller.
  */
 
-export const FORMAT_VERSION = 1;
+/**
+ * Bumped to 2 when the `exponentialHistogram` metric value tag (§1.4) was added: a decoder built
+ * against version 1 has no case for tag 6 and would misread the bytes that follow it, so the
+ * version byte is what lets it fail cleanly (`CodecVersionError`) instead.
+ */
+export const FORMAT_VERSION = 2;
 
 // --- Value tags ------------------------------------------------------------------------------
 
@@ -68,6 +74,7 @@ const METRIC_SET = 2;
 const METRIC_DISTRIBUTION = 3;
 const METRIC_HISTOGRAM = 4;
 const METRIC_SUMMARY = 5;
+const METRIC_EXPONENTIAL_HISTOGRAM = 6;
 
 const SPAN_KINDS: readonly SpanKind[] = [
   'unspecified',
@@ -443,6 +450,16 @@ function encodeMetricValue(w: ByteWriter, value: MetricValue): void {
       w.writeFloat64LE(value.count);
       w.writeFloat64LE(value.sum);
       return;
+    case 'exponentialHistogram':
+      w.writeUint8(METRIC_EXPONENTIAL_HISTOGRAM);
+      w.writeFloat64LE(value.scale);
+      w.writeFloat64LE(value.zeroCount);
+      w.writeFloat64LE(value.zeroThreshold);
+      writeExponentialBuckets(w, value.positive);
+      writeExponentialBuckets(w, value.negative);
+      w.writeFloat64LE(value.count);
+      w.writeFloat64LE(value.sum);
+      return;
     case 'summary':
       w.writeUint8(METRIC_SUMMARY);
       w.writeVarint(value.quantiles.length);
@@ -491,6 +508,25 @@ function decodeMetricValue(r: ByteReader, limits: ResolvedLimits): MetricValue {
       const sum = r.readFloat64LE();
       return { type: 'histogram', buckets, count, sum };
     }
+    case METRIC_EXPONENTIAL_HISTOGRAM: {
+      const scale = r.readFloat64LE();
+      const zeroCount = r.readFloat64LE();
+      const zeroThreshold = r.readFloat64LE();
+      const positive = readExponentialBuckets(r, limits);
+      const negative = readExponentialBuckets(r, limits);
+      const count = r.readFloat64LE();
+      const sum = r.readFloat64LE();
+      return {
+        type: 'exponentialHistogram',
+        scale,
+        zeroCount,
+        zeroThreshold,
+        positive,
+        negative,
+        count,
+        sum,
+      };
+    }
     case METRIC_SUMMARY: {
       const n = readCount(r, limits.maxCollectionLength, 'metric.summary.quantiles');
       const quantiles: Quantile[] = [];
@@ -504,6 +540,20 @@ function decodeMetricValue(r: ByteReader, limits: ResolvedLimits): MetricValue {
     default:
       throw new CodecMalformedError(`unknown metric value tag: ${tag}`);
   }
+}
+
+function writeExponentialBuckets(w: ByteWriter, buckets: ExponentialBuckets): void {
+  w.writeFloat64LE(buckets.offset);
+  w.writeVarint(buckets.counts.length);
+  for (const c of buckets.counts) w.writeFloat64LE(c);
+}
+
+function readExponentialBuckets(r: ByteReader, limits: ResolvedLimits): ExponentialBuckets {
+  const offset = r.readFloat64LE();
+  const n = readCount(r, limits.maxCollectionLength, 'metric.exponentialHistogram.buckets');
+  const counts: number[] = [];
+  for (let i = 0; i < n; i++) counts.push(r.readFloat64LE());
+  return { offset, counts };
 }
 
 // --- Spans -----------------------------------------------------------------------------------

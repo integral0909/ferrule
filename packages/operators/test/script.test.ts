@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { LogEvent } from '@ferrule/core';
+import type { LogEvent, SpanEvent } from '@ferrule/core';
 import { FerruleError, MetricEvent } from '@ferrule/core';
 import { scriptTransform } from '@ferrule/operators';
 import {
@@ -195,12 +195,12 @@ describe('script', () => {
   });
 });
 
-describe('script: metrics: true', () => {
-  it('rejects input_schema combined with metrics at config time', () => {
+describe("script: event_kind: 'metric'", () => {
+  it('rejects input_schema combined with event_kind: metric at config time', () => {
     expect(() =>
       scriptTransform.options.parse({
         source: '.x = 1',
-        metrics: true,
+        event_kind: 'metric',
         input_schema: { x: 'int' },
       }),
     ).toThrow();
@@ -208,19 +208,19 @@ describe('script: metrics: true', () => {
 
   it('rejects `.tags.<x> = <non-string>` as a build-time compile error (ferrule/ferrule#12)', async () => {
     await expect(
-      buildTransform(scriptTransform, { metrics: true, source: '.tags.env = 1' }),
+      buildTransform(scriptTransform, { event_kind: 'metric', source: '.tags.env = 1' }),
     ).rejects.toBeInstanceOf(FerruleError);
   });
 
   it('rejects changing the metric value type as a build-time compile error', async () => {
     await expect(
-      buildTransform(scriptTransform, { metrics: true, source: '.value_type = "gauge"' }),
+      buildTransform(scriptTransform, { event_kind: 'metric', source: '.value_type = "gauge"' }),
     ).rejects.toBeInstanceOf(FerruleError);
   });
 
   it('runs a compiled program over a metric event, mutating it in place', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: '.tags.region = "eu"\n.value = .value + 1.0\n',
     });
     const metric = counterMetric('requests', 1, { env: 'prod' });
@@ -234,7 +234,7 @@ describe('script: metrics: true', () => {
 
   it('leaves an untouched metric bit-identical (round trip)', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: '# touches nothing\n',
     });
     const metric = gaugeMetric('cpu.load', 0.75, { host: 'a' });
@@ -245,9 +245,9 @@ describe('script: metrics: true', () => {
     expect(metric.tags.get('host')).toBe('a');
   });
 
-  it('with metrics: true, log and span events pass through unchanged instead', async () => {
+  it("with event_kind: 'metric', log and span events pass through unchanged instead", async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: '.value = .value + 1.0',
     });
     const log = logEvent({ message: 'hi' });
@@ -260,7 +260,7 @@ describe('script: metrics: true', () => {
 
   it('drop: finishes the metric delivered by default', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: 'if .name == "skip" { drop }',
     });
     const metric = counterMetric('skip', 1);
@@ -272,7 +272,7 @@ describe('script: metrics: true', () => {
 
   it('a deliberate abort routes a log-shaped view of the metric to the errors port', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: 'abort "bad metric"',
     });
     const metric = counterMetric('requests', 1, { env: 'prod' });
@@ -286,7 +286,7 @@ describe('script: metrics: true', () => {
 
   it('an invalid write-back (deleting a required field) aborts with a clear reason', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: 'del(.value)',
     });
     const metric = counterMetric('requests', 1);
@@ -299,7 +299,7 @@ describe('script: metrics: true', () => {
 
   it('drop_on_abort finishes the original metric rejected on an invalid write-back', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: '.kind = "oops"',
       drop_on_abort: true,
     });
@@ -312,7 +312,7 @@ describe('script: metrics: true', () => {
 
   it('a write to a field that does not apply to the metric`s actual type is safely ignored', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: '.buckets = [{"upper_limit": 1.0, "count": 1.0}]\n.value = 9.0\n',
     });
     const metric = counterMetric('requests', 1);
@@ -326,7 +326,7 @@ describe('script: metrics: true', () => {
 
   it('emit() from a metric program adds a plain log event alongside the metric', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: 'emit({ "note": .name })',
     });
     const metric = counterMetric('requests', 1);
@@ -351,7 +351,7 @@ describe('script: metrics: true', () => {
 
   it('a histogram metric round-trips through buckets/count/sum untouched', async () => {
     const { transform, harness } = await buildTransform(scriptTransform, {
-      metrics: true,
+      event_kind: 'metric',
       source: '.tags.unit = "ms"\n',
     });
     const metric = metricEvent({
@@ -379,5 +379,154 @@ describe('script: metrics: true', () => {
       sum: 42.5,
     });
     expect(metric.tags.get('unit')).toBe('ms');
+  });
+});
+
+describe("script: event_kind: 'span'", () => {
+  it('rejects input_schema combined with event_kind: span at config time', () => {
+    expect(() =>
+      scriptTransform.options.parse({
+        source: '.x = 1',
+        event_kind: 'span',
+        input_schema: { x: 'int' },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects a write to a read-only span field as a build-time compile error', async () => {
+    await expect(
+      buildTransform(scriptTransform, { event_kind: 'span', source: '.duration = 1' }),
+    ).rejects.toBeInstanceOf(FerruleError);
+  });
+
+  it('runs a compiled program over a span event, mutating it in place', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: '.attributes.region = "eu"\n.name = upcase(.name) ?? .name\n',
+    });
+    const span = spanEvent({ name: 'checkout' });
+    transform.process([span], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.event).toBe(span);
+    expect(harness.pushed[0]!.port).toBe('_default');
+    expect(span.name).toBe('CHECKOUT');
+    expect(span.attributes.get('region')).toBe('eu');
+  });
+
+  it('drops health-check spans by attribute (ferrule/ferrule#13 acceptance example)', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: 'if .attributes.http_route == "/healthz" { drop }\n',
+    });
+    const healthz = spanEvent({ name: 'GET /healthz', attributes: { http_route: '/healthz' } });
+    const checkout = spanEvent({ name: 'GET /checkout', attributes: { http_route: '/checkout' } });
+    const batch = sealedBatch([healthz]);
+    transform.process([healthz, checkout], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.event).toBe(checkout);
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
+  it('leaves an untouched span bit-identical (round trip)', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: '# touches nothing\n',
+    });
+    const span = spanEvent({ name: 'op', attributes: { service: 'checkout' } });
+    const beforeAttrs = [...span.attributes];
+    transform.process([span], harness.out);
+    expect(harness.pushed[0]!.event).toBe(span);
+    expect(span.name).toBe('op');
+    expect([...span.attributes]).toEqual(beforeAttrs);
+  });
+
+  it("with event_kind: 'span', log and metric events pass through unchanged instead", async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: '.name = "touched"',
+    });
+    const log = logEvent({ message: 'hi' });
+    const metric = counterMetric('requests', 1);
+    transform.process([log, metric], harness.out);
+    expect(harness.pushed).toHaveLength(2);
+    expect(harness.pushed[0]!.event).toBe(log);
+    expect(harness.pushed[1]!.event).toBe(metric);
+  });
+
+  it('drop: finishes the span delivered by default', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: 'if .name == "skip" { drop }',
+    });
+    const span = spanEvent({ name: 'skip' });
+    const batch = sealedBatch([span]);
+    transform.process([span], harness.out);
+    expect(harness.pushed).toHaveLength(0);
+    await expect(batch.completion).resolves.toBe('delivered');
+  });
+
+  it('a deliberate abort routes a log-shaped view of the span to the errors port', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: 'abort "bad span"',
+    });
+    const span = spanEvent({ name: 'checkout' });
+    transform.process([span], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.port).toBe('errors');
+    const out = harness.pushed[0]!.event as LogEvent;
+    expect(out.get('ferrule.error.reason')).toBe('bad span');
+    expect(out.get('name')).toBe('checkout');
+  });
+
+  it('an invalid write-back (an unrecognised .kind) aborts with a clear reason', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: '.kind = "bogus"',
+    });
+    const span = spanEvent({});
+    transform.process([span], harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect(harness.pushed[0]!.port).toBe('errors');
+    const out = harness.pushed[0]!.event as LogEvent;
+    expect(out.get('ferrule.error.reason')).toContain("'.kind'");
+  });
+
+  it('drop_on_abort finishes the original span rejected on an invalid write-back', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: '.status.code = "bogus"',
+      drop_on_abort: true,
+    });
+    const span = spanEvent({});
+    const batch = sealedBatch([span]);
+    transform.process([span], harness.out);
+    expect(harness.pushed).toHaveLength(0);
+    await expect(batch.completion).resolves.toBe('rejected');
+  });
+
+  it('emit() from a span program adds a plain log event alongside the span', async () => {
+    const { transform, harness } = await buildTransform(scriptTransform, {
+      event_kind: 'span',
+      source: 'emit({ "note": .name })',
+    });
+    const span = spanEvent({ name: 'checkout' });
+    const batch = sealedBatch([span]);
+    transform.process([span], harness.out);
+    expect(harness.pushed).toHaveLength(2);
+    expect(harness.pushed[0]!.event).toBe(span);
+    expect((harness.pushed[1]!.event as LogEvent).get('note')).toBe('checkout');
+
+    (harness.pushed[0]!.event as SpanEvent).metadata.finalizers.finish('delivered');
+    let settled = false;
+    void batch.completion.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    harness.pushed[1]!.event.metadata.finalizers.finish('delivered');
+    await expect(batch.completion).resolves.toBe('delivered');
   });
 });

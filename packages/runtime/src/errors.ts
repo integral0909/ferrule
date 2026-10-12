@@ -1,5 +1,5 @@
 import { FerruleError } from '@ferrule/core';
-import type { ComponentKind } from './component.js';
+import type { ComponentKind, Transform } from './component.js';
 
 /**
  * Runtime-specific errors. {@link ShutdownError} and {@link UnknownComponentTypeError} live in
@@ -49,6 +49,42 @@ export class ComponentFailureError extends FerruleError {
       },
     );
     this.name = 'ComponentFailureError';
+  }
+}
+
+/**
+ * Raised when a built transform instance implements neither, or both, of `process` /
+ * `processAsync`. The contract requires exactly one; see the `Transform` interface in
+ * `component.ts`.
+ */
+export class TransformContractError extends FerruleError {
+  constructor(
+    readonly componentId: string,
+    readonly reason: 'missing' | 'both',
+  ) {
+    super(
+      'E_TRANSFORM_CONTRACT',
+      reason === 'missing'
+        ? `transform ${JSON.stringify(componentId)} implements neither process() nor ` +
+          'processAsync(); a transform must implement exactly one'
+        : `transform ${JSON.stringify(componentId)} implements both process() and ` +
+          'processAsync(); a transform must implement exactly one',
+    );
+    this.name = 'TransformContractError';
+  }
+}
+
+/**
+ * Validates that a built transform instance implements exactly one of `process` / `processAsync`.
+ * Called at build time — by `buildTopology` for every real pipeline, and by the testkit's
+ * `testTransform` for unit tests — so a component author sees a clear error instead of the
+ * runtime silently preferring one or the other.
+ */
+export function validateTransformContract(transform: Transform, componentId: string): void {
+  const hasSync = transform.process !== undefined;
+  const hasAsync = transform.processAsync !== undefined;
+  if (hasSync === hasAsync) {
+    throw new TransformContractError(componentId, hasSync ? 'both' : 'missing');
   }
 }
 

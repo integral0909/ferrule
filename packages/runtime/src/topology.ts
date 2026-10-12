@@ -14,7 +14,7 @@ import {
 import type { WhenFull } from './channel.js';
 import { createNullLogger } from './logger.js';
 import type { ComponentRegistry } from './registry.js';
-import type { TopologyIssue } from './errors.js';
+import { validateTransformContract, type TopologyIssue } from './errors.js';
 
 // -------------------------------------------------------------------------------------------
 // Specification
@@ -334,6 +334,7 @@ export async function buildTopology(
         dataDir,
         inputs: inputs.map((r) => r.componentId),
       });
+      if (entry.kind === 'transform') validateTransformContract(instance as Transform, id);
       const producesKinds = producesFor(definition, parsedOptions, inputs, components);
       components.set(id, {
         id,

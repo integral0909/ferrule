@@ -1,4 +1,4 @@
-import { ValueTypeError } from './errors.js';
+import { LimitExceededError, ValueTypeError } from './errors.js';
 
 /**
  * Whether a metric value is a change since the last report (`incremental`, e.g. StatsD
@@ -24,6 +24,16 @@ export interface Quantile {
   value: number;
 }
 
+/**
+ * One side (positive or negative) of an exponential histogram's sparse bucket list: bucket at
+ * absolute index `offset + i` holds `counts[i]`. See the `exponentialHistogram` variant of
+ * {@link MetricValue} for the bucket index convention.
+ */
+export interface ExponentialBuckets {
+  offset: number;
+  counts: number[];
+}
+
 export type MetricValue =
   | { type: 'counter'; value: number }
   | { type: 'gauge'; value: number }
@@ -35,6 +45,29 @@ export type MetricValue =
    * `count - sum(bucket.count)`.
    */
   | { type: 'histogram'; buckets: Bucket[]; count: number; sum: number }
+  /**
+   * A lossless exponential-bucket histogram (OTLP's `ExponentialHistogram`): bucket boundaries
+   * are derived from `scale` rather than stored explicitly, trading a fixed growth factor for
+   * much finer resolution per byte than {@link Bucket}[]. `base = 2 ** (2 ** -scale)`; relative
+   * to each side's own `offset`, bucket `i` of `positive` covers `(base ** i, base ** (i + 1)]`
+   * and bucket `i` of `negative` covers the mirror image, `[-(base ** (i + 1)), -(base ** i))`.
+   * A value with `|v| <= zeroThreshold` is counted in `zeroCount` instead of either range.
+   * `count` is the total number of observations and `sum` their total, exactly as for
+   * {@link Bucket}-based histograms. See {@link addMetricValues}/{@link subtractMetricValues}
+   * for how two histograms at different scales are reconciled, and
+   * {@link exponentialHistogramToHistogram} for converting to explicit buckets at an edge that
+   * cannot represent an exponential scale (Prometheus, StatsD).
+   */
+  | {
+      type: 'exponentialHistogram';
+      scale: number;
+      zeroCount: number;
+      zeroThreshold: number;
+      positive: ExponentialBuckets;
+      negative: ExponentialBuckets;
+      count: number;
+      sum: number;
+    }
   | { type: 'summary'; quantiles: Quantile[]; count: number; sum: number };
 
 export type MetricValueType = MetricValue['type'];
@@ -57,9 +90,19 @@ export function cloneMetricValue(value: MetricValue): MetricValue {
       return { ...value, samples: value.samples.map((s) => ({ ...s })) };
     case 'histogram':
       return { ...value, buckets: value.buckets.map((b) => ({ ...b })) };
+    case 'exponentialHistogram':
+      return {
+        ...value,
+        positive: cloneExponentialBuckets(value.positive),
+        negative: cloneExponentialBuckets(value.negative),
+      };
     case 'summary':
       return { ...value, quantiles: value.quantiles.map((q) => ({ ...q })) };
   }
+}
+
+function cloneExponentialBuckets(buckets: ExponentialBuckets): ExponentialBuckets {
+  return { offset: buckets.offset, counts: [...buckets.counts] };
 }
 
 export function cloneSeries(series: MetricSeries): MetricSeries {
@@ -89,6 +132,175 @@ export function sameBuckets(a: readonly Bucket[], b: readonly Bucket[]): boolean
   return true;
 }
 
+/** `base = 2 ** (2 ** -scale)`, the per-bucket growth factor of an exponential histogram at a
+ * given scale (see the `exponentialHistogram` variant of {@link MetricValue}). */
+export function exponentialHistogramBase(scale: number): number {
+  return Math.pow(2, Math.pow(2, -scale));
+}
+
+/** Upper bound on the number of buckets a single downscale/merge/subtract of exponential
+ * histogram buckets may materialize, guarding against a pathological pair of `offset`s (each
+ * individually bounded on decode, but arbitrarily far apart) forcing an unbounded allocation. */
+const MAX_EXPONENTIAL_HISTOGRAM_SPAN = 1 << 20;
+
+function exponentialHistogramSpanError(action: string): never {
+  throw new LimitExceededError(
+    'metric.exponentialHistogram.span',
+    MAX_EXPONENTIAL_HISTOGRAM_SPAN,
+    `${action} these exponential histogram buckets would allocate too many buckets`,
+  );
+}
+
+/** Shifts every bucket index right by `shift` (merging `2 ** shift` adjacent buckets into one),
+ * the operation that reconciles two exponential histograms recorded at different scales: scale
+ * decreases by `shift` while the value range each bucket covers grows by the same factor. */
+function downscaleExponentialBuckets(
+  buckets: ExponentialBuckets,
+  shift: number,
+): ExponentialBuckets {
+  if (shift <= 0 || buckets.counts.length === 0) return buckets;
+  if (shift >= 32) {
+    const total = buckets.counts.reduce((sum, c) => sum + c, 0);
+    return total === 0 ? { offset: 0, counts: [] } : { offset: 0, counts: [total] };
+  }
+  const newOffset = buckets.offset >> shift;
+  const lastOldIndex = buckets.offset + buckets.counts.length - 1;
+  const span = (lastOldIndex >> shift) - newOffset + 1;
+  if (span > MAX_EXPONENTIAL_HISTOGRAM_SPAN) exponentialHistogramSpanError('downscaling');
+  const counts = new Array<number>(span).fill(0);
+  for (let i = 0; i < buckets.counts.length; i++) {
+    const oldIndex = buckets.offset + i;
+    counts[(oldIndex >> shift) - newOffset]! += buckets.counts[i]!;
+  }
+  return { offset: newOffset, counts };
+}
+
+interface AlignedExponentialHistogram {
+  scale: number;
+  zeroCount: number;
+  zeroThreshold: number;
+  positive: ExponentialBuckets;
+  negative: ExponentialBuckets;
+}
+
+/** Downscales `value` to `scale` (which must be `<= value.scale`), the first step of reconciling
+ * two exponential histograms recorded at different scales before merging or subtracting them. */
+function alignExponentialHistogram(
+  value: Extract<MetricValue, { type: 'exponentialHistogram' }>,
+  scale: number,
+): AlignedExponentialHistogram {
+  const shift = value.scale - scale;
+  return {
+    scale,
+    zeroCount: value.zeroCount,
+    zeroThreshold: value.zeroThreshold,
+    positive: downscaleExponentialBuckets(value.positive, shift),
+    negative: downscaleExponentialBuckets(value.negative, shift),
+  };
+}
+
+/** Moves the leading run of buckets entirely within `[-threshold, threshold]` (the buckets
+ * closest to zero, since bucket value ranges grow with index) out of `buckets` and into a
+ * returned count, for reconciling two differing `zeroThreshold`s before combining two
+ * exponential histograms: once the wider of the two thresholds is chosen, any bucket it newly
+ * covers has to stop being counted on its own. */
+function foldExponentialZeroThreshold(
+  buckets: ExponentialBuckets,
+  scale: number,
+  threshold: number,
+): { buckets: ExponentialBuckets; folded: number } {
+  if (threshold <= 0 || buckets.counts.length === 0) return { buckets, folded: 0 };
+  const base = exponentialHistogramBase(scale);
+  let i = 0;
+  let folded = 0;
+  while (i < buckets.counts.length && Math.pow(base, buckets.offset + i + 1) <= threshold) {
+    folded += buckets.counts[i]!;
+    i++;
+  }
+  if (i === 0) return { buckets, folded: 0 };
+  return { buckets: { offset: buckets.offset + i, counts: buckets.counts.slice(i) }, folded };
+}
+
+interface ReconciledExponentialHistograms {
+  threshold: number;
+  aZeroCount: number;
+  bZeroCount: number;
+  aPositive: ExponentialBuckets;
+  aNegative: ExponentialBuckets;
+  bPositive: ExponentialBuckets;
+  bNegative: ExponentialBuckets;
+}
+
+/** Aligns two already-same-scale exponential histograms to a common `zeroThreshold` (the wider
+ * of the two), folding any bucket the new threshold newly covers into each side's zero count. */
+function reconcileExponentialZeroThresholds(
+  a: AlignedExponentialHistogram,
+  b: AlignedExponentialHistogram,
+): ReconciledExponentialHistograms {
+  const threshold = Math.max(a.zeroThreshold, b.zeroThreshold);
+  const aPos = foldExponentialZeroThreshold(a.positive, a.scale, threshold);
+  const aNeg = foldExponentialZeroThreshold(a.negative, a.scale, threshold);
+  const bPos = foldExponentialZeroThreshold(b.positive, b.scale, threshold);
+  const bNeg = foldExponentialZeroThreshold(b.negative, b.scale, threshold);
+  return {
+    threshold,
+    aZeroCount: a.zeroCount + aPos.folded + aNeg.folded,
+    bZeroCount: b.zeroCount + bPos.folded + bNeg.folded,
+    aPositive: aPos.buckets,
+    aNegative: aNeg.buckets,
+    bPositive: bPos.buckets,
+    bNegative: bNeg.buckets,
+  };
+}
+
+/** Sums two same-scale exponential bucket lists index-wise, aligning their (possibly different)
+ * offsets first. */
+function mergeExponentialBuckets(a: ExponentialBuckets, b: ExponentialBuckets): ExponentialBuckets {
+  if (a.counts.length === 0) return b;
+  if (b.counts.length === 0) return a;
+  const offset = Math.min(a.offset, b.offset);
+  const lastIndex = Math.max(a.offset + a.counts.length - 1, b.offset + b.counts.length - 1);
+  const span = lastIndex - offset + 1;
+  if (span > MAX_EXPONENTIAL_HISTOGRAM_SPAN) exponentialHistogramSpanError('merging');
+  const counts = new Array<number>(span).fill(0);
+  for (let i = 0; i < a.counts.length; i++) counts[a.offset + i - offset]! += a.counts[i]!;
+  for (let i = 0; i < b.counts.length; i++) counts[b.offset + i - offset]! += b.counts[i]!;
+  return { offset, counts };
+}
+
+/** Subtracts `previous` from `current` index-wise (aligning offsets first), returning
+ * `undefined` if any resulting bucket would go negative (the series restarted). Trims leading
+ * and trailing all-zero buckets so a fully-cancelled range collapses to an empty bucket list. */
+function subtractExponentialBuckets(
+  current: ExponentialBuckets,
+  previous: ExponentialBuckets,
+): ExponentialBuckets | undefined {
+  if (previous.counts.length === 0) return current;
+  if (current.counts.length === 0) {
+    return previous.counts.every((c) => c === 0) ? current : undefined;
+  }
+  const offset = Math.min(current.offset, previous.offset);
+  const lastIndex = Math.max(
+    current.offset + current.counts.length - 1,
+    previous.offset + previous.counts.length - 1,
+  );
+  const span = lastIndex - offset + 1;
+  if (span > MAX_EXPONENTIAL_HISTOGRAM_SPAN) exponentialHistogramSpanError('subtracting');
+  const counts = new Array<number>(span).fill(0);
+  for (let i = 0; i < current.counts.length; i++) {
+    counts[current.offset + i - offset]! += current.counts[i]!;
+  }
+  for (let i = 0; i < previous.counts.length; i++) {
+    counts[previous.offset + i - offset]! -= previous.counts[i]!;
+  }
+  for (const c of counts) if (c < 0) return undefined;
+  let start = 0;
+  while (start < counts.length && counts[start] === 0) start++;
+  let end = counts.length;
+  while (end > start && counts[end - 1] === 0) end--;
+  return { offset: offset + start, counts: counts.slice(start, end) };
+}
+
 /** Whether {@link addMetricValues} can combine `a` and `b`. */
 export function canAdd(a: MetricValue, b: MetricValue): boolean {
   if (a.type !== b.type) return false;
@@ -106,9 +318,12 @@ export function canAdd(a: MetricValue, b: MetricValue): boolean {
 
 /**
  * Combines two incremental values: counters and gauge deltas add, sets union, distributions
- * concatenate samples, histograms with identical buckets add bucket-wise. Returns a new value,
- * or `undefined` when the values cannot be combined (different types, different histogram
- * buckets, or summaries, whose quantiles are not additive).
+ * concatenate samples, histograms with identical buckets add bucket-wise, exponential histograms
+ * add after downscaling both to the coarser of their two scales (and widening to the larger of
+ * their two `zeroThreshold`s). Returns a new value, or `undefined` when the values cannot be
+ * combined (different types, different histogram buckets, or summaries, whose quantiles are not
+ * additive). Throws `LimitExceededError` if the two exponential histograms' bucket offsets are so
+ * far apart that aligning them would allocate an unreasonable number of buckets.
  */
 export function addMetricValues(a: MetricValue, b: MetricValue): MetricValue | undefined {
   if (!canAdd(a, b)) return undefined;
@@ -139,6 +354,24 @@ export function addMetricValues(a: MetricValue, b: MetricValue): MetricValue | u
         sum: a.sum + hb.sum,
       };
     }
+    case 'exponentialHistogram': {
+      const hb = b as typeof a;
+      const scale = Math.min(a.scale, hb.scale);
+      const r = reconcileExponentialZeroThresholds(
+        alignExponentialHistogram(a, scale),
+        alignExponentialHistogram(hb, scale),
+      );
+      return {
+        type: 'exponentialHistogram',
+        scale,
+        zeroThreshold: r.threshold,
+        zeroCount: r.aZeroCount + r.bZeroCount,
+        positive: mergeExponentialBuckets(r.aPositive, r.bPositive),
+        negative: mergeExponentialBuckets(r.aNegative, r.bNegative),
+        count: a.count + hb.count,
+        sum: a.sum + hb.sum,
+      };
+    }
     case 'summary':
       return undefined;
   }
@@ -155,6 +388,10 @@ export type DeltaResult =
  *
  * - Counters and histograms: `current - previous`. If any component decreased, the source
  *   restarted and the current reading is returned as a `reset`.
+ * - Exponential histograms: like histograms, but `current` and `previous` are first aligned to
+ *   the coarser of their two scales and the wider of their two `zeroThreshold`s (see
+ *   {@link addMetricValues}); a bucket that goes negative after alignment is treated the same as
+ *   a reset.
  * - Gauges: the difference (which may be negative).
  * - Sets: the members present now but not before.
  * - Distributions and summaries have no meaningful difference and are `incompatible`.
@@ -198,6 +435,36 @@ export function subtractMetricValues(current: MetricValue, previous: MetricValue
         },
       };
     }
+    case 'exponentialHistogram': {
+      const prev = previous as typeof current;
+      const scale = Math.min(current.scale, prev.scale);
+      const r = reconcileExponentialZeroThresholds(
+        alignExponentialHistogram(current, scale),
+        alignExponentialHistogram(prev, scale),
+      );
+      if (r.aZeroCount < r.bZeroCount || current.count < prev.count) {
+        return { kind: 'reset', value: cloneMetricValue(current) };
+      }
+      const positive = subtractExponentialBuckets(r.aPositive, r.bPositive);
+      const negative =
+        positive === undefined ? undefined : subtractExponentialBuckets(r.aNegative, r.bNegative);
+      if (positive === undefined || negative === undefined) {
+        return { kind: 'reset', value: cloneMetricValue(current) };
+      }
+      return {
+        kind: 'delta',
+        value: {
+          type: 'exponentialHistogram',
+          scale,
+          zeroThreshold: r.threshold,
+          zeroCount: r.aZeroCount - r.bZeroCount,
+          positive,
+          negative,
+          count: current.count - prev.count,
+          sum: current.sum - prev.sum,
+        },
+      };
+    }
     case 'distribution':
     case 'summary':
       return { kind: 'incompatible' };
@@ -221,6 +488,17 @@ export function zeroMetricValue(value: MetricValue): MetricValue {
         count: 0,
         sum: 0,
       };
+    case 'exponentialHistogram':
+      return {
+        type: 'exponentialHistogram',
+        scale: value.scale,
+        zeroThreshold: value.zeroThreshold,
+        zeroCount: 0,
+        positive: { offset: value.positive.offset, counts: value.positive.counts.map(() => 0) },
+        negative: { offset: value.negative.offset, counts: value.negative.counts.map(() => 0) },
+        count: 0,
+        sum: 0,
+      };
     case 'summary':
       return {
         type: 'summary',
@@ -229,6 +507,52 @@ export function zeroMetricValue(value: MetricValue): MetricValue {
         sum: 0,
       };
   }
+}
+
+/**
+ * Converts a lossless `exponentialHistogram` {@link MetricValue} into an equivalent explicit-
+ * bucket `histogram`, for sinks that cannot represent an exponential scale (Prometheus, StatsD,
+ * Prometheus remote write). Positive bucket `i` (covering `(base ** i, base ** (i + 1)]`)
+ * becomes a bucket at `upperLimit = base ** (i + 1)`; negative buckets mirror this
+ * (`upperLimit = -(base ** i)`), emitted from the most-negative index down to the least so the
+ * result is ascending by `upperLimit`; the zero bucket (if `zeroCount > 0`) becomes one more
+ * bucket at `upperLimit = zeroThreshold`. This conversion is lossy — it throws away the
+ * exponential scale — and has no inverse. Throws `ValueTypeError` if an extreme `scale`/`offset`
+ * combination would produce a non-finite bucket boundary.
+ */
+export function exponentialHistogramToHistogram(
+  value: Extract<MetricValue, { type: 'exponentialHistogram' }>,
+): Extract<MetricValue, { type: 'histogram' }> {
+  const base = exponentialHistogramBase(value.scale);
+  const buckets: Bucket[] = [];
+  const { negative, positive } = value;
+  for (let i = negative.counts.length - 1; i >= 0; i--) {
+    const index = negative.offset + i;
+    buckets.push({
+      upperLimit: finiteExponentialBound(-Math.pow(base, index)),
+      count: negative.counts[i]!,
+    });
+  }
+  if (value.zeroCount > 0) {
+    buckets.push({ upperLimit: value.zeroThreshold, count: value.zeroCount });
+  }
+  for (let i = 0; i < positive.counts.length; i++) {
+    const index = positive.offset + i;
+    buckets.push({
+      upperLimit: finiteExponentialBound(Math.pow(base, index + 1)),
+      count: positive.counts[i]!,
+    });
+  }
+  return { type: 'histogram', buckets, count: value.count, sum: value.sum };
+}
+
+function finiteExponentialBound(n: number): number {
+  if (!Number.isFinite(n)) {
+    throw new ValueTypeError(
+      'exponential histogram scale/offset produced a non-finite bucket boundary',
+    );
+  }
+  return n;
 }
 
 /**

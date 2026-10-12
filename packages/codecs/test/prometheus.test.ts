@@ -243,6 +243,33 @@ describe('encodePrometheusText', () => {
   it('produces empty output for an empty input', () => {
     expect(encodePrometheusText([])).toBe('');
   });
+
+  it('converts an exponentialHistogram to explicit le buckets (lossy edge conversion)', () => {
+    const event = new MetricEvent({
+      name: 'latency',
+      tags: new Map(),
+      kind: 'absolute',
+      value: {
+        type: 'exponentialHistogram',
+        scale: 0, // base = 2
+        zeroCount: 0,
+        zeroThreshold: 0,
+        positive: { offset: 0, counts: [3, 5, 2] },
+        negative: { offset: 0, counts: [] },
+        count: 10,
+        sum: 42,
+      },
+    });
+    const text = encodePrometheusText([event]);
+    expect(text).toContain('# TYPE latency histogram');
+    // base^(i+1) for i = 0, 1, 2 -> 2, 4, 8; cumulative counts 3, 8, 10.
+    expect(text).toContain('latency_bucket{le="2"} 3');
+    expect(text).toContain('latency_bucket{le="4"} 8');
+    expect(text).toContain('latency_bucket{le="8"} 10');
+    expect(text).toContain('latency_bucket{le="+Inf"} 10');
+    expect(text).toContain('latency_sum 42');
+    expect(text).toContain('latency_count 10');
+  });
 });
 
 describe('Prometheus text: bounded, typed errors on malformed input', () => {

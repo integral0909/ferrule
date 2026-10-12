@@ -163,14 +163,15 @@ per-series, per-point, unlike OTLP's per-metric batching):
   represents overflow the same way (`count - sum(bucket.count)`), so the last `bucket_counts` entry
   is simply dropped and `count`/`sum` are carried over directly — no cumulative/non-cumulative
   conversion is needed here (OTLP histogram buckets are already non-cumulative, unlike Prometheus's).
-- **ExponentialHistogram** data points are _decode-only_, converted to explicit buckets: with
-  `base = 2^(2^-scale)`, positive-range bucket index `i` covers `(base^i, base^(i+1)]` and becomes
-  a core bucket at `upperLimit = base^(i+1)`; the negative range mirrors this
-  (`upperLimit = -base^i`, emitted from the most-negative index down to the least, so the result is
-  ascending); the zero bucket (if `zero_count > 0`) becomes one more bucket at
-  `upperLimit = zero_threshold`. This is a lossy but standard "expand to explicit boundaries"
-  conversion. Encoding never re-derives an `ExponentialHistogram` — core→OTLP encoding always
-  produces a classic `Histogram`.
+- **ExponentialHistogram** data points become `{ type: 'exponentialHistogram' }`, losslessly:
+  `scale`, `zero_count`, `zero_threshold`, and the positive/negative `offset` + `bucket_counts`
+  pairs carry straight over to core's `ExponentialBuckets` (see `@ferrule/core`'s `MetricValue`
+  for the bucket index convention: `base = 2 ** (2 ** -scale)`, bucket `i` covers
+  `(base ** i, base ** (i + 1)]`). Encoding is the exact inverse — decode → encode round-trips
+  bit-for-bit, protobuf and JSON alike. Sinks that have no notion of an exponential scale
+  (Prometheus, StatsD) convert at the edge with core's `exponentialHistogramToHistogram`, which
+  expands to explicit buckets the same way this package's encoder used to (lossy, and documented
+  where each sink calls it).
 - **Summary** data points become `{ type: 'summary' }`, kind always `absolute` (OTLP summaries have
   no temporality field at all).
 
@@ -241,7 +242,9 @@ Everything else (`counter`/`gauge`/untyped) maps one sample to one `MetricEvent`
 
 `encodePrometheusText` is the inverse for the direction that needs real conversion: core histogram
 buckets (non-cumulative) become Prometheus `le` buckets by running a cumulative sum across them,
-plus a synthesized `+Inf` bucket equal to the total `count`.
+plus a synthesized `+Inf` bucket equal to the total `count`. `exponentialHistogram` values are
+first expanded to explicit buckets with core's `exponentialHistogramToHistogram` (Prometheus has
+no exponential-scale representation), then encoded the same way — a lossy, one-way conversion.
 
 ## StatsD / DogStatsD
 
@@ -258,8 +261,8 @@ the type/rate/tags) and tag extensions. Unrecognised `|`-segments (e.g. DogStats
 | `s` (set)                                      | `{ type: 'set', values: {member} }`                                                           | `incremental`                                                                                    |
 
 `encodeMetricEventAsStatsd` is the inverse for `counter`/`gauge`/`set`/`distribution` (one line per
-set member or per distribution sample); `histogram` and `summary` have no StatsD representation
-and raise `E_STATSD_UNSUPPORTED_METRIC_TYPE`.
+set member or per distribution sample); `histogram`, `exponentialHistogram`, and `summary` have no
+StatsD representation and raise `E_STATSD_UNSUPPORTED_METRIC_TYPE`.
 
 ## Pattern engine
 
@@ -356,10 +359,11 @@ with `new CodecRegistry()`) to extend the set by name.
 
 - OTLP encoding never reconstructs `Metric.description`/`.unit`, `LogRecord`/`Span` dropped-counts,
   or `Span.flags` — none of them have a home in core's data model.
-- Exponential histograms are decode-only; core→OTLP metric encoding always produces a classic
-  `Histogram`.
 - `set` and `distribution` core metric values cannot be encoded to OTLP or StatsD (no wire
   representation exists in either format) — convert them first.
+- `exponentialHistogram` core metric values cannot be encoded to StatsD, and Prometheus text/remote
+  write always expand them to explicit buckets with `exponentialHistogramToHistogram` (neither
+  format has a notion of an exponential scale) — this is a lossy, one-way conversion.
 - The pattern engine's backtracking guard is a heuristic over the built-in library and the
   compiler's own static check, not a hard runtime guarantee for arbitrary custom patterns.
 - RFC 3164 has no encoder (the format has no registered structure to encode back into reliably);

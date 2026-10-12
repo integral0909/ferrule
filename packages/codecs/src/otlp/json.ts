@@ -13,6 +13,7 @@ import {
   toBase64,
   toHex,
   type Bucket,
+  type ExponentialBuckets,
   type MetricKind,
   type MetricValue,
   type Quantile,
@@ -661,6 +662,7 @@ function decodeMetricJson(
   const gauge = field(metric, 'gauge');
   const sum = field(metric, 'sum');
   const histogram = field(metric, 'histogram');
+  const exponentialHistogram = field(metric, 'exponentialHistogram');
   const summary = field(metric, 'summary');
   if (gauge !== undefined) {
     for (const dp of arr(field(gauge, 'dataPoints'))) {
@@ -690,6 +692,32 @@ function decodeMetricJson(
           tags,
           kind,
           { type: 'histogram', buckets: p.buckets, count: p.count, sum: p.sum },
+          p,
+        ),
+      );
+    }
+  }
+  if (exponentialHistogram !== undefined) {
+    const temporality = int32(field(exponentialHistogram, 'aggregationTemporality'));
+    const kind: MetricKind = temporality === TEMPORALITY_DELTA ? 'incremental' : 'absolute';
+    for (const dp of arr(field(exponentialHistogram, 'dataPoints'))) {
+      const p = decodeExponentialHistogramDataPointJson(dp, options);
+      const tags = mergeTags(baseTags, p.attrs);
+      out.push(
+        buildMetricEvent(
+          name,
+          tags,
+          kind,
+          {
+            type: 'exponentialHistogram',
+            scale: p.scale,
+            zeroCount: p.zeroCount,
+            zeroThreshold: p.zeroThreshold,
+            positive: p.positive,
+            negative: p.negative,
+            count: p.count,
+            sum: p.sum,
+          },
           p,
         ),
       );
@@ -766,6 +794,37 @@ function decodeHistogramDataPointJson(dp: Value, options: Resolved) {
     count,
     sum,
     buckets,
+  };
+}
+
+function decodeExpBucketsJson(v: Value | undefined): ExponentialBuckets {
+  const offset = int32(field(v, 'offset'));
+  const counts = arr(field(v, 'bucketCounts')).map((c) => Number(int64(c)));
+  return { offset, counts };
+}
+
+function decodeExponentialHistogramDataPointJson(dp: Value, options: Resolved) {
+  const attrs = jsonToAttributes(field(dp, 'attributes'), options);
+  const startNanos = int64(field(dp, 'startTimeUnixNano'));
+  const timeNanos = int64(field(dp, 'timeUnixNano'));
+  const count = Number(int64(field(dp, 'count')));
+  const sum = num(field(dp, 'sum')) ?? 0;
+  const scale = int32(field(dp, 'scale'));
+  const zeroCount = Number(int64(field(dp, 'zeroCount')));
+  const zeroThreshold = num(field(dp, 'zeroThreshold')) ?? 0;
+  const positive = decodeExpBucketsJson(field(dp, 'positive'));
+  const negative = decodeExpBucketsJson(field(dp, 'negative'));
+  return {
+    attrs,
+    ...(startNanos !== 0n ? { startTime: Timestamp.fromNanos(startNanos) } : {}),
+    ...(timeNanos !== 0n ? { time: Timestamp.fromNanos(timeNanos) } : {}),
+    count,
+    sum,
+    scale,
+    zeroCount,
+    zeroThreshold,
+    positive,
+    negative,
   };
 }
 
@@ -879,6 +938,26 @@ function encodeMetricJson(group: readonly MetricEvent[]): ValueMap {
         ]),
       );
       return out;
+    case 'exponentialHistogram':
+      out.set(
+        'exponentialHistogram',
+        jsonMap([
+          [
+            'dataPoints',
+            group.map((e) =>
+              encodeExponentialHistogramPointJson(
+                e,
+                e.value as Extract<MetricValue, { type: 'exponentialHistogram' }>,
+              ),
+            ),
+          ],
+          [
+            'aggregationTemporality',
+            BigInt(first.metricKind === 'incremental' ? TEMPORALITY_DELTA : TEMPORALITY_CUMULATIVE),
+          ],
+        ]),
+      );
+      return out;
     case 'summary':
       out.set(
         'summary',
@@ -948,6 +1027,36 @@ function encodeHistogramPointJson(
       [...value.buckets.map((b) => BigInt(Math.round(b.count))), BigInt(Math.round(overflow))],
     ],
     ['explicitBounds', value.buckets.map((b) => b.upperLimit)],
+  ]);
+}
+
+function encodeExpBucketsJson(buckets: ExponentialBuckets): ValueMap | undefined {
+  if (buckets.offset === 0 && buckets.counts.length === 0) return undefined;
+  return jsonMap([
+    ['offset', BigInt(buckets.offset)],
+    ['bucketCounts', buckets.counts.map((c) => BigInt(Math.round(Math.max(0, c))))],
+  ]);
+}
+
+function encodeExponentialHistogramPointJson(
+  event: MetricEvent,
+  value: Extract<MetricValue, { type: 'exponentialHistogram' }>,
+): ValueMap {
+  const [time, start] = pointTimestamps(event);
+  return jsonMap([
+    [
+      'attributes',
+      event.series.tags.size > 0 ? tagsToAttributesJson(event.series.tags) : undefined,
+    ],
+    ['startTimeUnixNano', start],
+    ['timeUnixNano', time],
+    ['count', BigInt(Math.round(value.count))],
+    ['sum', value.sum],
+    ['scale', BigInt(value.scale)],
+    ['zeroCount', BigInt(Math.round(value.zeroCount))],
+    ['positive', encodeExpBucketsJson(value.positive)],
+    ['negative', encodeExpBucketsJson(value.negative)],
+    ['zeroThreshold', value.zeroThreshold],
   ]);
 }
 

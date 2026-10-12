@@ -224,7 +224,7 @@ function encodeLine(
  * - `set`: one `name:member|s` line per member.
  * - `distribution`: one `name:value|d` line per sample, with `@sampleRate = 1 / Sample.rate` when
  *   the sample's rate is not 1 (the inverse of how {@link decodeStatsdToMetricEvents} builds it).
- * - `histogram` and `summary` have no StatsD representation and raise
+ * - `histogram`, `exponentialHistogram`, and `summary` have no StatsD representation and raise
  *   `E_STATSD_UNSUPPORTED_METRIC_TYPE`; convert to samples (e.g. via a synthetic distribution)
  *   before encoding.
  */
@@ -253,6 +253,7 @@ export function encodeMetricEventAsStatsd(event: MetricEvent): string[] {
         return `${name}:${formatNumber(sample.value)}|d${rateSuffix}${formatTags(tags)}`;
       });
     case 'histogram':
+    case 'exponentialHistogram':
     case 'summary':
       throw new CodecSyntaxError(
         CODEC,

@@ -51,7 +51,7 @@ leading tag byte.
 ### 1.3 Event envelope
 
 ```
-u8       format version (currently 1)
+u8       format version (currently 2)
 u8       event kind: 0 = log, 1 = metric, 2 = span
          -- metadata --
 opt<str> sourceId
@@ -113,14 +113,19 @@ Link trace/span IDs are length-prefixed (unlike the top-level trace/span IDs) be
 
 One tag byte, then a type-specific body:
 
-| Tag | Type           | Body                                                                             |
-| --- | -------------- | -------------------------------------------------------------------------------- |
-| 0   | `counter`      | f64 value                                                                        |
-| 1   | `gauge`        | f64 value                                                                        |
-| 2   | `set`          | varint count, then that many strings                                             |
-| 3   | `distribution` | u8 statistic (0 histogram, 1 summary), varint count, then (f64 value, f64 rate)* |
-| 4   | `histogram`    | varint bucket count, then (f64 upperLimit, f64 count)*, then f64 count, f64 sum  |
-| 5   | `summary`      | varint count, then (f64 quantile, f64 value)*, then f64 count, f64 sum           |
+| Tag | Type                   | Body                                                                                                        |
+| --- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 0   | `counter`              | f64 value                                                                                                   |
+| 1   | `gauge`                | f64 value                                                                                                   |
+| 2   | `set`                  | varint count, then that many strings                                                                        |
+| 3   | `distribution`         | u8 statistic (0 histogram, 1 summary), varint count, then (f64 value, f64 rate)*                            |
+| 4   | `histogram`            | varint bucket count, then (f64 upperLimit, f64 count)*, then f64 count, f64 sum                             |
+| 5   | `summary`              | varint count, then (f64 quantile, f64 value)*, then f64 count, f64 sum                                      |
+| 6   | `exponentialHistogram` | f64 scale, f64 zeroCount, f64 zeroThreshold, `<buckets>` positive, `<buckets>` negative, f64 count, f64 sum |
+
+Tag 6's `<buckets>` body (one side of the sparse bucket list — see `@ferrule/core`'s
+`ExponentialBuckets`) is `f64 offset, varint count, then that many f64 counts`. This tag was added
+after format version 1 shipped (§1 above), which is why decoding it requires version 2.
 
 ### 1.5 Batch form
 

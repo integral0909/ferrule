@@ -5,6 +5,7 @@ import {
   SpanEvent,
   Timestamp,
   type Bucket,
+  type ExponentialBuckets,
   type MetricValue,
   type Quantile,
   type Sample,
@@ -107,6 +108,29 @@ const arbSample: fc.Arbitrary<Sample> = fc
   )
   .map(([value, rate]) => ({ value, rate }));
 
+/** Non-negative integer-valued counts, bounded to a range that round-trips exactly through both
+ * a `fixed64`/varint wire encoding and a float64 in-memory representation. */
+const arbBucketCount = (max = 1000): fc.Arbitrary<number> => fc.nat(max);
+
+export const arbExponentialBuckets: fc.Arbitrary<ExponentialBuckets> = fc.record({
+  offset: fc.integer({ min: -1000, max: 1000 }),
+  counts: fc.array(arbBucketCount(), { maxLength: 5 }),
+});
+
+export const arbExponentialHistogram: fc.Arbitrary<
+  Extract<MetricValue, { type: 'exponentialHistogram' }>
+> = fc
+  .record({
+    scale: fc.integer({ min: -10, max: 20 }),
+    zeroCount: arbBucketCount(),
+    zeroThreshold: fc.double({ min: 0, max: 10, noNaN: true }),
+    positive: arbExponentialBuckets,
+    negative: arbExponentialBuckets,
+    count: arbBucketCount(10_000),
+    sum: fc.double({ min: -1e6, max: 1e6, noNaN: true }),
+  })
+  .map((fields) => ({ type: 'exponentialHistogram' as const, ...fields }));
+
 export const arbMetricValue: fc.Arbitrary<MetricValue> = fc.oneof(
   fc
     .double({ noNaN: true, min: -1e9, max: 1e9 })
@@ -125,6 +149,7 @@ export const arbMetricValue: fc.Arbitrary<MetricValue> = fc.oneof(
       .tuple(fc.nat(10_000), fc.double({ min: 0, max: 1e6, noNaN: true }))
       .map(([count, sum]): MetricValue => ({ type: 'histogram', buckets, count, sum })),
   ),
+  arbExponentialHistogram,
   fc
     .array(arbQuantile, { maxLength: 5 })
     .chain((quantiles) =>

@@ -1,6 +1,7 @@
 import {
   addMetricValues,
   cloneMetricValue,
+  exponentialHistogramToHistogram,
   FerruleError,
   seriesKey,
   type MetricEvent,
@@ -14,9 +15,12 @@ import { ProtoWriter } from '@ferrule/codecs';
  * encoded with the codecs package's hand-written `ProtoWriter`, plus the metric → series
  * conversion remote write needs: counters/gauges map directly, histograms expand into
  * `_bucket`/`_sum`/`_count` series (bucket counts made cumulative, per Prometheus convention),
- * summaries expand into per-quantile series plus `_sum`/`_count`, and incremental metrics are
- * accumulated into the running absolute totals remote write transmits, bounded by a staleness
- * window so a series that stops reporting is not accumulated into forever.
+ * exponential histograms are first converted to explicit buckets with core's
+ * `exponentialHistogramToHistogram` (remote write has no exponential-scale representation) and
+ * then expand the same way, summaries expand into per-quantile series plus `_sum`/`_count`, and
+ * incremental metrics are accumulated into the running absolute totals remote write transmits,
+ * bounded by a staleness window so a series that stops reporting is not accumulated into
+ * forever.
  */
 
 export interface RemoteWriteSeries {
@@ -115,6 +119,8 @@ export function expandMetricToSeries(
       });
       return out;
     }
+    case 'exponentialHistogram':
+      return expandMetricToSeries(event, exponentialHistogramToHistogram(value), timestampMs);
     case 'summary': {
       const out: RemoteWriteSeries[] = value.quantiles.map((q) => ({
         labels: labelSet(name, tags, { quantile: formatLabelFloat(q.quantile) }),

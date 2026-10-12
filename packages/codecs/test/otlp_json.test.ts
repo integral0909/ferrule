@@ -9,7 +9,12 @@ import {
   encodeOtlpJsonMetrics,
   encodeOtlpJsonTraces,
 } from '@ferrule/codecs';
-import { arbLogEvent, arbMetricEvent, arbSpanEvent } from './arbitraries.js';
+import {
+  arbExponentialHistogram,
+  arbLogEvent,
+  arbMetricEvent,
+  arbSpanEvent,
+} from './arbitraries.js';
 
 describe('OTLP JSON logs', () => {
   it('round-trips arbitrary log events as a multiset', () => {
@@ -138,6 +143,24 @@ describe('OTLP JSON metrics', () => {
     const text = encodeOtlpJsonMetrics([event]);
     const [decoded] = decodeOtlpJsonMetrics(text);
     expect(decoded!.value).toEqual(event.value);
+  });
+
+  it('round-trips exponential histograms losslessly through JSON', () => {
+    fc.assert(
+      fc.property(arbExponentialHistogram, (value) => {
+        const event = new MetricEvent({
+          name: 'exp_hist',
+          tags: new Map(),
+          kind: 'absolute',
+          value,
+          timestamp: Timestamp.fromMillis(1000),
+        });
+        const text = encodeOtlpJsonMetrics([event]);
+        const [decoded] = decodeOtlpJsonMetrics(text);
+        expect(decoded!.value).toEqual(value);
+      }),
+      { numRuns: 50 },
+    );
   });
 
   it('rejects encoding a set or distribution metric value', () => {

@@ -160,22 +160,43 @@ export interface TransformOutput {
 }
 
 /**
- * A transform processes batches synchronously. Synchronous processing keeps per-event overhead
- * low and ordering deterministic; the runtime applies backpressure between batches.
+ * A transform processes batches one at a time, in arrival order, with the runtime applying
+ * backpressure between batches: it does not read the next batch (or run a due {@link tick}, or
+ * call {@link flush}) until the current one's `process`/`processAsync` call has resolved. A
+ * transform implements **exactly one** of `process` (synchronous) or `processAsync`
+ * (asynchronous) — implementing both, or neither, fails the component at build time with a
+ * {@link "./errors.js".TransformContractError}.
  */
 export interface Transform {
   /** Called once before the first batch, with the services the transform may use. */
   start?(ctx: TransformContext): void;
   /**
-   * Processes one batch. Must not throw for bad input data: route the event to
-   * {@link ERROR_PORT} (if declared) or drop it and count it under `discardedEvents`. A thrown
-   * exception is treated as a bug and fails the component.
+   * Processes one batch synchronously. Implement this, not {@link processAsync}, unless the
+   * transform genuinely needs to await something per batch: synchronous processing has no
+   * per-batch Promise/microtask overhead and keeps ordering trivially deterministic.
+   *
+   * Must not throw for bad input data: route the event to {@link ERROR_PORT} (if declared) or
+   * drop it and count it under `discardedEvents`. A thrown exception is treated as a bug and
+   * fails the component.
    *
    * The transform owns the events it receives: it may mutate them and must either push them,
    * or finish their finalizers (`delivered` when intentionally dropped, `rejected` when
    * discarded because of an error) so acknowledgements never hang.
    */
-  process(events: Event[], out: TransformOutput): void;
+  process?(events: Event[], out: TransformOutput): void;
+  /**
+   * Processes one batch asynchronously — for a transform that must await something per batch
+   * (an external lookup, handing the batch to a `worker_threads` pool, …) without blocking the
+   * event loop while it does. The runtime awaits the returned promise before handing the
+   * transform its next batch, before running a due {@link tick}, and before {@link flush}, so a
+   * slow or failing call delays and fails exactly as a slow or throwing `process` call would.
+   *
+   * Ownership, mutation, and finalizer rules are identical to {@link process}: route bad data to
+   * {@link ERROR_PORT} or finish it, and either push every event onward or finish its finalizers
+   * before the returned promise resolves. A thrown exception (or a rejected promise) fails the
+   * component, exactly like `process` throwing.
+   */
+  processAsync?(events: Event[], out: TransformOutput): Promise<void>;
   /** If set, the runtime calls {@link tick} at this interval (for windows and timeouts). */
   readonly tickIntervalMs?: number;
   tick?(now: Timestamp, out: TransformOutput): void;

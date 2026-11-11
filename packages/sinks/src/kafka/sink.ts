@@ -17,8 +17,8 @@ import {
   splitCodecOptions,
   tlsSchema,
 } from '../fragments.js';
+import { KafkaError } from '@ferrule/codecs';
 import { compileTemplate, renderTemplate, type CompiledTemplate } from '../stream/template.js';
-import { KafkaError } from './errors.js';
 import { KafkaProducer, type OutgoingRecord } from './producer.js';
 
 export const kafkaSinkOptionsSchema = s

@@ -30,6 +30,7 @@ pipeline can select one by a configuration string.
 - [Prometheus text exposition format](#prometheus-text-exposition-format)
 - [StatsD / DogStatsD](#statsd--dogstatsd)
 - [Pattern engine](#pattern-engine)
+- [Compression (LZ4, zstd, xxHash32)](#compression-lz4-zstd-xxhash32)
 - [Kafka wire protocol](#kafka-wire-protocol)
 - [Codec registry](#codec-registry)
 - [Known gaps](#known-gaps)
@@ -299,6 +300,38 @@ heuristic, not a proof: it catches the common case of chaining greedy fragments 
 sufficiently creative custom pattern can still be slow, so treat user-supplied patterns as you
 would any other regular expression from an untrusted source.
 
+## Compression (LZ4, zstd, xxHash32)
+
+`src/compression/` (issue #16) is where every general-purpose compression codec this package
+needs lives, independent of any one wire format — `kafka/record-batch.ts` is the first consumer,
+and `@ferrule/sinks`'s HTTP sinks use the zstd half directly.
+
+- **`lz4.ts`** — a hand-written implementation of both the LZ4 **block format** and **frame
+  format** (<https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md>/
+  `lz4_Frame_format.md`), needed because there is no third-party dependency available here
+  (`CONTRIBUTING.md`) and `node:zlib` has no LZ4 support. `lz4Compress`/`lz4Decompress` are the
+  frame-level entry points (what `record-batch.ts` calls); `lz4CompressBlock`/`lz4DecompressBlock`
+  are the lower-level block primitives they're built from. The compressor is a single-hash greedy
+  LZ77 matcher over 4-byte windows, the same shape as `@ferrule/sinks`'s hand-written Snappy
+  codec; the decoder is bounded (a per-block cap from the frame's own declared block size, plus a
+  caller-supplied overall cap) and never throws anything but a `FerruleError`. Verified
+  bidirectionally against the reference `lz4` CLI — `test/compression/fixtures/` checks in a
+  handful of `.lz4` files that CLI produced (with the exact commands used to generate them) and
+  decodes every one of them byte-for-byte; this encoder's own output was confirmed by hand to
+  decompress correctly with `lz4 -d` during development.
+- **`zstd.ts`** — a thin wrapper over `node:zlib`'s own `zstdCompressSync`/`zstdDecompressSync`
+  (Node.js 22.15.0/23.8.0+): zstd needs no hand-written codec, since the standard library already
+  provides it. `isZstdSupported()` feature-detects it at runtime (this monorepo's `engines.node`
+  floor, `>=22.12.0`, is slightly below where zstd landed), and every sink option schema that
+  exposes a `zstd` compression choice validates it at config-validation time with a message naming
+  the required Node version, rather than failing opaquely the first time a batch happens to
+  compress.
+- **`xxhash32.ts`** — a from-scratch XXH32 (<https://github.com/Cyan4973/xxHash>), needed only
+  because the LZ4 frame format mandates it (seeded with `0`) for its header/block/content
+  checksums. Verified against the published empty-string digest and against four more digests
+  read directly out of real `.lz4` files the reference CLI produced — an independent
+  implementation's actual output, not hand-copied numbers.
+
 ## Kafka wire protocol
 
 `src/kafka/` is a hand-written Kafka client — not a `Decoder`/`Encoder` pair like the rest of this
@@ -312,9 +345,11 @@ reuse it without duplication:
   length-prefixed string/bytes/array encodings, and the "compact" (unsigned-varint-length-prefixed)
   encodings plus the empty tagged-fields terminator KIP-482 "flexible" API versions use.
 - **`record-batch.ts`** — `encodeRecordBatch`/`decodeRecordBatch`: RecordBatch v2 (magic byte `2`),
-  CRC-32C verified (`@ferrule/buffer`'s `crc32c`), `none`/`gzip` compression, and the
-  transactional/control-batch attribute bits a consumer needs to skip control batches and (under
-  `read_committed`) filter aborted-transaction data.
+  CRC-32C verified (`@ferrule/buffer`'s `crc32c`), `none`/`gzip`/`lz4`/`zstd` compression (`lz4`
+  and `zstd` via this package's own `compression/` module — see below — `snappy` is rejected in
+  both directions, since nothing here implements it), and the transactional/control-batch
+  attribute bits a consumer needs to skip control batches and (under `read_committed`) filter
+  aborted-transaction data.
 - **`murmur2.ts`** — the classic default partitioner (`murmur2Partition`) and the
   sticky/round-robin strategies for unkeyed records, bit-for-bit compatible with the Java client.
 - **`protocol.ts`** — request/response codecs for `ApiVersions`, `Metadata`, `InitProducerId`,
@@ -448,3 +483,10 @@ with `new CodecRegistry()`) to extend the set by name.
   common case of every member subscribing to the same topics, not Kafka's precise sticky
   optimizer. Tested against an in-repo fake broker (`packages/codecs/test/kafka/support/`), not a
   real Kafka cluster.
+- **Compression**: `snappy` (RecordBatch attribute codec `2`) is rejected in both directions — no
+  implementation of it exists for Kafka's compression framing (as opposed to the unrelated,
+  already-implemented Snappy _block format_ `@ferrule/sinks` uses for Prometheus remote write).
+  `lz4Compress`'s own encoder is a straightforward single-hash greedy matcher, not the most
+  aggressive possible LZ4 encoder — every sequence it emits is spec-valid, but a reference
+  encoder running at a higher compression level will usually produce a smaller frame for the same
+  input. `lz4Decompress` does not support LZ4 frames that reference an external dictionary.

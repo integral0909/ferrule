@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 import { crc32c } from '@ferrule/buffer';
+import { isZstdSupported } from '../../src/compression/index.js';
 import {
   decodeRecordBatch,
   encodeRecordBatch,
@@ -76,6 +77,51 @@ describe('encodeRecordBatch / decodeRecordBatch', () => {
     expect(decoded.compression).toBe('gzip');
     expect(decoded.crcValid).toBe(true);
     expect(decoded.records.map((r) => r.value?.toString('utf8'))).toEqual(payloads);
+  });
+
+  it('lz4-compresses and decompresses the records section', () => {
+    const payloads = Array.from({ length: 20 }, (_, i) => `payload-${i}`);
+    const records = payloads.map((p) => record({ value: Buffer.from(p) }));
+    const encoded = encodeRecordBatch(records, { compression: 'lz4' });
+    const decoded = decodeRecordBatch(encoded);
+    expect(decoded.compression).toBe('lz4');
+    expect(decoded.crcValid).toBe(true);
+    expect(decoded.records.map((r) => r.value?.toString('utf8'))).toEqual(payloads);
+  });
+
+  it.runIf(isZstdSupported())('zstd-compresses and decompresses the records section', () => {
+    const payloads = Array.from({ length: 20 }, (_, i) => `payload-${i}`);
+    const records = payloads.map((p) => record({ value: Buffer.from(p) }));
+    const encoded = encodeRecordBatch(records, { compression: 'zstd' });
+    const decoded = decodeRecordBatch(encoded);
+    expect(decoded.compression).toBe('zstd');
+    expect(decoded.crcValid).toBe(true);
+    expect(decoded.records.map((r) => r.value?.toString('utf8'))).toEqual(payloads);
+  });
+
+  it.runIf(!isZstdSupported())('rejects zstd compression on a runtime without zstd support', () => {
+    expect(() => encodeRecordBatch([record()], { compression: 'zstd' })).toThrow(RangeError);
+  });
+
+  it('rejects snappy compression on encode', () => {
+    expect(() => encodeRecordBatch([record()], { compression: 'snappy' })).toThrow(RangeError);
+  });
+
+  it('rejects a batch claiming snappy compression on decode rather than silently treating it as uncompressed', () => {
+    // Encode as `none`, then hand-flip the attributes' compression bits to claim snappy (codec
+    // 2), simulating a batch produced by another client that chose it — this package must not
+    // silently decode it as if it were uncompressed.
+    const encoded = encodeRecordBatch([record({ value: Buffer.from('hello') })]);
+    // attributes is an int16 at offset 8(baseOffset)+4(batchLength)+4(plEpoch)+1(magic)+4(crc).
+    const attributesOffset = 8 + 4 + 4 + 1 + 4;
+    encoded[attributesOffset + 1] = (encoded[attributesOffset + 1]! & ~0x7) | 2;
+    expect(() => decodeRecordBatch(encoded)).toThrow(RangeError);
+  });
+
+  it('bounds lz4 decompression via maxDecompressedSize', () => {
+    const records = [record({ value: Buffer.alloc(1024, 1) })];
+    const encoded = encodeRecordBatch(records, { compression: 'lz4' });
+    expect(() => decodeRecordBatch(encoded, { maxDecompressedSize: 4 })).toThrow();
   });
 
   it('computes a CRC-32C that matches @ferrule/buffer independently over the same bytes', () => {

@@ -1,6 +1,7 @@
 import * as net from 'node:net';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
+import { isZstdSupported, zstdCompress, zstdDecompress } from '@ferrule/codecs';
 import { SinkError, createCapturingLogger } from '@ferrule/runtime';
 import { applyAuth, ensureSuccess, HttpClient } from '../../src/http/client.js';
 import { resolveProxy } from '../../src/http/proxy.js';
@@ -109,6 +110,39 @@ describe('HttpClient — compression', () => {
     expect(Buffer.from(response.body)).toEqual(payload);
     client.close();
   });
+
+  it.runIf(isZstdSupported())(
+    'zstd-compresses the request body and sets Content-Encoding: zstd',
+    async () => {
+      server = await startServer((_req, res) => res.end('ok'));
+      const client = new HttpClient({ logger: logger(), compression: 'zstd' });
+      const original = new TextEncoder().encode('a'.repeat(1000));
+      await client.request({ method: 'POST', url: server.url, body: original });
+      const received = server.requests[0]!;
+      expect(received.headers['content-encoding']).toBe('zstd');
+      expect(zstdDecompress(received.body)).toEqual(Buffer.from(original));
+      client.close();
+    },
+  );
+
+  it.runIf(isZstdSupported())('transparently decompresses a zstd response body', async () => {
+    const payload = Buffer.from('decompress me please, zstd edition');
+    server = await startServer((_req, res) => {
+      res.writeHead(200, { 'content-encoding': 'zstd' });
+      res.end(Buffer.from(zstdCompress(payload)));
+    });
+    const client = new HttpClient({ logger: logger() });
+    const response = await client.request({ method: 'GET', url: server.url });
+    expect(Buffer.from(response.body)).toEqual(payload);
+    client.close();
+  });
+
+  it.runIf(!isZstdSupported())(
+    'constructing an HttpClient with compression: zstd fails clearly on a runtime without zstd support',
+    () => {
+      expect(() => new HttpClient({ logger: logger(), compression: 'zstd' })).toThrow(/22\.15\.0/);
+    },
+  );
 });
 
 describe('HttpClient — response size limit', () => {

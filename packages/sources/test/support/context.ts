@@ -39,12 +39,16 @@ export interface ControllableSourceContextOptions {
   readonly type?: string;
   readonly dataDir?: string;
   readonly acknowledgements?: boolean;
+  /** Shares an existing clock instead of creating a fresh one — for a test that needs several
+   * contexts (and anything else real I/O is timed against, e.g. a fake server) to advance in
+   * lockstep against one clock, rather than each drifting independently. */
+  readonly clock?: ManualClock;
 }
 
 export function createControllableSourceContext(
   options: ControllableSourceContextOptions = {},
 ): ControllableSourceHarness {
-  const clock = new ManualClock();
+  const clock = options.clock ?? new ManualClock();
   const metrics = new MetricsRegistry({ clock });
   const { logger, records } = createCapturingLogger();
   const abortController = new AbortController();

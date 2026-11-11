@@ -293,6 +293,48 @@ describe('KafkaConsumer: a member leaves mid-stream', () => {
   });
 });
 
+describe('KafkaConsumer: onRebalance callback', () => {
+  it('can call commit() for a revoked partition without deadlocking', async () => {
+    // `onRebalance` fires mid-`joinAndSync()`, before that call has returned — a caller that
+    // calls `commit()` from inside it (e.g. to persist a revoked partition's acknowledged
+    // offset before releasing it, exactly what a Kafka *source* needs to do) must not have that
+    // `commit()` wait on the very `joinAndSync()` call it is nested inside, or it would hang
+    // forever. Regression test for that deadlock.
+    const clock = new ManualClock();
+    broker = new FakeGroupCoordinatorBroker({ partitionCounts: { events: 2 } });
+    await broker.listen();
+
+    let committedDuringRebalance: Promise<void> | undefined;
+    const a = makeConsumer(broker, 'g14b', ['events'], clock, {
+      onRebalance: ({ revoked }) => {
+        if (revoked.length === 0) return;
+        committedDuringRebalance = a.commit(
+          revoked.map((tp) => ({ topic: tp.topic, partition: tp.partition, offset: 9n })),
+        );
+      },
+    });
+    await a.poll();
+    expect(a.assignment).toHaveLength(2);
+
+    const b = makeConsumer(broker, 'g14b', ['events'], clock);
+    const bPoll = b.poll();
+    await settleUntil(clock, HEARTBEAT_MS, bPoll);
+    await bPoll;
+    // `a`'s own rejoin (triggered by its heartbeat loop, independent of `bPoll`'s own timing)
+    // may not have reached `onRebalance` yet even though `b`'s side of the same rebalance has
+    // already settled; keep stepping until it has.
+    await settleWhile(clock, HEARTBEAT_MS, () => committedDuringRebalance !== undefined);
+    expect(a.assignment).toHaveLength(1);
+    expect(b.assignment).toHaveLength(1);
+
+    expect(committedDuringRebalance).toBeDefined();
+    await committedDuringRebalance; // would hang forever if this deadlocked
+
+    const revokedPartition = [0, 1].find((p) => !a.assignment.some((tp) => tp.partition === p))!;
+    expect(broker.committedOffset('g14b', 'events', revokedPartition)).toBe(9n);
+  });
+});
+
 describe('KafkaConsumer: offsets', () => {
   it('commit() persists offsets that a fresh consumer resumes from after a restart', async () => {
     const clock = new ManualClock();
@@ -433,5 +475,78 @@ describe('KafkaConsumer: Fetch decoding', () => {
     const consumer = makeConsumer(broker, 'g13', ['events'], clock);
     const batches = await consumer.poll();
     expect(batches[0]?.records.map((r) => r.value?.toString('utf8'))).toEqual(['aborted-1']);
+  });
+});
+
+describe('KafkaConsumer: auto_offset_reset', () => {
+  it('earliest (the default) reads every record already in the log', async () => {
+    const clock = new ManualClock();
+    broker = new FakeGroupCoordinatorBroker({ partitionCounts: { events: 1 } });
+    await broker.listen();
+    broker.appendRecords('events', 0, [record('old-1'), record('old-2')]);
+
+    const consumer = makeConsumer(broker, 'g14', ['events'], clock);
+    const batches = await consumer.poll();
+    expect(batches[0]?.records.map((r) => r.value?.toString('utf8'))).toEqual(['old-1', 'old-2']);
+  });
+
+  it('latest skips every record already in the log when there is no committed offset', async () => {
+    const clock = new ManualClock();
+    broker = new FakeGroupCoordinatorBroker({ partitionCounts: { events: 1 } });
+    await broker.listen();
+    broker.appendRecords('events', 0, [record('old-1'), record('old-2')]);
+
+    const consumer = makeConsumer(broker, 'g15', ['events'], clock, { autoOffsetReset: 'latest' });
+    const firstBatches = await consumer.poll();
+    expect(firstBatches).toEqual([]);
+
+    broker.appendRecords('events', 0, [record('new-1')]);
+    const secondBatches = await consumer.poll();
+    expect(secondBatches[0]?.records.map((r) => r.value?.toString('utf8'))).toEqual(['new-1']);
+  });
+
+  it('resets a committed offset the broker reports OFFSET_OUT_OF_RANGE', async () => {
+    const clock = new ManualClock();
+    broker = new FakeGroupCoordinatorBroker({ partitionCounts: { events: 1 } });
+    await broker.listen();
+    broker.appendRecords('events', 0, [record('1'), record('2')]);
+
+    const first = makeConsumer(broker, 'g16', ['events'], clock);
+    await first.poll();
+    // Commit an offset far beyond the log's actual end — simulating a group whose committed
+    // position has gone stale (e.g. the topic was recreated with less history than before).
+    await first.commit([{ topic: 'events', partition: 0, offset: 100n }]);
+    await first.close();
+    consumers.splice(consumers.indexOf(first), 1);
+
+    const second = makeConsumer(broker, 'g16', ['events'], clock, { autoOffsetReset: 'earliest' });
+    const firstPoll = await second.poll();
+    expect(firstPoll).toEqual([]); // this round only discovers OFFSET_OUT_OF_RANGE and resets
+
+    broker.appendRecords('events', 0, [record('3')]);
+    const secondPoll = await second.poll();
+    // Reset to earliest (offset 0) picks up every record still in the log, including the ones
+    // already consumed under the stale commit — correct at-least-once behaviour for a position
+    // that can no longer be trusted, not a gap.
+    expect(secondPoll[0]?.records.map((r) => r.value?.toString('utf8'))).toEqual(['1', '2', '3']);
+  });
+});
+
+describe('KafkaConsumer: pausePartitions/resumePartitions', () => {
+  it('a paused partition is excluded from Fetch until resumed', async () => {
+    const clock = new ManualClock();
+    broker = new FakeGroupCoordinatorBroker({ partitionCounts: { events: 2 } });
+    await broker.listen();
+    broker.appendRecords('events', 0, [record('a')]);
+    broker.appendRecords('events', 1, [record('b')]);
+
+    const consumer = makeConsumer(broker, 'g17', ['events'], clock);
+    consumer.pausePartitions([{ topic: 'events', partition: 1 }]);
+    const batches = await consumer.poll();
+    expect(batches.map((b) => b.partition)).toEqual([0]);
+
+    consumer.resumePartitions([{ topic: 'events', partition: 1 }]);
+    const secondBatches = await consumer.poll();
+    expect(secondBatches.map((b) => b.partition)).toEqual([1]);
   });
 });

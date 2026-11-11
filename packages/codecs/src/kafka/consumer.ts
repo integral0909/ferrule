@@ -33,6 +33,7 @@ import {
   decodeHeartbeatResponseV4,
   decodeJoinGroupResponseV7,
   decodeLeaveGroupResponseV5,
+  decodeListOffsetsResponseV1,
   decodeMetadataResponseV9,
   decodeOffsetCommitResponseV8,
   decodeOffsetFetchResponseV6,
@@ -42,19 +43,23 @@ import {
   encodeHeartbeatRequestV4,
   encodeJoinGroupRequestV7,
   encodeLeaveGroupRequestV5,
+  encodeListOffsetsRequestV1,
   encodeMetadataRequestV9,
   encodeOffsetCommitRequestV8,
   encodeOffsetFetchRequestV6,
   encodeSyncGroupRequestV5,
+  ListOffsetsTimestamp,
 } from './protocol.js';
 
 /**
  * A hand-written Kafka consumer group client: the group membership state machine
  * (`FindCoordinator` -> `JoinGroup` -> `SyncGroup` -> stable, heartbeats on the
  * coordinator-provided interval, rebalance on `REBALANCE_IN_PROGRESS`), `OffsetFetch`/
- * `OffsetCommit`, and `Fetch` (v12, flexible) with RecordBatch v2 decoding — CRC-32C verified,
- * gzip-decompressed, control/aborted batches skipped. Exposes `poll()` (returns per-partition
- * record batches), `commit(offsets)`, and a rebalance listener (`onRebalance`).
+ * `OffsetCommit`, `ListOffsets` (for `autoOffsetReset`), and `Fetch` (v12, flexible) with
+ * RecordBatch v2 decoding — CRC-32C verified, gzip-decompressed, control/aborted batches
+ * skipped. Exposes `poll()` (returns per-partition record batches), `commit(offsets)`,
+ * `pausePartitions`/`resumePartitions` (per-partition backpressure), and a rebalance listener
+ * (`onRebalance`).
  *
  * This is the protocol client only (GitHub issue #14); wiring it into an actual
  * `@ferrule/sources` Kafka source — a `SourceDefinition`, its option schema, checkpointing
@@ -158,6 +163,15 @@ export interface KafkaConsumerOptions {
    * including ones from an aborted transaction; `read_committed` filters them out using the
    * Fetch response's `aborted_transactions`. */
   readonly isolationLevel?: 'read_uncommitted' | 'read_committed';
+  /** Where to position a partition with no committed offset (a fresh group, or one that has
+   * never consumed this partition before), and where to reposition one whose committed offset
+   * the broker reports `OFFSET_OUT_OF_RANGE` (e.g. retention deleted the committed position).
+   * Resolved against the partition's actual log bounds via `ListOffsets`, not assumed to be `0`.
+   * Default `earliest`, matching this client's own pre-`ListOffsets` behaviour (starting such a
+   * partition from the beginning of the log) — a caller that wants `latest` (e.g. a streaming
+   * source, matching the real Kafka consumer's own default for *that* use case) sets it
+   * explicitly. */
+  readonly autoOffsetReset?: 'earliest' | 'latest';
   readonly fetchMinBytes?: number;
   readonly fetchMaxBytes?: number;
   readonly fetchMaxWaitMs?: number;
@@ -270,6 +284,10 @@ export class KafkaConsumer {
   private readonly partitionCounts = new Map<string, number>();
   private readonly brokerAddresses = new Map<number, BrokerAddress>();
 
+  /** Partitions a caller has asked to exclude from the next `Fetch` (see `pausePartitions`) —
+   * still owned (rebalance/offset-commit bookkeeping is unaffected), just not read from. */
+  private readonly paused = new Set<string>();
+
   private readonly heartbeatAbort = new AbortController();
   private heartbeatLoopDone: Promise<void> | undefined;
 
@@ -299,6 +317,27 @@ export class KafkaConsumer {
 
   private get isolationLevel(): 'read_uncommitted' | 'read_committed' {
     return this.options.isolationLevel ?? 'read_uncommitted';
+  }
+
+  private get autoOffsetResetTimestamp(): bigint {
+    return (this.options.autoOffsetReset ?? 'earliest') === 'earliest'
+      ? ListOffsetsTimestamp.EARLIEST
+      : ListOffsetsTimestamp.LATEST;
+  }
+
+  /** Excludes `partitions` from this consumer's next `poll()` — a caller applying its own
+   * per-partition backpressure (e.g. too many unacknowledged records already in flight for it)
+   * while leaving every other owned partition, and this partition's group membership, untouched.
+   * A partition this member does not currently own is accepted harmlessly (a no-op once it is
+   * actually fetched). */
+  pausePartitions(partitions: readonly TopicPartition[]): void {
+    for (const tp of partitions) this.paused.add(topicPartitionKey(tp.topic, tp.partition));
+  }
+
+  /** Reverses {@link pausePartitions}: `partitions` are included in this consumer's `Fetch`
+   * requests again starting with the next `poll()`. */
+  resumePartitions(partitions: readonly TopicPartition[]): void {
+    for (const tp of partitions) this.paused.delete(topicPartitionKey(tp.topic, tp.partition));
   }
 
   // -----------------------------------------------------------------------------------------
@@ -514,8 +553,14 @@ export class KafkaConsumer {
         sync.assignment.length === 0
           ? []
           : decodeConsumerProtocolAssignment(sync.assignment).partitions;
-      const revokedCount = await this.applyAssignment(newAssignment);
+      // Set *before* `applyAssignment` (and the `onRebalance` callback it awaits), not after:
+      // this member's new generation/member ID are already settled at this point (SyncGroup
+      // just succeeded), and a caller's `onRebalance` may itself need to call `commit()` or
+      // anything else that goes through `ensureStableGroup()` — which, had `stable` still been
+      // `false`, would try to join `this.joinPromise`, i.e. the very call it is nested inside,
+      // and deadlock forever rather than seeing this member as already stable.
       this.stable = true;
+      const revokedCount = await this.applyAssignment(newAssignment);
       this.ensureHeartbeatLoop();
       // The cooperative protocol defers a moving partition's hand-off across two generations
       // (see assignors.ts): this generation revoked it from its old owner without yet giving it
@@ -583,7 +628,11 @@ export class KafkaConsumer {
       (tp) => !nextKeys.has(topicPartitionKey(tp.topic, tp.partition)),
     );
 
-    for (const tp of revoked) this.nextOffset.delete(topicPartitionKey(tp.topic, tp.partition));
+    for (const tp of revoked) {
+      const key = topicPartitionKey(tp.topic, tp.partition);
+      this.nextOffset.delete(key);
+      this.paused.delete(key);
+    }
     this.owned = newAssignment.map((tp) => ({ topic: tp.topic, partitions: [...tp.partitions] }));
 
     if (assigned.length > 0 || revoked.length > 0) {
@@ -614,17 +663,92 @@ export class KafkaConsumer {
       ),
     );
     const response = decodeOffsetFetchResponseV6(body);
+    // committedOffset of -1 means "no committed offset for this partition" (a fresh group, or a
+    // partition this group has never consumed before); such a partition is positioned via
+    // `ListOffsets` against this consumer's `autoOffsetReset` policy, not assumed to be `0`.
+    const needsReset: TopicPartition[] = [];
     for (const topic of response.topics) {
       for (const partition of topic.partitions) {
-        // committedOffset of -1 means "no committed offset for this partition" (a fresh group,
-        // or a partition this group has never consumed before); this client starts such a
-        // partition from offset 0 — there is no ListOffsets support here to honour an
-        // "earliest"/"latest" auto-reset policy against the log's actual bounds (see the known
-        // gaps in the package README).
-        const offset = partition.committedOffset < 0n ? 0n : partition.committedOffset;
-        this.nextOffset.set(topicPartitionKey(topic.name, partition.partitionIndex), offset);
+        if (partition.committedOffset < 0n) {
+          needsReset.push({ topic: topic.name, partition: partition.partitionIndex });
+        } else {
+          this.nextOffset.set(
+            topicPartitionKey(topic.name, partition.partitionIndex),
+            partition.committedOffset,
+          );
+        }
       }
     }
+    if (needsReset.length > 0) {
+      const resolved = await this.listOffsets(needsReset, this.autoOffsetResetTimestamp);
+      for (const tp of needsReset) {
+        const key = topicPartitionKey(tp.topic, tp.partition);
+        this.nextOffset.set(key, resolved.get(key) ?? 0n);
+      }
+    }
+  }
+
+  /** Resolves `timestamp` (one of {@link ListOffsetsTimestamp}) against each of `partitions`'
+   * actual log bounds via `ListOffsets`, grouped by partition leader exactly like `Fetch` is (see
+   * `fetchFromLeader`). A partition whose leader is unknown, or whose broker reports an error, is
+   * simply absent from the returned map — callers fall back to a safe default (see
+   * `fetchCommittedOffsets` and the `OFFSET_OUT_OF_RANGE` handling in `fetchFromLeader`). */
+  private async listOffsets(
+    partitions: readonly TopicPartition[],
+    timestamp: bigint,
+  ): Promise<Map<string, bigint>> {
+    const out = new Map<string, bigint>();
+    if (partitions.length === 0) return out;
+    const topics = [...new Set(partitions.map((tp) => tp.topic))];
+    await this.ensureMetadata(topics);
+
+    const byLeader = new Map<number, TopicPartition[]>();
+    for (const tp of partitions) {
+      const leaderId = this.topicLeaders.get(tp.topic)?.get(tp.partition);
+      if (leaderId === undefined || leaderId < 0) continue;
+      let list = byLeader.get(leaderId);
+      if (list === undefined) {
+        list = [];
+        byLeader.set(leaderId, list);
+      }
+      list.push(tp);
+    }
+
+    await Promise.all(
+      [...byLeader.entries()].map(async ([nodeId, tps]) => {
+        const addr = this.brokerAddresses.get(nodeId);
+        if (addr === undefined) return;
+        const conn = await this.getOrConnect(addr);
+        const byTopic = new Map<string, TopicPartition[]>();
+        for (const tp of tps) {
+          let list = byTopic.get(tp.topic);
+          if (list === undefined) {
+            list = [];
+            byTopic.set(tp.topic, list);
+          }
+          list.push(tp);
+        }
+        const body = await conn.sendRequest(
+          ApiKey.ListOffsets,
+          1,
+          false,
+          encodeListOffsetsRequestV1(
+            [...byTopic].map(([name, tpsForTopic]) => ({
+              name,
+              partitions: tpsForTopic.map((tp) => ({ partitionIndex: tp.partition, timestamp })),
+            })),
+          ),
+        );
+        const response = decodeListOffsetsResponseV1(body);
+        for (const topic of response.topics) {
+          for (const partition of topic.partitions) {
+            if (partition.errorCode !== 0) continue;
+            out.set(topicPartitionKey(topic.name, partition.partitionIndex), partition.offset);
+          }
+        }
+      }),
+    );
+    return out;
   }
 
   // -----------------------------------------------------------------------------------------
@@ -686,7 +810,9 @@ export class KafkaConsumer {
   async poll(): Promise<PartitionBatch[]> {
     if (this.closed) throw new KafkaProtocolError('this consumer is closed');
     await this.ensureStableGroup();
-    const partitions = flatten(this.owned);
+    const partitions = flatten(this.owned).filter(
+      (tp) => !this.paused.has(topicPartitionKey(tp.topic, tp.partition)),
+    );
     if (partitions.length === 0) return [];
 
     const topics = [...new Set(partitions.map((tp) => tp.topic))];
@@ -751,8 +877,21 @@ export class KafkaConsumer {
     }
 
     const out: PartitionBatch[] = [];
+    const outOfRange: TopicPartition[] = [];
     for (const topicResponse of response.responses) {
       for (const partitionResponse of topicResponse.partitions) {
+        if (partitionResponse.errorCode === KafkaErrorCode.OFFSET_OUT_OF_RANGE) {
+          // This partition's tracked nextOffset is no longer within the log's actual bounds
+          // (e.g. retention deleted it out from under a stale committed offset). The leader is
+          // still valid — only the offset is bad — so it's resolved via ListOffsets (below,
+          // after every topic/partition in this response has been looked at) rather than
+          // invalidating the cached leader the way other per-partition errors do.
+          outOfRange.push({
+            topic: topicResponse.topic,
+            partition: partitionResponse.partitionIndex,
+          });
+          continue;
+        }
         if (partitionResponse.errorCode !== 0) {
           // Per-partition errors (e.g. a leader move mid-fetch) invalidate this topic's cached
           // leader so the next poll() re-resolves it; the partition is simply skipped this round
@@ -786,6 +925,13 @@ export class KafkaConsumer {
             headers: r.headers,
           })),
         });
+      }
+    }
+    if (outOfRange.length > 0) {
+      const resolved = await this.listOffsets(outOfRange, this.autoOffsetResetTimestamp);
+      for (const tp of outOfRange) {
+        const key = topicPartitionKey(tp.topic, tp.partition);
+        this.nextOffset.set(key, resolved.get(key) ?? 0n);
       }
     }
     return out;

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { builtinSources } from '../src/index.js';
 
 describe('builtinSources', () => {
-  it('returns exactly the ten documented sources, each with a unique type and a valid schema', () => {
+  it('returns exactly the eleven documented sources, each with a unique type and a valid schema', () => {
     const sources = builtinSources();
     const types = sources.map((s) => s.type).sort();
     expect(types).toEqual(
@@ -12,6 +12,7 @@ describe('builtinSources', () => {
         'heartbeat',
         'http_server',
         'internal_metrics',
+        'kafka',
         'otlp',
         'prometheus_scrape',
         'statsd',

@@ -14,6 +14,7 @@ only defines the `EventBuffer` interface and a factory hook a disk implementatio
 - [Topology](#topology)
 - [Buffers and acknowledgements](#buffers-and-acknowledgements)
 - [Sink toolkit](#sink-toolkit)
+- [Worker pool](#worker-pool)
 - [Testing helpers](#testing-helpers)
 
 ## Architecture
@@ -402,6 +403,83 @@ multiplier^attempt))`), bounded by attempts and/or elapsed time, and never retur
   bounded concurrency, and finishes every event's finalizers with `delivered` / `errored` (retries
   exhausted) / `rejected` (a permanent failure), so a sink built on it only has to implement
   `send`.
+
+## Worker pool
+
+`WorkerPool` (`src/worker-pool.ts`, also exported from the package root) is a pool of
+`worker_threads` for CPU-heavy work — see [architecture doc §4.3](../../docs/architecture.md).
+It is deliberately generic: it knows nothing about events, finalizers, or Ferrule Script, only
+about moving `{ meta, payload }` pairs to and from a fixed set of workers, each running the same
+entry module. `@ferrule/operators`' `script` transform (`workers: <n>`) is its first user — see
+`packages/operators/README.md`'s "Worker pool (CPU-heavy `script`)" for how it builds on this.
+
+```ts
+const pool = new WorkerPool({
+  url, // the worker entry module's URL — see resolveWorkerEntry below
+  execArgv, // CLI flags for every worker — see resolveWorkerEntry below
+  workerCount: 4,
+  init: { some: 'one-time setup payload, sent to every worker as workerData' },
+});
+
+const response = await pool.submit({ meta: { chunkIndex: 0 }, payload: encodedEventBatch });
+// response.meta, response.payload
+
+await pool.close(); // graceful: waits for in-flight requests, then terminates every worker
+```
+
+- **No structured cloning of the bulk payload.** `submit`'s `payload` is a `Uint8Array` (for
+  `script`, produced by `@ferrule/buffer`'s binary event codec) that crosses the thread boundary
+  by transfer, not by the structured-clone algorithm walking a possibly deep object graph. The
+  pool does keep one copy: `payload.slice()` right before transferring, so the caller's own
+  `Uint8Array` is never detached — this is what lets a crashed request be retried with no extra
+  work from the caller. That's one `memcpy` per dispatch (two if a request is ever retried), not
+  per event, and far cheaper than cloning the event graphs it replaces.
+- **Request/response by id, not by position.** Every dispatched request gets an internally
+  assigned id; a worker's response (or `ferrule:error`) is matched back to its `PendingRequest`
+  by that id, so a slow worker finishing out of order with others is handled correctly.
+- **Bounded queue with backpressure.** `submit` waits for queue space before even joining the
+  queue once `maxQueueDepth` (default `workerCount * 4`) is reached, then waits for a free
+  worker — the same shape as `EventChannel`'s backpressure.
+- **Crash handling.** A worker that exits with a non-zero code or emits `'error'` is treated as
+  crashed: its in-flight request (if any) is retried once, on whichever worker is free next (a
+  fresh replacement is spawned immediately so the pool's worker count never shrinks). A second
+  crash on the retry rejects with `WorkerPoolCrashedError`. An **application-level** failure (the
+  handler itself threw, reported as a `ferrule:error` message) is different: the worker is still
+  alive and goes straight back into the idle set, no retry, no replacement — only a genuine
+  thread death gets the crash treatment.
+- **`submit`'s `signal` is honoured only while still queued.** Aborting cancels a request that
+  hasn't reached a worker yet (it rejects with the abort reason) but does not kill a worker
+  mid-batch — that would corrupt, not cancel, its work. This is why `script`'s `processAsync`
+  (see the operators README) still has to watch `ctx.signal` itself for the overall batch.
+- **Graceful `close()`** rejects anything still only queued, waits for everything already
+  dispatched to settle naturally, then terminates every worker.
+
+### Worker entry resolution
+
+A worker entry module needs a URL and a set of `execArgv` that work whether the package
+constructing the pool is running from its built `dist/` (production) or directly from its
+TypeScript `src/` (this monorepo's own tests, via Vitest's bare-package-name alias in
+`vitest.config.ts`, or an unbuilt workspace checkout). `resolveWorkerEntry(import.meta.url,
+'worker/entry-name.ts')`, called from a module that itself sits directly inside its package's
+`src/` (compiling 1:1 into `dist/`), handles this:
+
+- The entry always runs from **TypeScript source**, in both environments, via Node's
+  `--experimental-strip-types` — the same flag `packages/script/bench/throughput.ts` already
+  runs with. A package ships both `dist/` and `src/` (see any package's `package.json` `files`),
+  so the entry's source is always present; type-stripping it costs nothing per batch, only once
+  per long-lived worker.
+- What differs is how the entry's _own_ imports of other `@ferrule/*` packages resolve. Node
+  picks this from `callerUrl`'s immediate parent directory name (`src` or `dist` — not a
+  substring match anywhere else in the path, so an unrelated directory named e.g. `src-backup`
+  can't confuse it): from a built `dist/`, the default `exports` condition resolves them to
+  their own `dist/index.js` too, so no extra flag is needed; from `src/`, nothing is built, so
+  `resolveWorkerEntry` also adds `--conditions=@ferrule/source` — the exact custom condition
+  `tsconfig.base.json`'s `customConditions` already uses for type-checking — so those imports
+  resolve to _their_ `src/index.ts` as well.
+- `runWorkerPoolHandler(handler)` is the matching entry-side helper: call it once, after the
+  entry's own one-time setup (e.g. compiling a program from `workerData`), and it wires
+  `parentPort` to call `handler` for every request and post the result back (or a
+  `ferrule:error` if `handler` throws).
 
 ## Testing helpers
 

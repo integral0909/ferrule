@@ -12,3 +12,4 @@ export * from './pipeline.js';
 export * from './toolkit/index.js';
 export * from './testing.js';
 export * from './disk-buffer.js';
+export * from './worker-pool.js';

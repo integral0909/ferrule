@@ -1,4 +1,4 @@
-import type { Event, LogEvent } from '@ferrule/core';
+import { isLogEvent, isSpanEvent, type Event } from '@ferrule/core';
 import { s, type Infer } from '@ferrule/schema';
 import {
   defineTransform,
@@ -8,12 +8,16 @@ import {
   type TransformContext,
   type TransformOutput,
 } from '@ferrule/runtime';
-import type { Type } from '@ferrule/script';
+import { spanEventSchema, spanEventToView, type CompiledProgram, type Type } from '@ferrule/script';
 import { compileConditionSource } from './util/scriptCompile.js';
 import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
 
+const EVENT_KINDS = ['log', 'span'] as const;
+
 /**
- * `filter` — keeps log events for which a Ferrule Script boolean expression is true.
+ * `filter` — keeps events of one kind (`event_kind`, default `log`) for which a Ferrule Script
+ * boolean expression is true; the other kind passes through unchanged, counted by
+ * `filter_passthrough_events_total` (tagged `kind`).
  *
  * **Compilation approach.** `condition` is a single Ferrule Script *expression*, not a full
  * program with statements — `@ferrule/script` doesn't expose a "value of the last expression"
@@ -47,6 +51,13 @@ import { FIELD_KIND_NAMES, inputSchemaType } from './util/inputSchema.js';
  * { drop }`), but a compile error's code frame is rendered against `condition` itself — see
  * `compileConditionSource` in `./util/scriptCompile.js` — so the caret lands on the right token
  * in the user's own expression, not somewhere inside the wrapper around it.
+ *
+ * **`event_kind: span`** compiles `condition` against the span view instead
+ * (`@ferrule/script`'s `spanEventSchema`/`span/view.ts` — see `docs/language/design.md`'s "Span
+ * events"); `input_schema` has no effect in that case, since span fields are typed automatically.
+ * A condition can only *read* the view (the grammar has no way to put an assignment statement
+ * inside an expression), so there is nothing to write back — the original `SpanEvent` is what
+ * gets pushed or dropped, never the view.
  */
 
 export const filterOptions = s.object({
@@ -62,6 +73,15 @@ export const filterOptions = s.object({
     .record(s.enum(FIELD_KIND_NAMES))
     .optional()
     .describe('declarative field -> type map used to type .field paths in the condition'),
+  event_kind: s
+    .enum(EVENT_KINDS)
+    .default('log')
+    .describe(
+      'which event kind the condition runs against; the other kind then passes through ' +
+        'unchanged. `span` checks the condition against the span view (see ' +
+        'docs/language/design.md §"Span events") instead of `input_schema`, which has no effect ' +
+        'unless `event_kind` is `log`.',
+    ),
 });
 
 export type FilterOptions = Infer<typeof filterOptions>;
@@ -69,14 +89,24 @@ export type FilterOptions = Infer<typeof filterOptions>;
 export const filterTransform = defineTransform<FilterOptions>({
   kind: 'transform',
   type: 'filter',
-  description: 'Keeps log events for which a Ferrule Script boolean expression is true.',
+  description: 'Keeps events of one kind for which a Ferrule Script boolean expression is true.',
   options: filterOptions,
-  accepts: ['log'],
-  examples: [{ title: 'Keep only 2xx/3xx responses', config: { condition: '.status < 400' } }],
+  accepts: ['log', 'span'],
+  examples: [
+    { title: 'Keep only 2xx/3xx responses', config: { condition: '.status < 400' } },
+    {
+      title: 'Drop health-check spans by attribute',
+      config: { event_kind: 'span', condition: '.attributes.http_route != "/healthz"' },
+    },
+  ],
   build: (options) => {
-    const inputSchema = inputSchemaType(options.input_schema);
     const compileOpts: { inputSchema?: Type } = {};
-    if (inputSchema !== undefined) compileOpts.inputSchema = inputSchema;
+    if (options.event_kind === 'span') {
+      compileOpts.inputSchema = spanEventSchema();
+    } else {
+      const inputSchema = inputSchemaType(options.input_schema);
+      if (inputSchema !== undefined) compileOpts.inputSchema = inputSchema;
+    }
     const program = compileConditionSource(
       options.condition,
       options.on_error === 'keep',
@@ -90,6 +120,50 @@ export const filterTransform = defineTransform<FilterOptions>({
     let abortedCounter!: Counter;
     let discardedCounter!: Counter;
 
+    /**
+     * Runs the compiled condition against `ran` (the real event for `event_kind: log`, or its
+     * read-only view for `event_kind: span`) and applies the decision to `original` — the two
+     * differ only for spans, where `ran` is a throwaway `spanEventToView` copy but `original` is
+     * the real `SpanEvent` that must be pushed/dropped/finished.
+     */
+    function decide(
+      program: CompiledProgram,
+      ran: Parameters<CompiledProgram['run']>[0],
+      original: Event,
+      out: TransformOutput,
+    ): void {
+      const outcome = program.run(ran, { clock: () => ctx.clock.now() });
+      switch (outcome.kind) {
+        case 'continue': {
+          keptCounter.increment();
+          out.push(original, DEFAULT_PORT);
+          const [, ...extra] = outcome.events;
+          for (const extraEvent of extra) {
+            extraEvent.metadata.finalizers.merge(original.metadata.finalizers.clone());
+            out.push(extraEvent, DEFAULT_PORT);
+          }
+          break;
+        }
+        case 'drop': {
+          droppedCounter.increment();
+          original.metadata.finalizers.finish('delivered');
+          break;
+        }
+        case 'abort': {
+          abortedCounter.increment();
+          if (options.on_error === 'keep') {
+            keptCounter.increment();
+            out.push(original, DEFAULT_PORT);
+          } else {
+            droppedCounter.increment();
+            discardedCounter.increment();
+            original.metadata.finalizers.finish('rejected');
+          }
+          break;
+        }
+      }
+    }
+
     return {
       start(context) {
         ctx = context;
@@ -102,37 +176,17 @@ export const filterTransform = defineTransform<FilterOptions>({
       },
       process(events: Event[], out: TransformOutput) {
         for (const event of events) {
-          const log = event as LogEvent;
-          const outcome = program.run(log, { clock: () => ctx.clock.now() });
-          switch (outcome.kind) {
-            case 'continue': {
-              keptCounter.increment();
-              const [first, ...extra] = outcome.events;
-              out.push(first ?? log, DEFAULT_PORT);
-              for (const extraEvent of extra) {
-                extraEvent.metadata.finalizers.merge(log.metadata.finalizers.clone());
-                out.push(extraEvent, DEFAULT_PORT);
-              }
-              break;
+          if (options.event_kind === 'span') {
+            if (isSpanEvent(event)) {
+              decide(program, spanEventToView(event), event, out);
+              continue;
             }
-            case 'drop': {
-              droppedCounter.increment();
-              log.metadata.finalizers.finish('delivered');
-              break;
-            }
-            case 'abort': {
-              abortedCounter.increment();
-              if (options.on_error === 'keep') {
-                keptCounter.increment();
-                out.push(log, DEFAULT_PORT);
-              } else {
-                droppedCounter.increment();
-                discardedCounter.increment();
-                log.metadata.finalizers.finish('rejected');
-              }
-              break;
-            }
+          } else if (isLogEvent(event)) {
+            decide(program, event, event, out);
+            continue;
           }
+          ctx.metrics.counter('filter_passthrough_events_total', { kind: event.kind }).increment();
+          out.push(event, DEFAULT_PORT);
         }
       },
     };

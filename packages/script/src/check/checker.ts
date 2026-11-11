@@ -292,12 +292,16 @@ class Checker {
   /**
    * Validates a path write against `inputSchema` when `validateWrites` is set (see
    * {@link CheckOptions.validateWrites}): a top-level field in `readonlyPaths` is never
-   * assignable, and otherwise the assigned value must be a subtype of the path's schema-declared
-   * type (an open `rest`/`any` along the way stays permissive, same as a read).
+   * assignable — through *any* path that starts with it, not just a bare one-segment
+   * reassignment, since a read-only field can still be a structured value (an array/object) with
+   * writable-looking sub-paths of its own (the span view's `.annotations`/`.links` are read-only
+   * arrays of objects; `.annotations[0].name = x` must be rejected exactly like
+   * `.annotations = []` is) — and otherwise the assigned value must be a subtype of the path's
+   * schema-declared type (an open `rest`/`any` along the way stays permissive, same as a read).
    */
   private checkPathAssignTarget(target: PathExpr, valueType: Type): void {
     const first = target.segments[0];
-    if (target.segments.length === 1 && typeof first === 'string') {
+    if (typeof first === 'string') {
       const message = this.readonlyPaths.get(first);
       if (message !== undefined) {
         this.error('E311', message, target.span);

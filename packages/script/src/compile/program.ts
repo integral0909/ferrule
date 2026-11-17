@@ -1,4 +1,4 @@
-import type { LogEvent } from '@ferrule/core';
+import type { LogEvent, MetricEvent } from '@ferrule/core';
 import type { CheckResult, ResolvedCall } from '../check/typedProgram.js';
 import { createDefaultImplementations } from '../stdlib/index.js';
 import type { ImplementationRegistry } from '../registry/implementation.js';
@@ -9,6 +9,8 @@ import {
   type Frame,
   type RunOptions,
   type RuntimeValue,
+  type ScriptEvent,
+  type ScriptTarget,
 } from '../runtime/context.js';
 import { ScriptBugError } from '../runtime/failure.js';
 import type { Outcome } from '../runtime/outcome.js';
@@ -26,17 +28,27 @@ export interface CompileOptions {
   readonly optimize?: boolean;
   /** How many `log()` calls per second are forwarded to `RunOptions.onLog`. Default 100. */
   readonly logsPerSecond?: number;
+  /**
+   * Which event kind the program runs against. Default `'log'`. Must match the `target` the
+   * program was *checked* with (`CheckOptions.target`), since the checker resolves `.path` types
+   * — and rejects unknown metric fields — against the matching shape.
+   */
+  readonly target?: ScriptTarget;
 }
 
 /**
- * A compiled Ferrule Script program: a tree of closures ready to run against log events.
+ * A compiled Ferrule Script program: a tree of closures ready to run against events of one kind.
  *
- * `run` restricts its input to {@link LogEvent} at the type level — this milestone's compiler
- * does not support metric or span events (see the README's "Execution model" section for the
- * reasoning); a caller with a `MetricEvent`/`SpanEvent` must convert it or route around the
- * program, which is a compile-time (type-checking) decision rather than a runtime one.
+ * The kind is a *type* parameter, not a runtime input: `CompiledProgram` with no argument is a
+ * log program, exactly as before, and `compile(result, { target: 'metric' })` returns a
+ * `CompiledProgram<MetricEvent>` whose `run` takes a `MetricEvent`. Mixing them is a TypeScript
+ * error at the call site rather than a runtime check, because a program's `.path` accessors are
+ * specialised for one shape when it is compiled (see the README's "Execution model"). `SpanEvent`
+ * is still unsupported.
  */
-export interface CompiledProgram {
+export interface CompiledProgram<E extends ScriptEvent = LogEvent> {
+  /** Which event kind this program was compiled against. */
+  readonly target: ScriptTarget;
   /** Size of the `Frame` array `run` allocates per call; exposed for diagnostics/benchmarking. */
   readonly slotCount: number;
   /** The program's `test { ... }` blocks, in source order, for `runInlineTests` (`compile/testRunner.ts`). */
@@ -44,11 +56,26 @@ export interface CompiledProgram {
   /** The checked program this was compiled from, for `runInlineTests`. */
   readonly checkResult: CheckResult;
   readonly implementations: ImplementationRegistry;
-  run(event: LogEvent, options?: RunOptions): Outcome;
+  run(event: E, options?: RunOptions): Outcome<E>;
 }
 
+/** A compiled program of either kind, for code that handles both (e.g. `runInlineTests`). */
+export type AnyCompiledProgram = CompiledProgram<LogEvent> | CompiledProgram<MetricEvent>;
+
 /** Compiles a checked program. Throws if `checkResult` has any error-severity diagnostic. */
-export function compile(checkResult: CheckResult, options: CompileOptions = {}): CompiledProgram {
+export function compile(
+  checkResult: CheckResult,
+  options?: CompileOptions & { readonly target?: 'log' },
+): CompiledProgram<LogEvent>;
+export function compile(
+  checkResult: CheckResult,
+  options: CompileOptions & { readonly target: 'metric' },
+): CompiledProgram<MetricEvent>;
+export function compile(checkResult: CheckResult, options?: CompileOptions): AnyCompiledProgram;
+export function compile(
+  checkResult: CheckResult,
+  options: CompileOptions = {},
+): AnyCompiledProgram {
   if (checkResult.diagnostics.some((d) => d.severity === 'error')) {
     throw new Error(
       'cannot compile a program with unresolved errors; fix checkResult.diagnostics first',
@@ -64,7 +91,8 @@ export function compile(checkResult: CheckResult, options: CompileOptions = {}):
     calls = optimized.calls;
   }
 
-  const compiler = new Compiler(checkResult, implementations, calls);
+  const target: ScriptTarget = options.target ?? 'log';
+  const compiler = new Compiler(checkResult, implementations, calls, target);
   const rootScope = new CompileScope(compiler.alloc);
   const transformStatements = program.statements.filter((s) => s.kind !== 'test');
   const tests = program.statements.filter((s): s is TestDecl => s.kind === 'test');
@@ -74,12 +102,15 @@ export function compile(checkResult: CheckResult, options: CompileOptions = {}):
   const logLimiter = new RateLimiter(options.logsPerSecond ?? 100);
   const rootSpan: Span = program.span;
 
+  // The `run` below is written once for both kinds; `target` (fixed above) decides which one it
+  // actually receives, which the `AnyCompiledProgram` union cannot express in a single signature.
   return {
+    target,
     slotCount,
     tests,
     checkResult,
     implementations,
-    run(event: LogEvent, runOptions?: RunOptions): Outcome {
+    run(event: ScriptEvent, runOptions?: RunOptions): Outcome<ScriptEvent> {
       const ctx = createRunCtx(event, runOptions, logLimiter, rootSpan);
       const frame: Frame = new Array<RuntimeValue>(slotCount).fill(null);
       try {
@@ -89,10 +120,17 @@ export function compile(checkResult: CheckResult, options: CompileOptions = {}):
       }
       return { kind: 'continue', events: [event, ...ctx.emitted] };
     },
-  };
+  } as AnyCompiledProgram;
 }
 
-export function outcomeForError(error: unknown, fallbackSpan: Span): Outcome {
+/**
+ * Generic in `E` because it only ever produces the `drop`/`abort` variants, which carry no
+ * events and so fit any program's `Outcome`.
+ */
+export function outcomeForError<E extends ScriptEvent = LogEvent>(
+  error: unknown,
+  fallbackSpan: Span,
+): Outcome<E> {
   if (error instanceof ScriptSignal) {
     if (error.signalKind === 'drop') return { kind: 'drop' };
     if (error.signalKind === 'limit') {

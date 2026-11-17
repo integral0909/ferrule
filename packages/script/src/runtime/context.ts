@@ -1,4 +1,4 @@
-import type { LogEvent, Value } from '@ferrule/core';
+import type { LogEvent, MetricEvent, Value } from '@ferrule/core';
 import { Timestamp } from '@ferrule/core';
 import type { Span } from '../syntax/source.js';
 import type { Failure } from './failure.js';
@@ -78,6 +78,17 @@ export interface LogSink {
   (entry: { readonly level: string; readonly message: Value; readonly span: Span }): void;
 }
 
+/**
+ * Which event kind a program is compiled against. A metric has a fixed, typed shape
+ * (`types/metricSchema.ts`) while a log event's fields are free-form, so one compiled program
+ * serves exactly one of them; the choice is made at check/compile time. Defaults to `'log'`
+ * everywhere, so nothing about an existing log program changes.
+ */
+export type ScriptTarget = 'log' | 'metric';
+
+/** The event type a {@link ScriptTarget} runs against. */
+export type ScriptEvent = LogEvent | MetricEvent;
+
 /** Runtime options for a single {@link CompiledProgram.run} call. */
 export interface RunOptions {
   readonly limits?: Partial<ResourceLimits>;
@@ -92,20 +103,27 @@ export interface RunOptions {
  * surface beyond what standard library implementations need (see `registry/implementation.ts`).
  */
 export interface RunCtx {
-  readonly event: LogEvent;
+  /**
+   * The event being transformed. Which concrete type this is, is fixed by the program's
+   * {@link ScriptTarget} at compile time, not discovered per event: a `target: 'log'` program's
+   * compiled closures only ever see a `LogEvent`, a `target: 'metric'` program's only a
+   * `MetricEvent` (`compile/compiler.ts` picks the accessor when it builds the closure). The
+   * target itself is deliberately *not* carried here: nothing at run time branches on it.
+   */
+  readonly event: ScriptEvent;
   readonly limits: ResourceLimits;
   readonly clock: () => Timestamp;
   readonly onLog: LogSink;
   readonly logLimiter: RateLimiter;
-  /** Events `emit()` has produced so far, in order. Only log events; see the README's "Execution
-   *  model" section for why metric/span emission is out of scope for this milestone. */
+  /** Events `emit()` has produced so far, in order. Only log events, and so only reachable from a
+   *  `target: 'log'` program — the checker rejects `emit()` in a metric program (E313). */
   readonly emitted: LogEvent[];
   /** The span of the statement currently executing, for wrapping an unexpected exception. */
   currentSpan: Span;
 }
 
 export function createRunCtx(
-  event: LogEvent,
+  event: ScriptEvent,
   options: RunOptions | undefined,
   logLimiter: RateLimiter,
   initialSpan: Span,

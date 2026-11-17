@@ -3,6 +3,25 @@ import { describe, expect, it } from 'vitest';
 import { FerruleError } from '@ferrule/core';
 import { snappyCompress, snappyDecompress } from '../../src/http/snappy.js';
 
+/**
+ * Byte-equality for *large* buffers. `expect(a).toEqual(b)` walks two `Uint8Array`s element by
+ * element through the structural-equality/diff machinery: on a 200 KB pair that takes over a
+ * second (against a 5s per-test timeout, which parallel suite load then pushes over), while the
+ * compression it is checking takes ~20ms. `Buffer.equals` is a memcmp and does the same job in
+ * about a millisecond; the index of the first difference is reported by hand, since a raw
+ * boolean comparison would otherwise fail with no clue where.
+ *
+ * Small buffers elsewhere in this file keep plain `toEqual`, whose diff output is worth having.
+ */
+function expectBytesEqual(actual: Uint8Array, expected: Uint8Array): void {
+  if (Buffer.from(actual).equals(Buffer.from(expected))) return;
+  expect(actual.byteLength).toBe(expected.byteLength);
+  const at = actual.findIndex((byte, i) => byte !== expected[i]);
+  throw new Error(
+    `buffers differ at byte ${at}: got 0x${actual[at]!.toString(16)}, expected 0x${expected[at]!.toString(16)}`,
+  );
+}
+
 describe('snappy round trip', () => {
   it('round-trips the empty buffer', () => {
     const compressed = snappyCompress(new Uint8Array(0));
@@ -34,7 +53,7 @@ describe('snappy round trip', () => {
     const random = new Uint8Array(200_000);
     for (let i = 0; i < random.length; i++) random[i] = (i * 2654435761) & 0xff;
     const compressed = snappyCompress(random);
-    expect(snappyDecompress(compressed)).toEqual(random);
+    expectBytesEqual(snappyDecompress(compressed), random);
   });
 
   it('round-trips arbitrary buffers (property)', () => {

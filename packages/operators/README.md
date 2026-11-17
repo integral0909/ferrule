@@ -101,10 +101,41 @@ anyType)`): it types the top-level fields it names; anything else stays `any`, a
 `array`/`object` fields stay fully open (no nested element typing) — see
 `docs/language/design.md` §3 for the default-`any` behaviour this narrows.
 
-**Metric and span events pass through unchanged**, counted by `script_passthrough_events_total`
-(tagged `kind`): `@ferrule/script`'s compiler only supports `LogEvent` today (see the script
-package README's "Execution model: logs only"), so there is no way to run a program against a
-metric or span, and rejecting a mixed-kind pipeline outright would be more surprising than useful.
+`event_kind` picks which event kind the program transforms — `log` (the default) or `metric`. A
+Ferrule Script program is compiled against one event shape (see the script package README's
+"Execution model"): a log event's fields are free-form and type as `any` unless `input_schema`
+narrows them, while a metric has a fixed, closed shape addressed by the same path syntax —
+`.name`, `.namespace`, `.tags.<name>`, `.kind`, `.type` (read-only), `.timestamp`, `.interval_ms`,
+and the value fields its type has (`.value`, `.values`, `.samples`/`.statistic`, `.buckets`,
+`.quantiles`, `.count`, `.sum`). Because that shape is known at build time, naming a field a
+metric does not have (with a did-you-mean) and assigning a wrongly typed value (`.tags.env = 1`)
+are both compile errors, reported during `ferrule validate` rather than in production. What is
+left to run time, aborting the event like any other `abort`, is what depends on the particular
+metric: writing a field its type does not have (`.buckets` on a counter), or breaking an invariant
+the type system cannot state (`.kind` must be `incremental`/`absolute`, bucket bounds must
+increase). `input_schema` describes log fields and cannot be combined with `event_kind: metric`;
+`emit()` is not available in a metric program, since it produces a log event.
+
+```yaml
+transforms:
+  clean_up_metrics:
+    type: script
+    inputs: [statsd]
+    event_kind: metric
+    source: |
+      .name = replace(.name, "legacy_", "") ?? .name
+      del(.tags.request_id)
+      if .tags.env == "test" { drop }
+```
+
+**Events of the other kind pass through unchanged**, counted by
+`script_passthrough_events_total` (tagged `kind`) — so a `script` can sit in a mixed-kind pipeline
+that carries other kinds past it, rather than rejecting the pipeline outright. Spans always pass
+through: `@ferrule/script` has no span accessors.
+
+An aborted _metric_ routed to the `errors` port is not annotated with `ferrule.error` the way a
+log event is — a metric has no free-form fields, and inventing tags for the reason would change
+the series' identity and inflate its cardinality. The reason goes to the component log instead.
 
 **Outcomes**, per `CompiledProgram.run`'s `Outcome`:
 
@@ -588,9 +619,13 @@ transforms:
 ## Known gaps
 
 - `script`'s `input_schema` is a flat field → type-name map; there is no nested object/array
-  element typing (a named `array`/`object` field stays fully open), and metric/span events pass
-  through `script` untouched since `@ferrule/script`'s compiler only supports `LogEvent` (see the
-  script package README's "Execution model: logs only").
+  element typing (a named `array`/`object` field stays fully open).
+- `script` transforms one event kind per instance (`event_kind`), and span events always pass
+  through untouched: `@ferrule/script` has no span accessors (see the script package README's
+  "Execution model"). A pipeline that needs to transform both logs and metrics needs two `script`
+  transforms, since a program is compiled against one shape.
+- A metric `script` cannot `emit()`, and an aborted metric carries no `ferrule.error` annotation
+  on the `errors` port (the reason is logged instead).
 - `filter`/`route` compile `condition` inside a synthetic wrapper program
   (`if !((<condition>) ?? <fallback>) { drop }`); a compile error's position is reported against
   that wrapper, not the bare `condition` string.

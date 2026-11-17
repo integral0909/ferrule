@@ -11,6 +11,22 @@ import {
 } from '@ferrule/codecs';
 import { LogEvent } from '@ferrule/core';
 
+/**
+ * Rows of arbitrary binary-unit strings. A row of zero fields is not representable in CSV text (a
+ * blank line always decodes back as one empty field), so every generated row has at least one.
+ *
+ * Deliberately built here rather than inside the `it`: the *first* `fc.string({ unit: 'binary' })`
+ * constructed in a module builds fast-check's Unicode tables, which takes over a second (every
+ * later construction is free, and running the property itself is a few milliseconds). Inside a
+ * test body that one-off cost counts against the per-test timeout and makes the test fail under
+ * parallel suite load; at module scope it is paid during collection, which is not timed.
+ * Arbitraries are immutable, so sharing one across properties is safe.
+ */
+const arbBinaryRows = fc.array(
+  fc.array(fc.string({ unit: 'binary' }), { minLength: 1, maxLength: 4 }),
+  { maxLength: 5 },
+);
+
 describe('parseCsv', () => {
   it('parses simple comma-separated rows', () => {
     const rows = parseCsv('a,b,c\n1,2,3\n');
@@ -117,19 +133,12 @@ describe('quoteCsvField / encodeCsv', () => {
   });
 
   it('round-trips arbitrary rows through encode -> parse', () => {
-    // A row of zero fields is not representable in CSV text (a blank line always decodes back as
-    // one empty field), so every generated row has at least one field.
     fc.assert(
-      fc.property(
-        fc.array(fc.array(fc.string({ unit: 'binary' }), { minLength: 1, maxLength: 4 }), {
-          maxLength: 5,
-        }),
-        (rows) => {
-          const encoded = encodeCsv(rows);
-          const decoded = parseCsv(encoded);
-          expect(decoded).toEqual(rows);
-        },
-      ),
+      fc.property(arbBinaryRows, (rows) => {
+        const encoded = encodeCsv(rows);
+        const decoded = parseCsv(encoded);
+        expect(decoded).toEqual(rows);
+      }),
     );
   });
 });

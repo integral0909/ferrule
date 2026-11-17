@@ -17,6 +17,21 @@ import {
   type ValueMap,
 } from '@ferrule/core';
 
+/**
+ * Arbitrary path segments: field names (arbitrary strings, so quoting and escaping are exercised)
+ * and array indices.
+ *
+ * Deliberately built here rather than inside the `it`: the *first* `fc.string({ unit: 'binary' })`
+ * constructed in a module builds fast-check's Unicode tables, which takes over a second (every
+ * later construction is free, and running the property itself is a few milliseconds). Inside a
+ * test body that one-off cost counts against the per-test timeout and makes the test fail under
+ * parallel suite load; at module scope it is paid during collection, which is not timed.
+ */
+const arbPathSegments = fc.array(
+  fc.oneof(fc.string({ unit: 'binary' }), fc.integer({ min: -1000, max: 1000 })),
+  { maxLength: 6 },
+);
+
 describe('parsePath', () => {
   it.each<[string, Path]>([
     ['.', []],
@@ -54,9 +69,8 @@ describe('parsePath', () => {
   });
 
   it('round-trips through formatPath', () => {
-    const segment = fc.oneof(fc.string({ unit: 'binary' }), fc.integer({ min: -1000, max: 1000 }));
     fc.assert(
-      fc.property(fc.array(segment, { maxLength: 6 }), (path) => {
+      fc.property(arbPathSegments, (path) => {
         expect(parsePath(formatPath(path))).toEqual(path);
       }),
     );

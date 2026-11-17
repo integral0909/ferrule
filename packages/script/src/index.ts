@@ -229,7 +229,12 @@ export { Scope, type Binding } from './check/scope.js';
 
 // ---- compiler / runtime (M2 back end) --------------------------------------------------------
 
-export { compile, type CompileOptions, type CompiledProgram } from './compile/program.js';
+export {
+  compile,
+  type AnyCompiledProgram,
+  type CompileOptions,
+  type CompiledProgram,
+} from './compile/program.js';
 export { optimizeProgram } from './compile/optimizer.js';
 export { runInlineTests, type FieldDiff, type InlineTestResult } from './compile/testRunner.js';
 
@@ -271,7 +276,28 @@ export {
   type RunCtx,
   type RunOptions,
   type RuntimeValue,
+  type ScriptEvent,
+  type ScriptTarget,
 } from './runtime/context.js';
+export {
+  deleteMetricPath,
+  getMetricPath,
+  hasMetricPath,
+  isWritableMetricField,
+  metricFieldsFor,
+  metricToValue,
+  setMetricField,
+  setMetricPath,
+} from './runtime/metricAccess.js';
+export {
+  isMetricFieldName,
+  METRIC_COMMON_FIELDS,
+  METRIC_FIELD_NAMES,
+  METRIC_VALUE_FIELDS,
+  metricEventSchema,
+  READONLY_METRIC_FIELDS,
+  type MetricFieldName,
+} from './types/metricSchema.js';
 export { isRegexValue, RegexValue, assertNoRegex } from './runtime/regex.js';
 export { matchesKindName, scriptKindOf, type ScriptKind } from './runtime/kinds.js';
 export { toDisplayString, toLiteralString } from './runtime/display.js';

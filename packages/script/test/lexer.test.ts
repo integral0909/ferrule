@@ -450,6 +450,18 @@ describe('lexer: unexpected characters', () => {
   });
 });
 
+/**
+ * Arbitrary text over the full 16-bit code-unit space, including lone surrogates — the input the
+ * lexer must survive without throwing.
+ *
+ * Deliberately built here rather than inside the `it`: the *first* `fc.string({ unit: 'binary' })`
+ * constructed in a module builds fast-check's Unicode tables, which takes over a second (every
+ * later construction is free, and running the property itself is a few milliseconds). Inside a
+ * test body that one-off cost counts against the per-test timeout and makes the test fail under
+ * parallel suite load; at module scope it is paid during collection, which is not timed.
+ */
+const arbUnicodeText = fc.string({ unit: 'binary', maxLength: 200 });
+
 describe('lexer: property — never throws on arbitrary input', () => {
   it('handles any string without throwing and always ends with eof', () => {
     fc.assert(
@@ -462,7 +474,7 @@ describe('lexer: property — never throws on arbitrary input', () => {
 
   it('handles arbitrary unicode text without throwing', () => {
     fc.assert(
-      fc.property(fc.string({ unit: 'binary', maxLength: 200 }), (text) => {
+      fc.property(arbUnicodeText, (text) => {
         expect(() => lex(new SourceFile('<fuzz>', text))).not.toThrow();
       }),
     );

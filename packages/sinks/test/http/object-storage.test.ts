@@ -1,3 +1,4 @@
+import { lookup } from 'node:dns';
 import { gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -19,6 +20,21 @@ const credentials = {
   access_key_id: 'AKIDEXAMPLE',
   secret_access_key: 'secretkeysecretkeysecretkey',
 };
+
+/**
+ * Whether this machine resolves `*.localhost` subdomains to loopback (RFC 6761), which the
+ * virtual-hosted addressing test below needs in order to reach a local server under a bucket
+ * subdomain without real DNS.
+ *
+ * Probed rather than inferred from the platform. Windows' resolver does not implement it, but
+ * neither does a glibc host whose `/etc/nsswitch.conf` lacks the `myhostname`/`resolve` modules —
+ * common in minimal containers and WSL. Getting this wrong is expensive: the sink retries the
+ * `ENOTFOUND` until the test times out, which reads as an unrelated flake rather than "this host
+ * cannot run this check".
+ */
+const localhostSubdomainsResolve = await new Promise<boolean>((resolve) => {
+  lookup('my-bucket.localhost', (error) => resolve(error === null));
+});
 
 describe('object_storage sink', () => {
   it('PUTs a batch to a path-style URL, signed with SigV4', async () => {
@@ -95,9 +111,8 @@ describe('object_storage sink', () => {
     expect(server.requests[0]!.url).not.toBe(server.requests[1]!.url);
   });
 
-  // Windows' resolver does not map `*.localhost` subdomains to loopback, so this end-to-end
-  // check only runs where RFC 6761 resolution is available.
-  it.skipIf(process.platform === 'win32')(
+  // Only runs where `*.localhost` actually resolves — see `localhostSubdomainsResolve`.
+  it.skipIf(!localhostSubdomainsResolve)(
     'uses virtual-hosted addressing when configured',
     async () => {
       server = await startServer((_req, res) => res.end());

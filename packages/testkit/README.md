@@ -240,8 +240,9 @@ containsEventMatching(events, { status: 200 }); // boolean, for a plain expect(.
 - **`advance_clock` runs once per case**, after all inputs are sent. There's no way to interleave
   further input batches with further clock advances within one case; write separate cases (or use
   `runTestFile`'s lower-level pieces directly) for a scenario that needs that.
-- **`conditions` only evaluate against log events**, matching `@ferrule/script`'s own "logs only"
-  execution model (see that package's README).
+- **`conditions` only evaluate against log events.** `@ferrule/script` can compile a program
+  against metric events too (`target: 'metric'`), but a testkit condition is always compiled for
+  logs — as are `filter`'s and `route`'s conditions in `@ferrule/operators`.
 - **A route/filter-style transform's condition compile errors report positions against a synthetic
   wrapper**, not `conditions[i]` alone — this only affects `@ferrule/testkit`'s own
   `scriptCondition.ts` helper (used for `outputs.<sink>.conditions`), which, unlike

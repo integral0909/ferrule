@@ -64,15 +64,22 @@ import {
   typesEqual,
   unionType,
 } from '../types/types.js';
+import { isMetricFieldName, metricEventSchema, METRIC_FIELD_NAMES } from '../types/metricSchema.js';
+import type { ScriptTarget } from '../runtime/context.js';
 import { didYouMean } from './editDistance.js';
 import { Scope, type Binding } from './scope.js';
 import type { CheckOptions, CheckResult, ResolvedCall } from './typedProgram.js';
 
 /** Type-checks and resolves a parsed program. Never throws. See {@link CheckResult}. */
 export function check(program: Program, options: CheckOptions = {}): CheckResult {
+  const target = options.target ?? 'log';
   const checker = new Checker(
     options.registry ?? createDefaultRegistry(),
-    options.inputSchema ?? anyType,
+    // A metric's shape is fixed and known, so it replaces (rather than refines) `inputSchema`,
+    // which describes a *log* event's free-form fields. `compileScriptSource` rejects the two
+    // being combined before it gets here.
+    target === 'metric' ? metricEventSchema : (options.inputSchema ?? anyType),
+    target,
   );
   checker.run(program);
   const types = checker.types;
@@ -101,7 +108,27 @@ class Checker {
   constructor(
     private readonly registry: FunctionRegistry,
     private readonly inputSchema: Type,
+    private readonly target: ScriptTarget = 'log',
   ) {}
+
+  /**
+   * Reports a `.path` a metric does not have. The metric schema is *closed*, unlike a log
+   * `inputSchema` (where an unlisted field is simply `null`-typed, since a log's fields are
+   * free-form and a declared schema is only a partial description): a metric's field set is
+   * exhaustively known, so naming one outside it is always a mistake worth catching at build time.
+   */
+  private checkMetricPath(segments: readonly (string | number)[], span: Span): void {
+    if (this.target !== 'metric' || segments.length === 0) return;
+    const head = segments[0];
+    if (typeof head !== 'string') {
+      this.error('E311', 'a metric event cannot be indexed; name a field instead', span);
+      return;
+    }
+    if (isMetricFieldName(head)) return;
+    const suggestion = didYouMean(head, [...METRIC_FIELD_NAMES]);
+    const note = suggestion === undefined ? [] : [`did you mean \`.${suggestion}\`?`];
+    this.error('E311', `a metric event has no field \`.${head}\``, span, [], note);
+  }
 
   run(program: Program): void {
     const root = new Scope();
@@ -232,6 +259,49 @@ class Checker {
     });
   }
 
+  /**
+   * The compile-time half of `runtime/metricAccess.ts`'s write rules. Because a metric's shape is
+   * statically known — unlike a log event's free-form, `any`-typed fields — most of what a write
+   * can get wrong is catchable here rather than at run time: the root cannot be replaced, `.type`
+   * cannot be reassigned, the field must exist, and the value must have the type the schema
+   * declares (so `.tags.env = 1` is a build-time error, not a surprise abort in production).
+   *
+   * What necessarily stays a runtime abort is whatever depends on the *particular* metric rather
+   * than on the program: `.buckets = [...]` is well-typed, but only applies if the metric in hand
+   * is a histogram, which no amount of static information about the program can settle.
+   */
+  private checkMetricAssignTarget(
+    segments: readonly (string | number)[],
+    span: Span,
+    valueType: Type,
+  ): void {
+    if (segments.length === 0) {
+      this.error(
+        'E313',
+        'cannot assign to the root of a metric event: assign to a field such as `.name` instead',
+        span,
+      );
+      return;
+    }
+    this.checkMetricPath(segments, span);
+    if (segments[0] === 'type') {
+      this.error(
+        'E312',
+        "`.type` is read-only: a metric's value type cannot be changed in place",
+        span,
+      );
+      return;
+    }
+    const declared = pathType(this.inputSchema, segments);
+    if (!isAssignableToMetricField(valueType, declared)) {
+      this.error(
+        'E301',
+        `cannot assign a value of type \`${formatType(valueType)}\` to \`${formatPathSegments(segments)}\`, which is \`${formatType(declared)}\``,
+        span,
+      );
+    }
+  }
+
   private checkAssign(stmt: AssignStatement, scope: Scope): void {
     const valueType = this.checkExpr(stmt.value, scope);
     const handledType = this.requireHandled(valueType, stmt.value.span);
@@ -241,7 +311,10 @@ class Checker {
   private checkAssignTarget(target: Expr, scope: Scope, valueType: Type): void {
     switch (target.kind) {
       case 'path':
-        return; // paths are `any`-typed and always writable
+        if (this.target === 'metric') {
+          this.checkMetricAssignTarget(target.segments, target.span, valueType);
+        }
+        return; // a log event's paths are `any`-typed and always writable
       case 'identifier': {
         const binding = scope.lookup(target.name);
         if (binding === undefined) {
@@ -295,6 +368,7 @@ class Checker {
    */
   private checkAgainstInputSchema(obj: ObjectLiteral, label: 'given' | 'expect'): void {
     if (this.inputSchema.kind !== 'object') return;
+    if (this.target === 'metric') this.checkMetricTestBlock(obj, label);
     for (const prop of obj.properties) {
       const declared = this.inputSchema.fields.get(prop.key);
       if (declared === undefined) continue;
@@ -305,6 +379,35 @@ class Checker {
         `\`${label}\` field '${prop.key}' has type \`${formatType(actual.type)}\`, but the input schema declares \`${formatType(declared)}\``,
         prop.value.span,
       );
+    }
+  }
+
+  /**
+   * A metric script's `given`/`expect` blocks name the same fields a `.path` does, so the same
+   * closed field set applies — and `given` additionally needs `name` and `type` to build a metric
+   * at all (there is no "empty metric" the way there is an empty log event). `expect` stays
+   * partial, exactly like a log test's.
+   */
+  private checkMetricTestBlock(obj: ObjectLiteral, label: 'given' | 'expect'): void {
+    for (const prop of obj.properties) {
+      if (isMetricFieldName(prop.key)) continue;
+      const suggestion = didYouMean(prop.key, [...METRIC_FIELD_NAMES]);
+      const note = suggestion === undefined ? [] : [`did you mean '${suggestion}'?`];
+      this.error('E311', `a metric event has no field '${prop.key}'`, prop.value.span, [], note);
+    }
+    if (label !== 'given') return;
+    for (const required of ['name', 'type']) {
+      if (!obj.properties.some((p) => p.key === required)) {
+        this.error(
+          'E314',
+          `a metric test's \`given\` must set '${required}'`,
+          obj.span,
+          [],
+          [
+            'a metric is built from `given` before the program runs, and its name and value type have no default',
+          ],
+        );
+      }
     }
   }
 
@@ -336,6 +439,7 @@ class Checker {
       case 'string':
         return this.checkStringLiteral(expr, scope);
       case 'path':
+        this.checkMetricPath(expr.segments, expr.span);
         return handled(
           this.narrowedOrElse(pathKey(expr.segments), () =>
             pathType(this.inputSchema, expr.segments),
@@ -640,6 +744,26 @@ class Checker {
       return handled(anyType);
     }
     const name = expr.callee.name;
+    if (name === 'emit' && this.target === 'metric') {
+      // `emit()` builds a `LogEvent` (`stdlib/misc.ts`); emitting a *metric* would need a
+      // literal form for a whole metric series, which is deliberately out of scope here. Reject
+      // it at check time rather than let a metric program emit a log into a metric pipeline.
+      this.error(
+        'E313',
+        '`emit()` is not supported in a metric script: it produces a log event, which a metric pipeline cannot carry',
+        expr.callee.span,
+      );
+      for (const arg of expr.args) {
+        this.requireHandled(this.checkExpr(arg.value, scope), arg.value.span);
+      }
+      return handled(nullType);
+    }
+    if (name === 'del' && this.target === 'metric') {
+      const arg = expr.args[0]?.value;
+      if (arg?.kind === 'path' && arg.segments[0] === 'type') {
+        this.error('E312', '`.type` is read-only and cannot be removed', arg.span);
+      }
+    }
     const signature = this.registry.get(name);
     if (signature === undefined) {
       const suggestion = didYouMean(name, this.registry.names());
@@ -1037,6 +1161,56 @@ function narrowKey(expr: Expr): string | undefined {
   if (expr.kind === 'identifier') return `id:${expr.name}`;
   if (expr.kind === 'path') return pathKey(expr.segments);
   return undefined;
+}
+
+/** Renders path segments back into source syntax, for a diagnostic message. */
+function formatPathSegments(segments: readonly (string | number)[]): string {
+  let out = '';
+  for (const segment of segments) {
+    if (typeof segment === 'number') {
+      out += `[${segment}]`;
+    } else {
+      const bare = /^[A-Za-z_][A-Za-z0-9_]*$/.test(segment);
+      out += bare ? `.${segment}` : `.${JSON.stringify(segment)}`;
+    }
+  }
+  return out === '' ? '.' : out;
+}
+
+/**
+ * Whether a value of type `valueType` may be written to a metric field declared as `declared`.
+ *
+ * Not plain {@link isSubtype} in one respect: an `int` is accepted wherever a `float` is declared,
+ * because every number inside a `MetricValue` is a float64 and `runtime/metricAccess.ts` converts
+ * on the way in. Writing `.value = 3` is the natural way to say it and has no lossy case, so
+ * rejecting it would be pedantry rather than safety. `any` stays assignable in both directions,
+ * matching the gradual-typing escape hatch the rest of the checker uses — a value the checker
+ * could not pin down is left to the runtime's own validation.
+ */
+function isAssignableToMetricField(valueType: Type, declared: Type): boolean {
+  return isSubtype(valueType, widenFloatsToInts(declared));
+}
+
+/** `declared` with every `float` also admitting an `int`. */
+function widenFloatsToInts(declared: Type): Type {
+  switch (declared.kind) {
+    case 'float':
+      return unionType([floatType, intType]);
+    case 'array':
+      return arrayType(widenFloatsToInts(declared.element));
+    case 'union':
+      return unionType(declared.members.map(widenFloatsToInts));
+    case 'object': {
+      const fields = new Map<string, Type>();
+      for (const [key, type] of declared.fields) fields.set(key, widenFloatsToInts(type));
+      return objectType(
+        fields,
+        declared.rest === undefined ? undefined : widenFloatsToInts(declared.rest),
+      );
+    }
+    default:
+      return declared;
+  }
 }
 
 function pathType(schema: Type, segments: readonly (string | number)[]): Type {

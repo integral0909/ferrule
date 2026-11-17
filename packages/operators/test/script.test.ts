@@ -179,6 +179,108 @@ describe('script', () => {
     expect(harness.pushed[0]!.port).toBe('_default');
   });
 
+  describe('event_kind: metric', () => {
+    it('defaults to log, leaving existing configurations alone', () => {
+      expect(scriptTransform.options.parse({ source: '.x = 1' }).event_kind).toBe('log');
+    });
+
+    it('transforms metric events', async () => {
+      const { transform, harness } = await buildTransform(scriptTransform, {
+        event_kind: 'metric',
+        source: '.name = "renamed"\n.tags.env = "prod"\n',
+      });
+      const metric = counterMetric('requests', 1, { host: 'a' });
+      transform.process([metric], harness.out);
+      expect(harness.pushed).toHaveLength(1);
+      expect(harness.pushed[0]!.port).toBe('_default');
+      const out = harness.pushed[0]!.event as MetricEvent;
+      expect(out).toBe(metric);
+      expect(out.series.name).toBe('renamed');
+      expect([...out.series.tags]).toEqual([
+        ['host', 'a'],
+        ['env', 'prod'],
+      ]);
+    });
+
+    it('passes log events through unchanged', async () => {
+      const { transform, harness } = await buildTransform(scriptTransform, {
+        event_kind: 'metric',
+        source: '.name = "renamed"',
+      });
+      const log = logEvent({ level: 'info' });
+      transform.process([log], harness.out);
+      expect(harness.pushed).toHaveLength(1);
+      expect(harness.pushed[0]!.event).toBe(log);
+      expect(harness.pushed[0]!.port).toBe('_default');
+    });
+
+    it('drops a metric', async () => {
+      const { transform, harness } = await buildTransform(scriptTransform, {
+        event_kind: 'metric',
+        source: 'if .tags.env == "test" { drop }',
+      });
+      const events = [counterMetric('requests', 1, { env: 'test' })];
+      const batch = sealedBatch(events);
+      transform.process(events, harness.out);
+      expect(harness.pushed).toHaveLength(0);
+      await expect(batch.completion).resolves.toBe('delivered');
+    });
+
+    it('routes an aborted metric to the errors port and logs the reason', async () => {
+      const { transform, harness } = await buildTransform(scriptTransform, {
+        event_kind: 'metric',
+        // `.buckets` does not exist on a counter, so this aborts at run time.
+        source: '.buckets = []',
+      });
+      const metric = counterMetric('requests', 1);
+      transform.process([metric], harness.out);
+      expect(harness.pushed).toHaveLength(1);
+      expect(harness.pushed[0]!.port).toBe('errors');
+      expect(harness.pushed[0]!.event).toBe(metric);
+    });
+
+    it('drop_on_abort finishes an aborted metric rejected', async () => {
+      const { transform, harness } = await buildTransform(scriptTransform, {
+        event_kind: 'metric',
+        source: 'abort "nope"',
+        drop_on_abort: true,
+      });
+      const events = [counterMetric('requests', 1)];
+      const batch = sealedBatch(events);
+      transform.process(events, harness.out);
+      expect(harness.pushed).toHaveLength(0);
+      await expect(batch.completion).resolves.toBe('rejected');
+    });
+
+    it('reports an unknown metric field at build time', async () => {
+      await expect(
+        buildTransform(scriptTransform, { event_kind: 'metric', source: '.nmae = "x"' }),
+      ).rejects.toSatisfy((error: unknown) => {
+        expect((error as FerruleError).message).toContain('a metric event has no field `.nmae`');
+        return true;
+      });
+    });
+
+    it('rejects input_schema, which describes a log event', () => {
+      expect(() =>
+        scriptTransform.options.parse({
+          source: '.name = "x"',
+          event_kind: 'metric',
+          input_schema: { status: 'string' },
+        }),
+      ).toThrow(/input_schema/);
+    });
+
+    it('a log program still rejects nothing it used to accept', async () => {
+      const { transform, harness } = await buildTransform(scriptTransform, {
+        event_kind: 'log',
+        source: '.type = "anything"\n.whatever.nested = 1\n',
+      });
+      transform.process([logEvent({})], harness.out);
+      expect((harness.pushed[0]!.event as LogEvent).get('type')).toBe('anything');
+    });
+  });
+
   it('declares the dropped port only when reroute_dropped is set', () => {
     const on = scriptTransform.options.parse({ source: '.x = 1', reroute_dropped: true });
     const off = scriptTransform.options.parse({ source: '.x = 1' });

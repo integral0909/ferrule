@@ -467,18 +467,112 @@ exceeded: ...', span }` — a distinct, greppable reason prefix, not a separate 
 Override any of them per call via `program.run(event, { limits: { maxStringLength: 4096 } })`
 (`RunOptions.limits` is a `Partial<ResourceLimits>`, merged over the defaults).
 
-### Execution model: logs only
+### Execution model: logs or metrics, chosen at compile time
 
-`CompiledProgram.run` accepts a `LogEvent` and nothing else — `MetricEvent`/`SpanEvent` are a
-compile-time (TypeScript) type error at the call site, not a runtime check. This milestone's
-standard library (path reads/writes, `is_*`, string/collection functions, ...) is built entirely
-around `LogEvent`'s `fields: ValueMap`; metric/span events have a structured, typed shape
-(`MetricValue`, `SpanKind`, attributes, ...) that a transform language would want first-class
-accessors for (`.value`, `.tags`, `.duration`, ...), which is a substantial enough design surface
-of its own — matching design.md's "small surface, rich library" principle — to defer to a later
-milestone rather than bolt onto this one as an untyped escape hatch. A caller that needs to run a
-Ferrule Script transform on metrics/spans today should convert them to a `LogEvent` representation
-first (or wait for that milestone); there is no supported way to do it through this package.
+A program is compiled against **one** event kind, its `ScriptTarget`:
+
+```ts
+const logProgram = compile(check(program), { target: 'log' }); // the default
+const metricProgram = compile(check(program, { target: 'metric' }), { target: 'metric' });
+
+logProgram.run(someLogEvent); // CompiledProgram<LogEvent>
+metricProgram.run(someMetricEvent); // CompiledProgram<MetricEvent>
+```
+
+The kind is a type parameter, not a runtime input: passing the wrong event is a TypeScript error
+at the call site, not a check in the hot path. The same `target` must be passed to `check` and to
+`compile` — the checker resolves `.path` types against the matching shape, and the compiler
+specialises each path accessor for it when it _builds_ the closure, so neither kind pays for a
+per-event branch.
+
+One program cannot serve both kinds because their shapes have nothing in common. A log event's
+fields are a free-form `ValueMap`, so every `.path` is `any` unless an `inputSchema` is declared
+(design.md §3). A metric's shape is fixed and fully known, so `target: 'metric'` types every path
+from it — and treats the top level as _closed_: `.nmae` is a compile error with a did-you-mean
+(E311), not a silent `null`.
+
+**`SpanEvent` is still unsupported.** A span's shape (nested attributes, links, annotations,
+`SpanKind`, a duration) is a larger design surface than a metric's flat one, and no accessor for
+it exists here; convert a span to a log representation, or route around the program.
+
+#### The metric shape
+
+Field names match `metric_to_log`'s projection in `@ferrule/operators`, so the two representations
+of a metric agree. Every field is readable; all but `.type` are writable.
+
+| Path                     | Type                                                      | Applies to         |
+| ------------------------ | --------------------------------------------------------- | ------------------ |
+| `.name`                  | `string`                                                  | every metric       |
+| `.namespace`             | `string \| null`                                          | every metric       |
+| `.tags`, `.tags.<name>`  | `object { ..string \| null }`, `string \| null`           | every metric       |
+| `.kind`                  | `string` — `"incremental"` or `"absolute"`                | every metric       |
+| `.type`                  | `string` — **read-only**                                  | every metric       |
+| `.timestamp`             | `timestamp \| null`                                       | every metric       |
+| `.interval_ms`           | `int \| null`                                             | every metric       |
+| `.value`                 | `float \| null`                                           | counter, gauge     |
+| `.values`                | `array<string> \| null`                                   | set                |
+| `.samples`, `.statistic` | `array<object { value, rate }> \| null`, `string \| null` | distribution       |
+| `.buckets`               | `array<object { upper_limit, count }> \| null`            | histogram          |
+| `.quantiles`             | `array<object { quantile, value }> \| null`               | summary            |
+| `.count`, `.sum`         | `float \| null`                                           | histogram, summary |
+
+`%source_id`/`%source_type`/`%received_at` work unchanged: metadata is shared by every event kind.
+
+**Value fields are nullable because they only exist for some metric types.** Reading one that does
+not apply (`.buckets` on a counter) gives `null`, so a program over a mixed metric stream never
+aborts just for looking. That means arithmetic on one has to handle the `null`, with either of the
+language's normal tools:
+
+```ferrule-metric
+if .value is float { .value = .value * 2.0 }   # narrowing: only touches counters and gauges
+.value = (.value ?? 0.0) * 2.0                 # fallback: aborts on a metric with no .value
+```
+
+Note that `if .type == "counter" { ... }` does **not** narrow `.value` — the checker narrows on
+`is` tests, not on value comparisons — so inside it you still need one of the two forms above.
+
+**Writes are validated.** A metric is not a free-form map: a non-string tag, a `.kind` of
+`"incrementel"`, or non-increasing histogram bucket bounds would break sinks far downstream with
+no clue where they came from.
+
+Because the shape is statically known, a write whose _value_ has the wrong type is caught at build
+time rather than in production — unlike a log event, where `.anything = 1` is always legal:
+
+```ferrule-metric-error
+.tags.env = 1
+```
+
+```
+error[E301]: cannot assign a value of type `int` to `.tags.env`, which is `string | null`
+```
+
+An `int` is still accepted wherever a `float` is declared (`.value = 3`), since every number in a
+metric is a float64 and the runtime converts on the way in.
+
+What cannot be settled statically is whatever depends on the _particular_ metric rather than on
+the program, and that **aborts the event** at run time (`cause: 'abort'`, routed by the `script`
+transform's `drop_on_abort`/`errors` port exactly like a `to_int(...)!` failure): writing a field
+this metric's type does not have (`.buckets` on a counter), violating an invariant the type system
+cannot express (bucket bounds must increase), or a wrong type arriving through an `any`-typed
+expression the checker could not pin down.
+
+Two deliberate asymmetries with log events:
+
+- **`.tags` reads as a copy**, not the live map. A log's nested objects alias into a script local,
+  but a metric's tag map must stay all-strings, and `let mut t = .tags; t.host = 1` would write
+  behind the validation. Assign back through `.tags` / `.tags.host` to change it.
+- **`del` only removes what is optional** — `.namespace`, `.timestamp`, `.interval_ms`, and a
+  single tag. `del(.name)` or `del(.value)` aborts rather than inventing a meaning.
+
+Assigning `null` to a tag removes it, like `del(.tags.host)`. A whole-metric read (`.`) gives an
+object of the fields this metric has, and writing to the root is a compile error (E313).
+
+#### Not available in a metric program
+
+- **`emit()`** (E313) — it constructs a `LogEvent`, which a metric pipeline cannot carry. Emitting
+  a _metric_ would need a literal form for a whole series and is deliberately out of scope.
+- **`inputSchema`** — it describes a log event's free-form fields; a metric's shape is already
+  fully typed. Passing both is a build-time error.
 
 ### Inline tests
 
@@ -505,6 +599,21 @@ then runs on it via the normal `program.run(...)`. Comparison is a **partial mat
 mention are ignored (so a test only needs to state what it cares about) — if the run didn't
 `continue` (it dropped or aborted instead), the test fails and `outcome` says why. This powers
 `ferrule test` in a later milestone.
+
+A **metric** program's test blocks name the same fields a metric `.path` does. `given` must set
+`name` and `type` (there is no "empty metric" the way there is an empty log event; E314 otherwise)
+— `type` picks a zero-valued `MetricValue` of that shape, and every other key goes through the
+same validating setters a program's own writes use, so a fixture cannot describe a metric a script
+could not have produced. `expect` is matched against the same field projection the script reads:
+
+```ferrule-metric
+.value = (.value ?? 0.0) * 2.0
+
+test "doubles a counter" {
+  given { "name": "requests", "type": "counter", "value": 2.0, "tags": { "host": "a" } }
+  expect { "value": 4.0 }
+}
+```
 
 ### Benchmark
 
@@ -599,4 +708,5 @@ LSP or CLI built on this package).
   function cannot be named `match` — the parser cannot tell `match(x)` (a call) apart from `match
 (x) { ... }` (a match expression with a parenthesized subject) without deeper lookahead than the
   rest of the grammar needs. `matches(value, pattern)` is the closest available name.
-- **`CompiledProgram.run` accepts only `LogEvent`** — see "Execution model: logs only" above.
+- **`CompiledProgram.run` accepts one event kind, fixed at compile time** — `LogEvent` or
+  `MetricEvent`, never both, and `SpanEvent` not at all. See "Execution model" above.

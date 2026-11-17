@@ -1,6 +1,7 @@
 import type { CallExpr, Expr, Program } from '../syntax/ast.js';
 import type { Diagnostic } from '../diagnostics/diagnostic.js';
 import type { FunctionRegistry, FunctionSignature } from '../registry/signature.js';
+import type { ScriptTarget } from '../runtime/context.js';
 import type { ExprType, Type } from '../types/types.js';
 
 /** The function signature a particular call site was resolved against. */
@@ -38,4 +39,11 @@ export interface CheckOptions {
    * declared".
    */
   readonly inputSchema?: Type;
+  /**
+   * Which event kind the program will run against. Default `'log'`. With `'metric'`, paths are
+   * typed against `types/metricSchema.ts`'s fixed shape instead of {@link inputSchema} (which
+   * describes a log event's free-form fields and is ignored), the top level is closed, `.type` is
+   * read-only, and `emit()` is rejected. Must match the `target` passed to `compile`.
+   */
+  readonly target?: ScriptTarget;
 }

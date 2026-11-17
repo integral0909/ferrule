@@ -1,11 +1,34 @@
 import { LogEvent, type Value, type ValueMap } from '@ferrule/core';
+import { ManualClock } from '@ferrule/runtime';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AdminClient, AdminClientError } from '../src/client.js';
 import { createAdminHarness } from './fixtures.js';
+import { waitUntil } from './tap-helpers.js';
 
 function asMap(value: Value): ValueMap {
   if (!(value instanceof Map)) throw new Error('expected an object');
   return value;
+}
+
+/**
+ * Releases a scripted source's delayed step once the client's tap has registered server-side.
+ *
+ * A tap only ever sees events published while it is listening, so on a real timer the events can
+ * fire before the subscription exists and nothing ever arrives — the connection setup alone can
+ * outlast a 10–20ms delay under parallel suite load. `AdminClient.tap` opens its request lazily,
+ * when iteration begins, so this cannot be awaited beforehand: it is started as a concurrent
+ * promise and awaited after the loop. The returned promise must be awaited so that a failure to
+ * ever register surfaces as an error rather than an unhandled rejection.
+ */
+function releaseOnceTapped(
+  h: Awaited<ReturnType<typeof createAdminHarness>>,
+  clock: ManualClock,
+  delayMs: number,
+): Promise<void> {
+  return (async () => {
+    await waitUntil(() => h.server.activeTapCount() === 1, 10_000);
+    await clock.advance(delayMs);
+  })();
 }
 
 describe('AdminClient', () => {
@@ -101,17 +124,20 @@ describe('AdminClient', () => {
   });
 
   it('tap() decodes NDJSON events with the lossless core JSON codec', async () => {
-    const h = await createAdminHarness(undefined, [
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [
       { events: [LogEvent.from({ message: 'hi', count: 3 })], delayMs: 20 },
     ]);
     cleanup = h.stop;
     const client = new AdminClient({ baseUrl: h.baseUrl });
 
+    const release = releaseOnceTapped(h, clock, 20);
     const received: Value[] = [];
     for await (const event of client.tap('in', { limit: 1 })) {
       received.push(event);
       break;
     }
+    await release;
     expect(received).toHaveLength(1);
     const decoded = asMap(received[0]!);
     const fields = asMap(decoded.get('fields')!);
@@ -121,12 +147,15 @@ describe('AdminClient', () => {
 
   it('tap() stops after the requested limit without the caller needing to break', async () => {
     const events = Array.from({ length: 5 }, (_, i) => LogEvent.fromMessage(`m${i}`));
-    const h = await createAdminHarness(undefined, [{ events, delayMs: 10 }]);
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [{ events, delayMs: 10 }]);
     cleanup = h.stop;
     const client = new AdminClient({ baseUrl: h.baseUrl });
 
+    const release = releaseOnceTapped(h, clock, 10);
     const received: Value[] = [];
     for await (const event of client.tap('in', { limit: 2 })) received.push(event);
+    await release;
     expect(received).toHaveLength(2);
   }, 15_000);
 

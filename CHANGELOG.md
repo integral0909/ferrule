@@ -15,7 +15,10 @@ All notable changes to this project are documented here. The format follows
   for typos, and redact secrets.
 - `@ferrule/script`: Ferrule Script — parser with error recovery, type checker with fallibility
   tracking and flow narrowing, closure compiler with an optimizer and per-event resource limits,
-  inline tests, and a standard library of about 95 functions.
+  inline tests, and a standard library of about 95 functions. A program targets either log or
+  metric events (`target`); a metric's fixed shape (`.name`, `.tags`, `.value`, …) is fully typed,
+  so unknown fields, wrongly typed writes (`.tags.env = 1`), and writes to the read-only `.type`
+  are all reported at compile time.
 - `@ferrule/codecs`: streaming framers, protobuf and OTLP (protobuf and JSON), syslog, logfmt,
   CSV, Prometheus text, StatsD, and a typed pattern engine.
 - `@ferrule/buffer`: crash-safe segmented write-ahead disk buffer with fault-injection tests, and
@@ -23,8 +26,8 @@ All notable changes to this project are documented here. The format follows
 - `@ferrule/runtime`: bounded channels, topology validation, graceful shutdown, hot reload, live
   tap, internal metrics, and a sink toolkit (batching, retries, circuit breaking, adaptive
   concurrency).
-- `@ferrule/operators`: 15 transforms, including `script`, `route`, `aggregate`,
-  `tail_sampling`, and `cardinality_limit`.
+- `@ferrule/operators`: 15 transforms, including `script` (over log or metric events, selected by
+  `event_kind`), `route`, `aggregate`, `tail_sampling`, and `cardinality_limit`.
 - `@ferrule/sources`: 10 sources, including HTTP, OTLP, syslog, file tailing with checkpoints,
   StatsD, and Prometheus scraping.
 - `@ferrule/sinks`: 15 sinks, including Loki, ClickHouse, Elasticsearch, S3-compatible storage,

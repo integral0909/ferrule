@@ -42,7 +42,8 @@ describe('GET /tap/:component', () => {
   }, 15_000); // real streaming HTTP I/O; generous headroom under parallel test-suite load
 
   it('streams events as Server-Sent Events with ?format=sse', async () => {
-    const h = await createAdminHarness(undefined, [
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [
       { events: [LogEvent.fromMessage('hi')], delayMs: 20 },
     ]);
     cleanup = h.stop;
@@ -50,6 +51,12 @@ describe('GET /tap/:component', () => {
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?format=sse`);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+    // Same deterministic hand-off as the ndjson test above: hold the scripted source's delayed
+    // step until the tap is registered server-side. On a real timer the event can fire before
+    // anything is subscribed — the connection setup alone can outlast 20ms under parallel load —
+    // and a tap only ever sees events published while it is listening, so nothing would arrive.
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(20);
     const lines = await readLines(res, 1);
     req.destroy();
 
@@ -79,10 +86,13 @@ describe('GET /tap/:component', () => {
 
   it('stops after ?limit= events', async () => {
     const events = Array.from({ length: 5 }, (_, i) => LogEvent.fromMessage(`m${i}`));
-    const h = await createAdminHarness(undefined, [{ events, delayMs: 10 }]);
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [{ events, delayMs: 10 }]);
     cleanup = h.stop;
 
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?limit=3`);
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(10);
     const lines = await readLines(res, 3);
     // The server closes the stream once the limit is reached; give it a moment, then confirm no
     // further data (and that the connection ended).
@@ -140,13 +150,19 @@ describe('GET /tap/:component', () => {
   });
 
   it('closes the pipeline-side subscription when the client disconnects (no leaked taps)', async () => {
-    const h = await createAdminHarness(undefined, [
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [
       { events: [LogEvent.fromMessage('a'), LogEvent.fromMessage('b')], delayMs: 10 },
     ]);
     cleanup = h.stop;
 
     expect(h.server.activeTapCount()).toBe(0);
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in`);
+    // Wait for the subscription before releasing the events, rather than inferring it from a
+    // line arriving: on a real timer the events can be published before the tap is registered,
+    // and then no line ever arrives (see the `?format=sse` test).
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(10);
     await readLines(res, 1);
     expect(h.server.activeTapCount()).toBe(1);
 
@@ -174,10 +190,15 @@ describe('GET /tap/:component', () => {
   it('?sample= drops roughly the complementary fraction of events (statistical, wide margin)', async () => {
     const total = 300;
     const events = Array.from({ length: total }, (_, i) => LogEvent.fromMessage(`m${i}`));
-    const h = await createAdminHarness(undefined, [{ events, delayMs: 10 }]);
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock }, [{ events, delayMs: 10 }]);
     cleanup = h.stop;
 
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?sample=0.1`);
+    // Hold the batch until the tap is subscribed, so "zero lines" can only mean the sampler
+    // dropped everything — not that the events were published before anyone was listening.
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(10);
     // The whole batch is published essentially at once; give it a generous window to arrive.
     const lines = await collectLinesForMs(res, 500);
     req.destroy();
@@ -197,15 +218,19 @@ describe('GET /tap/:component', () => {
     // sizing and isn't reliable to depend on in a test.
     const total = 500;
     const events = Array.from({ length: total }, (_, i) => LogEvent.fromMessage(`m${i}`));
-    // delayMs gives the test a real window to open the tap connection before the burst fires;
-    // without it the whole burst could be published before any subscriber exists to see it.
-    const h = await createAdminHarness({ tap: { defaultQueueCapacity: 5 } }, [
+    // The burst must not fire until the tap is subscribed, or there is nothing to overflow the
+    // queue. A manual clock makes that an ordering guarantee rather than a bet on opening the
+    // connection within `delayMs`, while still publishing the whole burst in one go.
+    const clock = new ManualClock();
+    const h = await createAdminHarness({ clock, tap: { defaultQueueCapacity: 5 } }, [
       { events, delayMs: 50 },
     ]);
     cleanup = h.stop;
 
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in`);
     expect(res.statusCode).toBe(200);
+    await waitUntil(() => h.server.activeTapCount() === 1);
+    await clock.advance(50);
     // Poll the sink's own record of what it received, rather than the scripted source's
     // acknowledgement-completion promises: a tapped event's clone carries its own copy of the
     // original's finalizers (the same cloning `Event.clone()` uses for normal fan-out), and

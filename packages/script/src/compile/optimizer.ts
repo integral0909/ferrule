@@ -356,6 +356,8 @@ function tryFoldCall(expr: CallExpr, signature: FunctionSignature, ctx: OptCtx):
 
 function foldRunCtx(): RunCtx {
   return {
+    // Only ever used to fold *constant* expressions, which by definition read no event data, so
+    // the placeholder's kind does not matter.
     event: new LogEvent(),
     limits: DEFAULT_LIMITS,
     clock: () => Timestamp.now(),

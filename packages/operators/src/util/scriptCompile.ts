@@ -1,6 +1,8 @@
-import { FerruleError } from '@ferrule/core';
+import { FerruleError, type LogEvent, type MetricEvent } from '@ferrule/core';
 import {
   compile,
+  type AnyCompiledProgram,
+  type ScriptTarget,
   parseAndCheck,
   renderDiagnostic,
   renderDiagnostics,
@@ -31,6 +33,33 @@ export interface CompileScriptOptions {
   readonly inputSchema?: Type;
   /** Runs the optimizer. Default `true` (matches `@ferrule/script`'s own default). */
   readonly optimize?: boolean;
+  /**
+   * Which event kind the program runs against (`@ferrule/script`'s `ScriptTarget`). Default
+   * `'log'`. With `'metric'`, paths resolve against the fixed metric shape instead, and
+   * {@link inputSchema} — which describes a *log* event's free-form fields — must not be given.
+   */
+  readonly target?: ScriptTarget;
+}
+
+/** Shared by {@link compileScriptSource} and {@link compileConditionSource}. */
+function checkOptionsFor(options: CompileScriptOptions): {
+  inputSchema?: Type;
+  target?: ScriptTarget;
+} {
+  const checkOptions: { inputSchema?: Type; target?: ScriptTarget } = {};
+  if (options.inputSchema !== undefined) checkOptions.inputSchema = options.inputSchema;
+  if (options.target !== undefined) checkOptions.target = options.target;
+  return checkOptions;
+}
+
+function compileOptionsFor(options: CompileScriptOptions): {
+  optimize?: boolean;
+  target?: ScriptTarget;
+} {
+  const compileOptions: { optimize?: boolean; target?: ScriptTarget } = {};
+  if (options.optimize !== undefined) compileOptions.optimize = options.optimize;
+  if (options.target !== undefined) compileOptions.target = options.target;
+  return compileOptions;
 }
 
 /**
@@ -43,13 +72,31 @@ export interface CompileScriptOptions {
 export function compileScriptSource(
   source: string,
   fileName: string,
+  options?: CompileScriptOptions & { readonly target?: 'log' },
+): CompiledProgram<LogEvent>;
+export function compileScriptSource(
+  source: string,
+  fileName: string,
+  options: CompileScriptOptions & { readonly target: 'metric' },
+): CompiledProgram<MetricEvent>;
+export function compileScriptSource(
+  source: string,
+  fileName: string,
+  options?: CompileScriptOptions,
+): AnyCompiledProgram;
+export function compileScriptSource(
+  source: string,
+  fileName: string,
   options: CompileScriptOptions = {},
-): CompiledProgram {
+): AnyCompiledProgram {
+  if (options.target === 'metric' && options.inputSchema !== undefined) {
+    throw new FerruleError(
+      E_SCRIPT_COMPILE,
+      "input_schema describes a log event's fields and cannot be combined with a metric script: a metric's shape is fixed",
+    );
+  }
   const file = new SourceFile(fileName, source);
-  const result = parseAndCheck(
-    file,
-    options.inputSchema === undefined ? {} : { inputSchema: options.inputSchema },
-  );
+  const result = parseAndCheck(file, checkOptionsFor(options));
   const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
     (d) => d.severity === 'error',
   );
@@ -57,9 +104,7 @@ export function compileScriptSource(
     const rendered = renderDiagnostics(errors, file, { color: false });
     throw new FerruleError(E_SCRIPT_COMPILE, `script failed to compile:\n\n${rendered}`);
   }
-  const compileOptions: { optimize?: boolean } = {};
-  if (options.optimize !== undefined) compileOptions.optimize = options.optimize;
-  return compile(result, compileOptions);
+  return compile(result, compileOptionsFor(options));
 }
 
 /**
@@ -186,13 +231,12 @@ export function compileConditionSource(
   condition: string,
   fallbackWhenFailed: boolean,
   fileName: string,
-  options: CompileScriptOptions = {},
-): CompiledProgram {
+  // Conditions are log-only: `filter` and `route` evaluate them against log events and pass
+  // other kinds through, matching `@ferrule/testkit`'s documented condition behaviour.
+  options: Omit<CompileScriptOptions, 'target'> = {},
+): CompiledProgram<LogEvent> {
   const wrapperFile = new SourceFile(fileName, wrapBooleanCondition(condition, fallbackWhenFailed));
-  const result = parseAndCheck(
-    wrapperFile,
-    options.inputSchema === undefined ? {} : { inputSchema: options.inputSchema },
-  );
+  const result = parseAndCheck(wrapperFile, checkOptionsFor(options));
   const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
     (d) => d.severity === 'error',
   );
@@ -206,7 +250,5 @@ export function compileConditionSource(
     );
     throw new FerruleError(E_SCRIPT_COMPILE, `script failed to compile:\n\n${rendered}`);
   }
-  const compileOptions: { optimize?: boolean } = {};
-  if (options.optimize !== undefined) compileOptions.optimize = options.optimize;
-  return compile(result, compileOptions);
+  return compile(result, { ...compileOptionsFor(options), target: 'log' });
 }

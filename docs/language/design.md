@@ -112,6 +112,16 @@ through `%` paths. Programs are compiled to JavaScript closures, specialised by 
 of their operands. Nothing is evaluated from strings at runtime, and regex literals are compiled
 once at load time.
 
+A program targets one event kind, chosen when it is compiled. A **log** event's fields are
+free-form, so paths are `any` unless an input schema declares otherwise (§3). A **metric**
+event has a fixed shape addressed through the same path syntax — `.name`, `.tags.<name>`,
+`.kind`, `.type` (read-only), `.timestamp`, `.interval_ms`, and the value fields its type has
+(`.value`, `.values`, `.samples`, `.buckets`, `.quantiles`, `.count`, `.sum`) — so every path is
+typed from that shape. Naming a field outside it, and assigning a value of the wrong type to one,
+are both compile errors; a write that would produce a metric the data model does not allow aborts
+the event at run time. Value fields are `T | null` because each only exists for some metric types.
+Spans are not yet supported.
+
 Resource limits apply per event: maximum emitted events, maximum string length produced by
 concatenation, and maximum collection size produced by library functions. Hitting a limit aborts
 the event with a distinct reason.

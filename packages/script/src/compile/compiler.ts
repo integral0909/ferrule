@@ -5,6 +5,8 @@ import {
   setPath,
   Timestamp,
   wrapInt64,
+  type LogEvent,
+  type MetricEvent,
   type PathSegment,
   type Value,
 } from '@ferrule/core';
@@ -31,7 +33,14 @@ import type {
   Frame,
   RunCtx,
   RuntimeValue,
+  ScriptTarget,
 } from '../runtime/context.js';
+import {
+  deleteMetricPath,
+  getMetricPath,
+  hasMetricPath,
+  setMetricPath,
+} from '../runtime/metricAccess.js';
 import { abortSignal, dropSignal } from '../runtime/signal.js';
 import { setInValue } from '../runtime/valuePath.js';
 import type {
@@ -81,6 +90,12 @@ export class Compiler {
     private readonly checkResult: CheckResult,
     private readonly implementations: ImplementationRegistry,
     calls?: ReadonlyMap<CallExpr, ResolvedCall>,
+    /**
+     * Which event kind the program runs against. Every `.path` read/write/`del`/`exists` closure
+     * is specialised on this when it is *built*, so a log program keeps exactly the closures it
+     * had before metrics existed and neither kind pays for a per-event branch.
+     */
+    private readonly target: ScriptTarget = 'log',
   ) {
     this.calls = calls ?? checkResult.calls;
   }
@@ -152,8 +167,13 @@ export class Compiler {
     if (target.kind === 'path') {
       const segments = target.segments;
       const span = target.span;
+      if (this.target === 'metric') {
+        return (_frame, ctx, value) => {
+          setMetricPath(metricEventOf(ctx), segments, assertNoRegex(value, span), span);
+        };
+      }
       return (_frame, ctx, value) => {
-        setPath(ctx.event.fields, segments, assertNoRegex(value, span));
+        setPath(logEventOf(ctx).fields, segments, assertNoRegex(value, span));
       };
     }
     if (target.kind === 'identifier') {
@@ -324,12 +344,16 @@ export class Compiler {
   }
 
   private compilePath(segments: readonly PathSegment[]): Eval {
-    if (segments.length === 0) return (_frame, ctx) => ctx.event.fields;
-    return (_frame, ctx) => getPath(ctx.event.fields, segments) ?? null;
+    if (this.target === 'metric') {
+      return (_frame, ctx) => getMetricPath(metricEventOf(ctx), segments);
+    }
+    if (segments.length === 0) return (_frame, ctx) => logEventOf(ctx).fields;
+    return (_frame, ctx) => getPath(logEventOf(ctx).fields, segments) ?? null;
   }
 
   private compileMetadataPath(name: string): Eval {
     switch (name) {
+      // Metadata is shared by every event kind, so these need no target dispatch.
       case 'source_id':
         return (_frame, ctx) => ctx.event.metadata.sourceId ?? null;
       case 'source_type':
@@ -758,10 +782,17 @@ export class Compiler {
       throw new ScriptBugError(`internal error: '${name}' requires a path argument`, expr.span);
     }
     const segments = argExpr.segments;
-    if (name === 'del') {
-      return (_frame, ctx) => deletePath(ctx.event.fields, segments) ?? null;
+    const span = argExpr.span;
+    if (this.target === 'metric') {
+      if (name === 'del') {
+        return (_frame, ctx) => deleteMetricPath(metricEventOf(ctx), segments, span);
+      }
+      return (_frame, ctx) => hasMetricPath(metricEventOf(ctx), segments);
     }
-    return (_frame, ctx) => hasPath(ctx.event.fields, segments);
+    if (name === 'del') {
+      return (_frame, ctx) => deletePath(logEventOf(ctx).fields, segments) ?? null;
+    }
+    return (_frame, ctx) => hasPath(logEventOf(ctx).fields, segments);
   }
 
   private compileClosureArg(
@@ -783,6 +814,20 @@ export class Compiler {
 }
 
 // ---- free functions ---------------------------------------------------------------------------
+
+/**
+ * `RunCtx.event` is widened to `LogEvent | MetricEvent`, but a compiled closure only ever runs
+ * inside the program that built it, whose `ScriptTarget` fixes which one it is (see the
+ * `Compiler` constructor). These two narrow without a runtime check, so the type widening costs
+ * a log program nothing.
+ */
+function logEventOf(ctx: RunCtx): LogEvent {
+  return ctx.event as LogEvent;
+}
+
+function metricEventOf(ctx: RunCtx): MetricEvent {
+  return ctx.event as MetricEvent;
+}
 
 function asBool(value: RuntimeValue, span: Span): boolean {
   if (typeof value === 'boolean') return value;

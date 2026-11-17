@@ -9,6 +9,17 @@ import {
   uriEncodePath,
 } from '../../src/http/sigv4.js';
 
+/**
+ * Arbitrary URL paths for the canonical-form invariants.
+ *
+ * Deliberately built here rather than inside the `it`: the *first* `fc.webPath()` constructed in a
+ * module builds fast-check's Unicode tables, which takes over a second (every later construction
+ * is free, and running the property itself is a few milliseconds). Inside a test body that one-off
+ * cost counts against the per-test timeout and makes the test fail under parallel suite load; at
+ * module scope it is paid during collection, which is not timed.
+ */
+const arbWebPath = fc.webPath();
+
 // The "AWS documented SigV4 example" tests check the published values from the AWS docs. The
 // remaining examples compare against expected values computed directly with Node's `crypto`
 // primitives following the documented algorithm, and check invariants of the canonical forms.
@@ -170,7 +181,7 @@ describe('signV4 — invariants', () => {
 
   it('is deterministic for identical input', () => {
     fc.assert(
-      fc.property(fc.webPath(), fc.string(), (path, value) => {
+      fc.property(arbWebPath, fc.string(), (path, value) => {
         const input = {
           method: 'POST',
           canonicalUri: uriEncodePath(path === '' ? '/' : path),

@@ -282,6 +282,30 @@ export const DIAGNOSTIC_CATALOG: readonly DiagnosticCatalogEntry[] = [
     'A literal pattern is repeated in the same `match`.',
   ),
   entry(
+    'E311',
+    'error',
+    'unknown metric field',
+    "A metric script named a path that is not one of a metric event's fields. Unlike a log event, whose fields are free-form, a metric has a fixed, closed set (`.name`, `.tags`, `.value`, ...).",
+  ),
+  entry(
+    'E312',
+    'error',
+    'read-only metric field',
+    "A metric script assigned to or removed `.type`. A metric's value type determines the shape of its value and cannot be changed in place.",
+  ),
+  entry(
+    'E313',
+    'error',
+    'unsupported in a metric script',
+    'An operation that only makes sense for a log event was used in a metric script: assigning to the event root, or `emit()` (which produces a log event).',
+  ),
+  entry(
+    'E314',
+    'error',
+    'incomplete metric test fixture',
+    "A metric `test` block's `given` does not set `name` and `type`, which are needed to build the metric the test runs against.",
+  ),
+  entry(
     'E401',
     'error',
     'unhandled fallible expression',

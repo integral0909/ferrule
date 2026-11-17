@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LogEvent } from '@ferrule/core';
-import { compile, parseAndCheck } from '@ferrule/script';
+import { compile, parseAndCheck, type ScriptTarget } from '@ferrule/script';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -10,10 +10,16 @@ import { describe, expect, it } from 'vitest';
  * must actually parse and type-check with zero errors — a snippet that doesn't compile is worse
  * than no snippet at all, since a reader has no way to tell it's stale.
  *
- * Convention: a block fenced ```ferrule must check clean. A block fenced ```ferrule-error is
- * documenting a *deliberate* error (e.g. design.md's fallibility examples might one day show what
- * an unhandled `T!` diagnostic looks like) and is asserted to produce at least one error instead —
- * use this tag rather than leaving a broken example unlabeled.
+ * Convention, by fence tag:
+ *
+ * - ```ferrule — a log program (the default target); must check clean.
+ * - ```ferrule-metric — a *metric* program; must check clean with `target: 'metric'`. Tagging
+ *   these separately is what makes the guard real: checked as a log program, `.buckets` and
+ *   `.interval_ms` are just free-form `any` fields and every metric example would pass whether
+ *   or not it still matched the metric schema.
+ * - ```ferrule-error / ```ferrule-metric-error — documenting a *deliberate* error (e.g. a write
+ *   the metric schema rejects); asserted to produce at least one error instead. Use these rather
+ *   than leaving a broken example unlabeled.
  */
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -58,8 +64,26 @@ function allDocBlocks(): FencedBlock[] {
   });
 }
 
-describe('doc examples: ```ferrule blocks type-check, ```ferrule-error blocks do not', () => {
-  const blocks = allDocBlocks().filter((b) => b.lang === 'ferrule' || b.lang === 'ferrule-error');
+/** How each recognised fence tag is checked. */
+const FENCE_TAGS: Record<
+  string,
+  { readonly target: ScriptTarget; readonly mustCheckClean: boolean }
+> = {
+  ferrule: { target: 'log', mustCheckClean: true },
+  'ferrule-error': { target: 'log', mustCheckClean: false },
+  'ferrule-metric': { target: 'metric', mustCheckClean: true },
+  'ferrule-metric-error': { target: 'metric', mustCheckClean: false },
+};
+
+function errorsIn(code: string, target: ScriptTarget): string[] {
+  const result = parseAndCheck(code, { target });
+  return [...result.parseDiagnostics, ...result.diagnostics]
+    .filter((d) => d.severity === 'error')
+    .map((d) => `${d.code}: ${d.message}`);
+}
+
+describe('doc examples: ```ferrule blocks type-check, ```*-error blocks do not', () => {
+  const blocks = allDocBlocks().filter((b) => b.lang in FENCE_TAGS);
 
   // Not vacuous: fail loudly if the extraction itself breaks (e.g. a doc file's fences change
   // shape) rather than silently collecting zero blocks and reporting an empty, "passing" suite.
@@ -67,23 +91,22 @@ describe('doc examples: ```ferrule blocks type-check, ```ferrule-error blocks do
     expect(blocks.some((b) => b.lang === 'ferrule')).toBe(true);
   });
 
+  // Likewise for the metric examples: the whole point of the separate tag is that these are
+  // checked against the metric schema, so silently having none would defeat it.
+  it('found at least one ```ferrule-metric block to check', () => {
+    expect(blocks.some((b) => b.lang === 'ferrule-metric')).toBe(true);
+  });
+
   for (const block of blocks) {
     const label = `${block.file}:${block.line}`;
-    if (block.lang === 'ferrule') {
-      it(`${label} parses and type-checks with zero errors`, () => {
-        const result = parseAndCheck(block.code);
-        const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
-          (d) => d.severity === 'error',
-        );
-        expect(errors.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+    const { target, mustCheckClean } = FENCE_TAGS[block.lang]!;
+    if (mustCheckClean) {
+      it(`${label} parses and type-checks with zero errors (${target})`, () => {
+        expect(errorsIn(block.code, target)).toEqual([]);
       });
     } else {
-      it(`${label} (ferrule-error) fails to parse or type-check`, () => {
-        const result = parseAndCheck(block.code);
-        const errors = [...result.parseDiagnostics, ...result.diagnostics].filter(
-          (d) => d.severity === 'error',
-        );
-        expect(errors.length).toBeGreaterThan(0);
+      it(`${label} (${block.lang}) fails to parse or type-check`, () => {
+        expect(errorsIn(block.code, target).length).toBeGreaterThan(0);
       });
     }
   }

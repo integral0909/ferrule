@@ -8,6 +8,24 @@ import {
   quoteLogfmtValue,
 } from '@ferrule/codecs';
 
+/**
+ * Logfmt-safe key/value pairs: bare-word keys, and values without control characters (which
+ * logfmt cannot round-trip).
+ *
+ * Deliberately built here rather than inside the `it`: the *first* `fc.string({ unit: 'binary' })`
+ * constructed in a module builds fast-check's Unicode tables, which takes over a second (every
+ * later construction is free, and running the property itself is a few milliseconds). Inside a
+ * test body that one-off cost counts against the per-test timeout and makes the test fail under
+ * parallel suite load; at module scope it is paid during collection, which is not timed.
+ */
+const arbKeyValuePairs = fc.array(
+  fc.tuple(
+    fc.stringMatching(/^[A-Za-z][A-Za-z0-9_]*$/),
+    fc.string({ unit: 'binary' }).filter((s) => !/[\p{Cc}]/u.test(s)),
+  ),
+  { maxLength: 6 },
+);
+
 describe('parseLogfmt', () => {
   it('parses bare key=value pairs', () => {
     const r = parseLogfmt('at=info method=GET path=/ status=200');
@@ -76,22 +94,13 @@ describe('parseLogfmt', () => {
 describe('quoteLogfmtValue / encodeLogfmt round trip', () => {
   it('round-trips arbitrary key/value pairs through encode -> parse', () => {
     fc.assert(
-      fc.property(
-        fc.array(
-          fc.tuple(
-            fc.stringMatching(/^[A-Za-z][A-Za-z0-9_]*$/),
-            fc.string({ unit: 'binary' }).filter((s) => !/[\p{Cc}]/u.test(s)),
-          ),
-          { maxLength: 6 },
-        ),
-        (pairs) => {
-          const map = new Map<string, string>();
-          for (const [k, v] of pairs) map.set(k, v); // last write wins, matching parseLogfmt
-          const encoded = encodeLogfmt(map, { boolValueless: false });
-          const decoded = parseLogfmt(encoded);
-          for (const [k, v] of map) expect(decoded.get(k)).toBe(v);
-        },
-      ),
+      fc.property(arbKeyValuePairs, (pairs) => {
+        const map = new Map<string, string>();
+        for (const [k, v] of pairs) map.set(k, v); // last write wins, matching parseLogfmt
+        const encoded = encodeLogfmt(map, { boolValueless: false });
+        const decoded = parseLogfmt(encoded);
+        for (const [k, v] of map) expect(decoded.get(k)).toBe(v);
+      }),
     );
   });
 

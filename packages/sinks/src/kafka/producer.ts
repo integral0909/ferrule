@@ -120,30 +120,6 @@ export class ProduceBatch {
   }
 }
 
-/** The idempotent-producer coordinates each RecordBatch of a {@link ProduceBatch} was stamped
- * with, for tests and diagnostics. */
-export interface StampedGroup {
-  readonly topic: string;
-  readonly partition: number;
-  readonly producerId: bigint;
-  readonly producerEpoch: number;
-  readonly baseSequence: number;
-  readonly recordCount: number;
-}
-
-export function stampedGroups(batch: ProduceBatch): StampedGroup[] {
-  return (batch.groups ?? [])
-    .filter((g) => g.encoded !== undefined)
-    .map((g) => ({
-      topic: g.topic,
-      partition: g.partition,
-      producerId: g.encoded!.producerId,
-      producerEpoch: g.encoded!.producerEpoch,
-      baseSequence: g.encoded!.baseSequence,
-      recordCount: g.records.length,
-    }));
-}
-
 /**
  * A hand-written Kafka producer: broker connections (one per node, opened lazily), a metadata
  * cache (topic -> partition -> leader, refreshed on demand or after a stale-metadata error), the

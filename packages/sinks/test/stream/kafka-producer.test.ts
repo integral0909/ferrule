@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BatchNotifier, LogEvent, type DeliveryStatus } from '@ferrule/core';
 import { KafkaError } from '../../src/kafka/errors.js';
-import { KafkaProducer, stampedGroups, type OutgoingRecord } from '../../src/kafka/producer.js';
+import { KafkaProducer, type OutgoingRecord } from '../../src/kafka/producer.js';
+import { stampedGroups } from './support/kafka-stamps.js';
 import { FakeKafkaBroker } from './support/fake-kafka-broker.js';
 
 function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {

@@ -156,6 +156,18 @@ export function stampedGroups(batch: ProduceBatch): StampedGroup[] {
  * batch independently as its own response arrives, and a later `send` of the same batch (the
  * caller's retry) only resends the groups that are still unsettled, so a partition that already
  * accepted its records is never asked to append them again because a sibling partition failed.
+ *
+ * With `idempotent` (the default) the producer also holds a broker-assigned producer id and a
+ * per-partition sequence counter. Every group of a round is stamped before any request is
+ * dispatched, under the identity the round started with, and a retry resends the identical bytes,
+ * so the broker recognises a group whose first response was lost (connection dropped after the
+ * append) as a duplicate and acknowledges it instead of appending it again. A producer-state
+ * error (`OUT_OF_ORDER_SEQUENCE_NUMBER`, `INVALID_PRODUCER_EPOCH`, `UNKNOWN_PRODUCER_ID`; none of
+ * them append) makes the producer fetch a fresh id and re-stamp the affected groups once inline.
+ * This relies on at most one unsettled batch per partition at a time, which `runBatchedSink`'s
+ * default concurrency of one guarantees: the broker only remembers a producer's last five batches
+ * per partition, and with one in flight a resend always falls inside that window, so an
+ * out-of-order error can only mean "not appended".
  */
 export class KafkaProducer {
   private readonly connections = new Map<string, KafkaBrokerConnection>();

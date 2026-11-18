@@ -348,24 +348,28 @@ wrapping `kafkajs`.
   once with that id, epoch 0, and the partition's next sequence number, and resends the identical
   bytes on retry, so a group whose response was lost after the broker appended it is recognised as
   a duplicate and acknowledged (error code 0 on modern brokers, `DUPLICATE_SEQUENCE_NUMBER` on
-  old ones) rather than appended again. A producer-state error (`OUT_OF_ORDER_SEQUENCE_NUMBER`,
+  old ones) rather than appended again. Every group of a round is stamped before any request is
+  dispatched, under the identity the round started with, so one leader's sequence error cannot
+  leave another leader's group unstamped. A producer-state error (`OUT_OF_ORDER_SEQUENCE_NUMBER`,
   `INVALID_PRODUCER_EPOCH`, `UNKNOWN_PRODUCER_ID` — none of which append) makes the producer fetch
   a fresh id and re-stamp the affected groups once inline, which is also how it recovers after the
   sink abandons a batch mid-sequence. This relies on at most one unsettled batch per partition at
   a time (the sink's default concurrency of one), so a resend always falls inside the broker's
-  five-batch duplicate window. Every group of a round is stamped before any request is dispatched, under the identity the
-  round started with, so one leader's sequence error cannot leave another leader's group unstamped.
-  With idempotence on, `healthcheck()` also performs `InitProducerId`, so a cluster that refuses it
-  (typically a missing `IDEMPOTENT_WRITE` ACL) fails the pipeline's startup check instead of
-  rejecting every batch at runtime; permanent rejections, per partition or per batch, are logged at
-  error level by the sink since the batched-sink loop itself finishes them silently.
-  `idempotent` requires `acks: "-1"`; the option schema rejects any other combination. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
-  dependency, per CONTRIBUTING.md's dependency policy) and are rejected at encode time.
+  five-batch duplicate window. With idempotence on, `healthcheck()` also performs
+  `InitProducerId`, so a cluster that refuses it (typically a missing `IDEMPOTENT_WRITE` ACL)
+  fails the pipeline's startup healthcheck instead of rejecting every batch at runtime; permanent
+  rejections, per partition (via the `onPermanentError` hook) or per batch, are logged at error
+  level by the sink, since the batched-sink loop itself finishes them silently. `gzip`
+  compression is supported; `snappy`/`lz4`/`zstd` are not (no native dependency, per
+  CONTRIBUTING.md's dependency policy) and are rejected at encode time.
 - **`sink.ts`** — topic/key/header templates (`stream/template.ts`), an `acks` schema of
-  `'0' | '1' | '-1'` (mapped to the numeric wire value), the shared `encoding`/`batch`/`retry`
-  fragments, and the same `runBatchedSink` + never-throws-in-`encode` pattern as
-  `socket`/`syslog`. `client_id` identifies this producer to the broker; `connect_timeout`/
-  `request_timeout` bound the connection and each request respectively.
+  `'0' | '1' | '-1'` (mapped to the numeric wire value), `idempotent` (default `true`; the schema
+  rejects it with any `acks` other than `'-1'`, since the broker refuses idempotent batches
+  otherwise), the shared `encoding`/`batch`/`retry` fragments, and the same `runBatchedSink` +
+  never-throws-in-`encode` pattern as `socket`/`syslog`, except that `encode` returns a
+  `ProduceBatch` handle so every retry attempt reaches the producer with the same object.
+  `client_id` identifies this producer to the broker; `connect_timeout`/`request_timeout` bound
+  the connection and each request respectively.
 
 ### Testing
 
@@ -378,10 +382,12 @@ decision) and `test/stream/support/fake-kafka-broker.ts` (`ApiVersions`/`Metadat
 the broker-side idempotence rules — per-producer sequence checks and a five-batch duplicate
 window — so it keeps separate logs of batches _received_ and batches actually _appended_; a
 produce hook can inject per-partition errors or "append, then drop the connection before
-answering", and the idempotence tests assert the appended log holds every record exactly once). `test/stream/support/scram-server.ts`
-is a from-scratch SCRAM-SHA-256 _server_-side verifier shared by both fakes, so the client in
-`stream/scram.ts` is checked against an independent implementation, not just against itself; the
-RFC 7677 §3 published test vector is asserted exactly (`scram.test.ts`). `murmur2` is
+answering", several instances can form a multi-node cluster with per-partition leaders, and the
+idempotence tests assert the appended log holds every record exactly once).
+`test/stream/support/scram-server.ts` is a from-scratch SCRAM-SHA-256 _server_-side verifier
+shared by both fakes, so the client in `stream/scram.ts` is checked against an independent
+implementation, not just against itself; the RFC 7677 §3 published test vector is asserted
+exactly (`scram.test.ts`). `murmur2` is
 cross-checked against a second, differently-structured implementation of the same documented
 algorithm plus a partition-distribution sanity check, rather than asserting memorised hash
 constants (see "Known gaps"). Socket-based sinks (`socket`, `syslog`) and both protocol clients

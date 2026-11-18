@@ -142,6 +142,53 @@ describe('kafka sink', () => {
     await running;
 
     await expect(completion).resolves.toBe('rejected');
+    const rejectedLog = ctx.logs.find(
+      (l) => l.level === 'error' && l.message.includes('permanently rejected'),
+    );
+    expect(rejectedLog?.fields).toMatchObject({
+      code: 'E_KAFKA_TOPIC_AUTHORIZATION_FAILED',
+      topic: 'events',
+      partition: 0,
+      records: 1,
+    });
+  });
+
+  it('logs at error level and rejects the batch when the cluster refuses InitProducerId', async () => {
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 1 },
+      initProducerIdError: 31, // CLUSTER_AUTHORIZATION_FAILED: no IDEMPOTENT_WRITE ACL
+    });
+    const port = await broker.listen();
+    const sink = createKafkaSink(baseOptions(port));
+    const ctx = createTestSinkContext();
+    const event = LogEvent.fromMessage('x');
+    const completion = withFinalizer(event);
+
+    const running = sink.run(ctx.ctx);
+    await ctx.feed(event);
+    ctx.close();
+    await running;
+
+    await expect(completion).resolves.toBe('rejected');
+    expect(broker.receivedBatches).toHaveLength(0);
+    const log = ctx.logs.find((l) => l.level === 'error');
+    expect(log?.message).toContain('permanent broker error');
+    expect(log?.fields).toMatchObject({ code: 'E_KAFKA_CLUSTER_AUTHORIZATION_FAILED', records: 1 });
+  });
+
+  it('healthcheck fails when the cluster refuses InitProducerId, and passes with idempotence off', async () => {
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 1 },
+      initProducerIdError: 31,
+    });
+    const port = await broker.listen();
+    const ctx = createTestSinkContext();
+    await expect(createKafkaSink(baseOptions(port)).healthcheck?.(ctx.ctx)).rejects.toMatchObject({
+      code: 'E_KAFKA_CLUSTER_AUTHORIZATION_FAILED',
+    });
+    await expect(
+      createKafkaSink(baseOptions(port, { idempotent: false, acks: '1' })).healthcheck?.(ctx.ctx),
+    ).resolves.toBeUndefined();
   });
 
   it('retries (driven by the manual clock) after a retryable broker error, then delivers', async () => {

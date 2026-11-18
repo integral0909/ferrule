@@ -42,6 +42,13 @@ export interface KafkaProducerOptions {
    * `acks: -1`. Default `true`.
    */
   readonly idempotent?: boolean;
+  /** Called when a partition permanently rejects a group of records (the records' events are
+   * finished `rejected`). Permanent rejections do not throw, so this is the only place a caller
+   * can observe and log them. */
+  readonly onPermanentError?: (
+    error: KafkaError,
+    rejected: { topic: string; partition: number; recordCount: number },
+  ) => void;
 }
 
 export interface OutgoingRecord {
@@ -380,6 +387,17 @@ export class KafkaProducer {
       retryableErrors.push(new KafkaError(-1, 'no known leader for one or more partitions'));
     }
 
+    // Stamp every outgoing group now, under the identity this round started with, before any
+    // request goes out. A response from one leader may clear the producer identity (sequence
+    // error) while another leader's connection is still being opened; encoding lazily at that
+    // point would have let the second group leave unstamped.
+    const identity = this.producerState;
+    for (const leaderGroups of byLeader.values()) {
+      for (const group of leaderGroups) {
+        if (group.encoded === undefined) group.encoded = this.encodeGroup(group, identity);
+      }
+    }
+
     await Promise.all(
       [...byLeader.entries()].map(([nodeId, leaderGroups]) =>
         this.sendToLeader(nodeId, leaderGroups, retryableErrors).catch((error: unknown) => {
@@ -443,7 +461,9 @@ export class KafkaProducer {
     const byTopic = new Map<string, ProducePartitionRequest[]>();
     const byKey = new Map<string, PartitionGroup>();
     for (const group of groups) {
-      if (group.encoded === undefined) group.encoded = this.encodeGroup(group);
+      if (group.encoded === undefined) {
+        throw new KafkaProtocolError('internal: partition group reached sendToLeader unencoded');
+      }
       const partitions = byTopic.get(group.topic);
       const request = { index: group.partition, records: group.encoded.bytes };
       if (partitions === undefined) byTopic.set(group.topic, [request]);
@@ -493,15 +513,25 @@ export class KafkaProducer {
           this.producerState = undefined;
           continue;
         }
-        if (error.isRetryable) retryableErrors.push(error);
-        else this.settle(group, 'rejected');
+        if (error.isRetryable) {
+          retryableErrors.push(error);
+        } else {
+          this.settle(group, 'rejected');
+          this.options.onPermanentError?.(error, {
+            topic: group.topic,
+            partition: group.partition,
+            recordCount: group.records.length,
+          });
+        }
       }
     }
   }
 
-  /** Encodes a group's RecordBatch, stamping it with the current producer id and claiming the
-   * next run of sequence numbers for its partition when idempotence is on. */
-  private encodeGroup(group: PartitionGroup): EncodedGroup {
+  /** Encodes a group's RecordBatch, stamping it with `identity` and claiming the next run of
+   * sequence numbers for its partition when idempotence is on. An idempotent producer never sends
+   * an unstamped batch: the broker could not deduplicate it, so a missing identity is a bug here,
+   * not a fallback. */
+  private encodeGroup(group: PartitionGroup, identity: ProducerState | undefined): EncodedGroup {
     const records = group.records.map((r) => ({
       key: r.key,
       value: r.value,
@@ -509,7 +539,7 @@ export class KafkaProducer {
       timestamp: r.timestamp,
     }));
     const compression = this.options.compression ?? 'none';
-    if (!this.idempotent || this.producerState === undefined) {
+    if (!this.idempotent) {
       return {
         bytes: encodeRecordBatch(records, { compression }),
         producerId: -1n,
@@ -517,10 +547,15 @@ export class KafkaProducer {
         baseSequence: -1,
       };
     }
+    if (identity === undefined) {
+      throw new KafkaProtocolError(
+        'internal: idempotent producer tried to encode a batch with no producer id',
+      );
+    }
     const key = `${group.topic}\u0000${group.partition}`;
     const baseSequence = this.nextSequence.get(key) ?? 0;
     this.nextSequence.set(key, incrementSequence(baseSequence, records.length));
-    const { id: producerId, epoch: producerEpoch } = this.producerState;
+    const { id: producerId, epoch: producerEpoch } = identity;
     return {
       bytes: encodeRecordBatch(records, { compression, producerId, producerEpoch, baseSequence }),
       producerId,
@@ -530,22 +565,28 @@ export class KafkaProducer {
   }
 
   /** Connects to any one reachable bootstrap broker and asks its supported API versions, as a
-   * lightweight connectivity check. */
+   * lightweight connectivity check. With idempotence on, also obtains a producer id, so a
+   * cluster that refuses `InitProducerId` (typically a missing IDEMPOTENT_WRITE ACL) fails the
+   * check up front instead of silently rejecting every batch at runtime. */
   async healthcheck(): Promise<void> {
     let lastError: unknown;
-    for (let attempt = 0; attempt < this.bootstrapAddrs.length; attempt++) {
+    let reached = false;
+    for (let attempt = 0; attempt < this.bootstrapAddrs.length && !reached; attempt++) {
       const addr = this.nextBootstrap();
       try {
         const conn = await this.getOrConnect(addr);
         await conn.apiVersions();
-        return;
+        reached = true;
       } catch (error) {
         lastError = error;
       }
     }
-    throw lastError instanceof Error
-      ? lastError
-      : new KafkaProtocolError('failed to reach any bootstrap broker');
+    if (!reached) {
+      throw lastError instanceof Error
+        ? lastError
+        : new KafkaProtocolError('failed to reach any bootstrap broker');
+    }
+    if (this.idempotent) await this.ensureProducerId();
   }
 
   async close(): Promise<void> {

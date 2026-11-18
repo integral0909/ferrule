@@ -353,8 +353,13 @@ wrapping `kafkajs`.
   a fresh id and re-stamp the affected groups once inline, which is also how it recovers after the
   sink abandons a batch mid-sequence. This relies on at most one unsettled batch per partition at
   a time (the sink's default concurrency of one), so a resend always falls inside the broker's
-  five-batch duplicate window. `idempotent` requires `acks: "-1"`; the option schema rejects any
-  other combination. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
+  five-batch duplicate window. Every group of a round is stamped before any request is dispatched, under the identity the
+  round started with, so one leader's sequence error cannot leave another leader's group unstamped.
+  With idempotence on, `healthcheck()` also performs `InitProducerId`, so a cluster that refuses it
+  (typically a missing `IDEMPOTENT_WRITE` ACL) fails the pipeline's startup check instead of
+  rejecting every batch at runtime; permanent rejections, per partition or per batch, are logged at
+  error level by the sink since the batched-sink loop itself finishes them silently.
+  `idempotent` requires `acks: "-1"`; the option schema rejects any other combination. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
   dependency, per CONTRIBUTING.md's dependency policy) and are rejected at encode time.
 - **`sink.ts`** — topic/key/header templates (`stream/template.ts`), an `acks` schema of
   `'0' | '1' | '-1'` (mapped to the numeric wire value), the shared `encoding`/`batch`/`retry`

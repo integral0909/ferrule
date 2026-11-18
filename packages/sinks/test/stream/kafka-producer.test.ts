@@ -25,13 +25,16 @@ function outgoing(topic: string, overrides: Partial<OutgoingRecord> = {}): Outgo
 }
 
 let broker: FakeKafkaBroker | undefined;
+let extraBrokers: FakeKafkaBroker[] = [];
 let producer: KafkaProducer | undefined;
 
 afterEach(async () => {
   if (producer !== undefined) await producer.close();
   if (broker !== undefined) await broker.close();
+  await Promise.all(extraBrokers.map((b) => b.close()));
   producer = undefined;
   broker = undefined;
+  extraBrokers = [];
 });
 
 describe('KafkaProducer: basic produce', () => {
@@ -496,5 +499,105 @@ describe('KafkaProducer: idempotence', () => {
       Promise.resolve('pending'),
     ]);
     expect(raced).toBe('pending');
+  });
+});
+
+describe('KafkaProducer: idempotence across brokers', () => {
+  it('stamps every group of a round under the identity the round started with, even when another leader resets it mid-round', async () => {
+    // Partition 0 is led by broker A, partition 1 by broker B. A answers at once and refuses
+    // partition 0 with OUT_OF_ORDER_SEQUENCE_NUMBER, which clears the producer identity. B is
+    // slow and needs SASL, so the client is still connecting to it when A's response lands. The
+    // group bound for B must already carry the original producer id, not go out unstamped.
+    const sasl = { mechanism: 'PLAIN', username: 'alice', password: 'secret' } as const;
+    let refusalsLeft = 1;
+    broker = new FakeKafkaBroker({
+      nodeId: 1,
+      partitionCounts: { events: 2 },
+      partitionLeaders: { events: [1, 2] },
+      firstProducerId: 1000n,
+      sasl,
+      onProduce: ({ partition }) => {
+        if (partition === 0 && refusalsLeft > 0) {
+          refusalsLeft--;
+          return { errorCode: 45 };
+        }
+        return { errorCode: 0 };
+      },
+    });
+    const slow = new FakeKafkaBroker({
+      nodeId: 2,
+      partitionCounts: { events: 2 },
+      partitionLeaders: { events: [1, 2] },
+      firstProducerId: 2000n,
+      sasl,
+      responseDelayMs: 150,
+    });
+    extraBrokers.push(slow);
+    const [portA, portB] = await Promise.all([broker.listen(), slow.listen()]);
+    broker.peers = [{ nodeId: 2, port: portB }];
+    slow.peers = [{ nodeId: 1, port: portA }];
+
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port: portA }],
+      sasl,
+      partitioner: 'round_robin',
+    });
+    const events = [LogEvent.fromMessage('to-A'), LogEvent.fromMessage('to-B')];
+    const completions = events.map(withFinalizer);
+    const batch = producer.prepare(
+      events.map((event, i) => outgoing('events', { value: Buffer.from(`v${i}`), event })),
+    );
+    await producer.send(batch);
+    await expect(Promise.all(completions)).resolves.toEqual(['delivered', 'delivered']);
+
+    // B saw exactly one batch, stamped with the first producer id, while A's partition was
+    // re-stamped under the second id and accepted inline.
+    expect(slow.receivedBatches).toHaveLength(1);
+    expect(slow.receivedBatches[0]!.decoded.producerId).toBe(1000n);
+    expect(slow.receivedBatches[0]!.decoded.baseSequence).toBe(0);
+    expect(broker.issuedProducerIds).toEqual([1000n, 1001n]);
+    expect(broker.appendedBatches.map((b) => [b.partition, b.decoded.producerId])).toEqual([
+      [0, 1001n],
+    ]);
+    const appended = [...broker.appendedBatches, ...slow.appendedBatches].flatMap((b) =>
+      b.decoded.records.map((r) => r.value!.toString('utf8')),
+    );
+    expect(appended.sort()).toEqual(['v0', 'v1']);
+  }, 10_000);
+});
+
+describe('KafkaProducer: healthcheck with idempotence', () => {
+  it('obtains a producer id during healthcheck, so a refused InitProducerId fails the check', async () => {
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 1 },
+      initProducerIdError: 31, // CLUSTER_AUTHORIZATION_FAILED
+    });
+    const port = await broker.listen();
+    producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }] });
+    let caught: unknown;
+    try {
+      await producer.healthcheck();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(KafkaError);
+    expect((caught as KafkaError).errorCode).toBe(31);
+  });
+
+  it('healthcheck acquires an id when idempotent and none when not', async () => {
+    broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
+    const port = await broker.listen();
+    producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }] });
+    await producer.healthcheck();
+    expect(broker.issuedProducerIds).toHaveLength(1);
+    expect(producer.producerIdentity?.id).toBe(broker.issuedProducerIds[0]);
+    await producer.close();
+
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port }],
+      idempotent: false,
+    });
+    await producer.healthcheck();
+    expect(broker.issuedProducerIds).toHaveLength(1);
   });
 });

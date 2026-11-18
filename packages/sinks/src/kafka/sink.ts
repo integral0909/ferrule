@@ -72,7 +72,7 @@ export const kafkaSinkOptionsSchema = s
 
 export type KafkaSinkOptions = Infer<typeof kafkaSinkOptionsSchema>;
 
-function buildProducer(options: KafkaSinkOptions): KafkaProducer {
+function buildProducer(options: KafkaSinkOptions, ctx?: SinkContext): KafkaProducer {
   return new KafkaProducer({
     bootstrapBrokers: options.brokers,
     clientId: options.client_id,
@@ -85,6 +85,19 @@ function buildProducer(options: KafkaSinkOptions): KafkaProducer {
     compression: options.compression,
     partitioner: options.partitioner,
     idempotent: options.idempotent,
+    ...(ctx !== undefined
+      ? {
+          onPermanentError: (error: KafkaError, rejected) => {
+            ctx.logger.error('kafka sink: partition permanently rejected a batch of records', {
+              code: error.code,
+              error: error.message,
+              topic: rejected.topic,
+              partition: rejected.partition,
+              records: rejected.recordCount,
+            });
+          },
+        }
+      : {}),
   });
 }
 
@@ -152,7 +165,7 @@ export function createKafkaSink(
 
   return {
     async run(ctx: SinkContext): Promise<void> {
-      const producer = buildProducer(options);
+      const producer = buildProducer(options, ctx);
       const encodeBatch = makeEncodeBatch(
         options,
         encoder,
@@ -178,6 +191,13 @@ export function createKafkaSink(
                 if (error.isRetryable) {
                   throw SinkError.retryable('E_KAFKA_RETRYABLE', error.message, { cause: error });
                 }
+                // The batched-sink loop finishes the batch `rejected` without logging, so this is
+                // the only trace of a permanent failure such as a missing IDEMPOTENT_WRITE ACL.
+                ctx.logger.error('kafka sink: batch rejected on a permanent broker error', {
+                  code: error.code,
+                  error: error.message,
+                  records: batch.pending.length,
+                });
                 throw SinkError.permanent('E_KAFKA_PERMANENT', error.message, error);
               }
               throw SinkError.retryable(

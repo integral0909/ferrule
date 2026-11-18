@@ -59,6 +59,15 @@ export interface FakeKafkaBrokerOptions {
   /** Report an exact repeat of a recently appended batch as `DUPLICATE_SEQUENCE_NUMBER` (46), as
    * old brokers did, instead of acknowledging it with error code 0 as modern brokers do. */
   readonly duplicatesAsError?: boolean;
+  /** Leader node per partition index, per topic (default: this broker for every partition). Nodes
+   * other than this broker must be listed in {@link FakeKafkaBroker.peers}. */
+  readonly partitionLeaders?: Readonly<Record<string, readonly number[]>>;
+  /** First producer id this broker hands out (default 1000). Give each broker of a multi-node
+   * fake cluster a distinct range, since a real cluster never issues the same id twice. */
+  readonly firstProducerId?: bigint;
+  /** Delay, in milliseconds, before this broker handles each request. Models a slow broker, and
+   * with SASL also makes the client's `connect()` take at least this long. */
+  readonly responseDelayMs?: number;
 }
 
 /** Broker-side state for one (producer id, topic, partition): what Kafka's `ProducerStateManager`
@@ -73,6 +82,8 @@ interface ProducerPartitionState {
 /** State shared by every connection to one fake broker. */
 class BrokerState {
   nextProducerId = 1000n;
+  /** Other nodes of the fake cluster, advertised in Metadata responses. */
+  peers: { nodeId: number; port: number }[] = [];
   produceRequests = 0;
   readonly producers = new Map<string, ProducerPartitionState>();
   readonly receivedBatches: ReceivedProduceBatch[] = [];
@@ -164,6 +175,9 @@ class KafkaConnectionHandler {
     for (;;) {
       const request = await this.next().catch(() => undefined);
       if (request === undefined || this.socket.destroyed) return;
+      const delay = this.options.responseDelayMs ?? 0;
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (this.socket.destroyed) return;
       this.handle(request);
     }
   }
@@ -285,7 +299,10 @@ class KafkaConnectionHandler {
     const w = new KafkaWriter();
     w.int32(0); // throttle_time_ms
     w.compactArray(
-      [{ nodeId: this.nodeId, host: '127.0.0.1', port: this.selfPort }],
+      [
+        { nodeId: this.nodeId, host: '127.0.0.1', port: this.selfPort },
+        ...this.state.peers.map((p) => ({ nodeId: p.nodeId, host: '127.0.0.1', port: p.port })),
+      ],
       (writer, b) => {
         writer.int32(b.nodeId).compactString(b.host).int32(b.port).compactNullableString(null);
         writer.emptyTaggedFields();
@@ -302,12 +319,13 @@ class KafkaConnectionHandler {
       writer.compactArray(
         Array.from({ length: partitionCount }, (_, p) => p),
         (pw, partitionIndex) => {
+          const leader = this.options.partitionLeaders?.[topic]?.[partitionIndex] ?? this.nodeId;
           pw.int16(0);
           pw.int32(partitionIndex);
-          pw.int32(this.nodeId);
+          pw.int32(leader);
           pw.int32(0);
-          pw.compactArray([this.nodeId], (aw, v) => aw.int32(v));
-          pw.compactArray([this.nodeId], (aw, v) => aw.int32(v));
+          pw.compactArray([leader], (aw, v) => aw.int32(v));
+          pw.compactArray([leader], (aw, v) => aw.int32(v));
           pw.compactArray([], () => undefined);
           pw.emptyTaggedFields();
         },
@@ -478,6 +496,7 @@ export class FakeKafkaBroker {
 
   constructor(private readonly options: FakeKafkaBrokerOptions = {}) {
     this.nodeId = options.nodeId ?? 1;
+    if (options.firstProducerId !== undefined) this.state.nextProducerId = options.firstProducerId;
     this.server = net.createServer((socket) => {
       const handler = new KafkaConnectionHandler(
         socket,
@@ -515,6 +534,12 @@ export class FakeKafkaBroker {
 
   get issuedProducerIds(): readonly bigint[] {
     return this.state.issuedProducerIds;
+  }
+
+  /** Declares the other nodes of a multi-broker fake cluster, so Metadata responses advertise
+   * them (set after every broker has `listen`ed, since it needs their ports). */
+  set peers(peers: readonly { nodeId: number; port: number }[]) {
+    this.state.peers = [...peers];
   }
 
   async close(): Promise<void> {

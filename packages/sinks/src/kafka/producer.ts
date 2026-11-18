@@ -46,20 +46,48 @@ export interface OutgoingRecord {
   readonly event: Event;
 }
 
-interface Assigned {
-  readonly record: OutgoingRecord;
+/** The records of one batch bound for one topic-partition, settled together by that partition's
+ * response. */
+interface PartitionGroup {
+  readonly topic: string;
   readonly partition: number;
+  readonly records: readonly OutgoingRecord[];
+  /** Set once the partition has answered conclusively (accepted, or a permanent error): the group
+   * is never sent again. */
+  settled: boolean;
+}
+
+/**
+ * A set of records handed to {@link KafkaProducer.send} together, kept across retries. Partition
+ * assignment happens on the first `send` and is then fixed, so every retry targets the same
+ * partitions; groups the broker has already accepted (or permanently rejected) are marked settled
+ * and excluded from later sends of the same batch.
+ */
+export class ProduceBatch {
+  /** @internal Filled on the first `send`, once partition metadata is known. */
+  groups: PartitionGroup[] | undefined;
+
+  constructor(readonly records: readonly OutgoingRecord[]) {}
+
+  /** Records not yet accepted or permanently rejected (all of them before the first `send`). */
+  get pending(): readonly OutgoingRecord[] {
+    if (this.groups === undefined) return this.records;
+    return this.groups.filter((g) => !g.settled).flatMap((g) => g.records);
+  }
 }
 
 /**
  * A hand-written Kafka producer: broker connections (one per node, opened lazily), a metadata
  * cache (topic -> partition -> leader, refreshed on demand or after a stale-metadata error), the
  * default (murmur2) and sticky/round-robin partitioners, and `Produce` request constructions that
- * group records first by partition and then by the partition's leader broker, so one `send()`
- * call issues at most one `Produce` request per broker involved, regardless of how many
- * topic-partitions it touches. Idempotence is not implemented (not required by this sink): a
- * retry after a partial failure may resend records a partition already accepted, which is
- * consistent with the pipeline's documented at-least-once contract.
+ * group records first by partition and then by the partition's leader broker, so one round issues
+ * at most one `Produce` request per broker involved, regardless of how many topic-partitions it
+ * touches.
+ *
+ * The unit of retry is a {@link ProduceBatch}: `send` settles each topic-partition group of the
+ * batch independently as its own response arrives, and a later `send` of the same batch (the
+ * caller's retry) only resends the groups that are still unsettled, so a partition that already
+ * accepted its records is never asked to append them again because a sibling partition failed.
  */
 export class KafkaProducer {
   private readonly connections = new Map<string, KafkaBrokerConnection>();
@@ -164,60 +192,53 @@ export class KafkaProducer {
       : this.sticky.next(topic, count);
   }
 
+  /** Wraps `records` in a {@link ProduceBatch} without sending anything. */
+  prepare(records: readonly OutgoingRecord[]): ProduceBatch {
+    return new ProduceBatch(records);
+  }
+
   /**
-   * Sends `records`, grouped by partition and then by each partition's leader broker. Finishes
-   * every record's event finalizer with the outcome of *its own* partition's response
-   * (`delivered` on success, `rejected` on a permanent per-partition error); if any partition
-   * reports a retryable error, throws a {@link KafkaError} without finishing those records'
-   * events, so the caller's retry (with `runBatchedSink`'s toolkit) can resend them — a stale
-   * topic's cached metadata is invalidated first, so the retry re-resolves the leader.
+   * Sends every unsettled group of `batch`, grouped by each partition's leader broker, and
+   * finishes each record's event finalizer with the outcome of *its own* partition's response
+   * (`delivered` on success, `rejected` on a permanent per-partition error). If any group's
+   * partition reports a retryable error (or its leader is unknown or unreachable), throws a
+   * {@link KafkaError} without finishing or settling those records' events; a stale topic's cached
+   * metadata is invalidated first, so the caller's retry — `send` again with the *same* batch —
+   * re-resolves the leader and resends only what is still unsettled.
+   *
+   * A plain array is accepted for one-shot sends with no retry; each such call is a new batch.
    */
-  async send(records: readonly OutgoingRecord[]): Promise<void> {
-    if (records.length === 0) return;
-    const topics = [...new Set(records.map((r) => r.topic))];
-    await this.ensureMetadata(topics);
+  async send(input: ProduceBatch | readonly OutgoingRecord[]): Promise<void> {
+    const batch = input instanceof ProduceBatch ? input : new ProduceBatch(input);
+    if (batch.records.length === 0) return;
+    if (batch.groups === undefined) batch.groups = await this.assignPartitions(batch.records);
 
-    const assigned: Assigned[] = records.map((record) => ({
-      record,
-      partition: this.partitionFor(record.topic, record.key),
-    }));
-    for (const topic of topics) this.sticky.onBatchComplete(topic);
+    const unsettled = batch.groups.filter((g) => !g.settled);
+    if (unsettled.length === 0) return;
+    await this.ensureMetadata([...new Set(unsettled.map((g) => g.topic))]);
 
-    // nodeId -> topic -> partition -> assigned records
-    const byLeader = new Map<number, Map<string, Map<number, Assigned[]>>>();
-    const leaderless: Assigned[] = [];
-    for (const a of assigned) {
-      const leaderId = this.topicLeaders.get(a.record.topic)?.get(a.partition);
+    const byLeader = new Map<number, PartitionGroup[]>();
+    const leaderless: PartitionGroup[] = [];
+    for (const group of unsettled) {
+      const leaderId = this.topicLeaders.get(group.topic)?.get(group.partition);
       if (leaderId === undefined || leaderId < 0) {
-        leaderless.push(a);
+        leaderless.push(group);
         continue;
       }
-      let byTopic = byLeader.get(leaderId);
-      if (byTopic === undefined) {
-        byTopic = new Map();
-        byLeader.set(leaderId, byTopic);
-      }
-      let byPartition = byTopic.get(a.record.topic);
-      if (byPartition === undefined) {
-        byPartition = new Map();
-        byTopic.set(a.record.topic, byPartition);
-      }
-      const list = byPartition.get(a.partition);
-      if (list === undefined) byPartition.set(a.partition, [a]);
-      else list.push(a);
+      const list = byLeader.get(leaderId);
+      if (list === undefined) byLeader.set(leaderId, [group]);
+      else list.push(group);
     }
 
     const retryableErrors: KafkaError[] = [];
     if (leaderless.length > 0) {
-      for (const topic of new Set(leaderless.map((a) => a.record.topic))) {
-        this.invalidateTopic(topic);
-      }
+      for (const topic of new Set(leaderless.map((g) => g.topic))) this.invalidateTopic(topic);
       retryableErrors.push(new KafkaError(-1, 'no known leader for one or more partitions'));
     }
 
     await Promise.all(
-      [...byLeader.entries()].map(([nodeId, byTopic]) =>
-        this.sendToLeader(nodeId, byTopic, retryableErrors).catch((error: unknown) => {
+      [...byLeader.entries()].map(([nodeId, groups]) =>
+        this.sendToLeader(nodeId, groups, retryableErrors).catch((error: unknown) => {
           retryableErrors.push(
             error instanceof KafkaError ? error : new KafkaError(-1, String(error)),
           );
@@ -228,14 +249,40 @@ export class KafkaProducer {
     if (retryableErrors.length > 0) throw retryableErrors[0]!;
   }
 
+  /** Resolves every record's partition (fetching metadata first if needed) and groups the records
+   * by topic-partition, preserving their relative order within each group. */
+  private async assignPartitions(records: readonly OutgoingRecord[]): Promise<PartitionGroup[]> {
+    const topics = [...new Set(records.map((r) => r.topic))];
+    await this.ensureMetadata(topics);
+    const groups = new Map<
+      string,
+      { topic: string; partition: number; records: OutgoingRecord[] }
+    >();
+    for (const record of records) {
+      const partition = this.partitionFor(record.topic, record.key);
+      const key = `${record.topic}\u0000${partition}`;
+      const group = groups.get(key);
+      if (group === undefined)
+        groups.set(key, { topic: record.topic, partition, records: [record] });
+      else group.records.push(record);
+    }
+    for (const topic of topics) this.sticky.onBatchComplete(topic);
+    return [...groups.values()].map((g) => ({ ...g, settled: false }));
+  }
+
   private invalidateTopic(topic: string): void {
     this.topicLeaders.delete(topic);
     this.partitionCounts.delete(topic);
   }
 
+  private settle(group: PartitionGroup, status: 'delivered' | 'rejected'): void {
+    group.settled = true;
+    for (const record of group.records) record.event.metadata.finalizers.finish(status);
+  }
+
   private async sendToLeader(
     nodeId: number,
-    byTopic: Map<string, Map<number, Assigned[]>>,
+    groups: readonly PartitionGroup[],
     retryableErrors: KafkaError[],
   ): Promise<void> {
     const addr = this.brokerAddresses.get(nodeId);
@@ -244,25 +291,27 @@ export class KafkaProducer {
     }
     const conn = await this.getOrConnect(addr);
 
-    const topicRequests: ProduceTopicRequest[] = [];
-    const byKey = new Map<string, Assigned[]>();
-    for (const [topic, byPartition] of byTopic) {
-      const partitions: ProducePartitionRequest[] = [];
-      for (const [partition, items] of byPartition) {
-        const batch = encodeRecordBatch(
-          items.map((a) => ({
-            key: a.record.key,
-            value: a.record.value,
-            headers: a.record.headers,
-            timestamp: a.record.timestamp,
-          })),
-          { compression: this.options.compression ?? 'none' },
-        );
-        partitions.push({ index: partition, records: batch });
-        byKey.set(`${topic}\u0000${partition}`, items);
-      }
-      topicRequests.push({ name: topic, partitions });
+    const byTopic = new Map<string, ProducePartitionRequest[]>();
+    const byKey = new Map<string, PartitionGroup>();
+    for (const group of groups) {
+      const batch = encodeRecordBatch(
+        group.records.map((r) => ({
+          key: r.key,
+          value: r.value,
+          headers: r.headers,
+          timestamp: r.timestamp,
+        })),
+        { compression: this.options.compression ?? 'none' },
+      );
+      const partitions = byTopic.get(group.topic);
+      const request = { index: group.partition, records: batch };
+      if (partitions === undefined) byTopic.set(group.topic, [request]);
+      else partitions.push(request);
+      byKey.set(`${group.topic}\u0000${group.partition}`, group);
     }
+    const topicRequests: ProduceTopicRequest[] = [...byTopic.entries()].map(
+      ([name, partitions]) => ({ name, partitions }),
+    );
 
     const acks = this.options.acks ?? -1;
     const requestBody = encodeProduceRequestV9(
@@ -273,9 +322,7 @@ export class KafkaProducer {
 
     if (acks === 0) {
       await conn.sendOneWay(ApiKey.Produce, 9, true, requestBody);
-      for (const items of byKey.values()) {
-        for (const a of items) a.record.event.metadata.finalizers.finish('delivered');
-      }
+      for (const group of groups) this.settle(group, 'delivered');
       return;
     }
 
@@ -283,18 +330,16 @@ export class KafkaProducer {
     const response = decodeProduceResponseV9(responseBody);
     for (const topic of response.topics) {
       for (const partition of topic.partitions) {
-        const items = byKey.get(`${topic.name}\u0000${partition.index}`) ?? [];
+        const group = byKey.get(`${topic.name}\u0000${partition.index}`);
+        if (group === undefined) continue;
         if (partition.errorCode === 0) {
-          for (const a of items) a.record.event.metadata.finalizers.finish('delivered');
+          this.settle(group, 'delivered');
           continue;
         }
         const error = new KafkaError(partition.errorCode, partition.errorMessage ?? undefined);
         if (error.needsMetadataRefresh) this.invalidateTopic(topic.name);
-        if (error.isRetryable) {
-          retryableErrors.push(error);
-        } else {
-          for (const a of items) a.record.event.metadata.finalizers.finish('rejected');
-        }
+        if (error.isRetryable) retryableErrors.push(error);
+        else this.settle(group, 'rejected');
       }
     }
   }

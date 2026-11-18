@@ -211,3 +211,87 @@ describe('KafkaProducer: healthcheck and metadata', () => {
     for (const p of seenB) expect(p).toBeLessThan(3);
   });
 });
+
+describe('KafkaProducer: partial-failure retries', () => {
+  it('resends only the unsettled partitions when the same batch is sent again', async () => {
+    // Partition 0 accepts every time; partition 1 fails once with a retryable error.
+    let failuresLeft = 1;
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 2 },
+      onProduce: ({ partition }) => {
+        if (partition === 1 && failuresLeft > 0) {
+          failuresLeft--;
+          return { errorCode: 6 }; // NOT_LEADER_OR_FOLLOWER
+        }
+        return { errorCode: 0 };
+      },
+    });
+    const port = await broker.listen();
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port }],
+      partitioner: 'round_robin',
+    });
+
+    const events = Array.from({ length: 4 }, (_, i) => LogEvent.fromMessage(`m${i}`));
+    const completions = events.map(withFinalizer);
+    const batch = producer.prepare(
+      events.map((event, i) => outgoing('events', { value: Buffer.from(`v${i}`), event })),
+    );
+    expect(batch.pending).toHaveLength(4);
+
+    await expect(producer.send(batch)).rejects.toThrow(KafkaError);
+    // Partition 0's two records were accepted and are settled; partition 1's are still pending.
+    expect(batch.pending).toHaveLength(2);
+    expect(broker.receivedBatches).toHaveLength(2);
+
+    await producer.send(batch);
+    expect(batch.pending).toHaveLength(0);
+    await expect(Promise.all(completions)).resolves.toEqual(Array(4).fill('delivered'));
+
+    // The retry carried exactly one more batch, for partition 1 only.
+    expect(broker.receivedBatches).toHaveLength(3);
+    expect(broker.receivedBatches[2]!.partition).toBe(1);
+    const perPartition = new Map<number, number>();
+    for (const b of broker.receivedBatches) {
+      if (b.decoded.records.length === 0) continue;
+      perPartition.set(b.partition, (perPartition.get(b.partition) ?? 0) + 1);
+    }
+    expect(perPartition.get(0)).toBe(1);
+  });
+
+  it('keeps partition assignment fixed across retries even after metadata was invalidated', async () => {
+    let failuresLeft = 1;
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 4 },
+      onProduce: () => {
+        if (failuresLeft > 0) {
+          failuresLeft--;
+          return { errorCode: 3 }; // UNKNOWN_TOPIC_OR_PARTITION: invalidates cached metadata
+        }
+        return { errorCode: 0 };
+      },
+    });
+    const port = await broker.listen();
+    producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }] });
+
+    const event = LogEvent.fromMessage('x');
+    const completion = withFinalizer(event);
+    const batch = producer.prepare([outgoing('events', { key: Buffer.from('k'), event })]);
+    await expect(producer.send(batch)).rejects.toThrow(KafkaError);
+    await producer.send(batch);
+    await expect(completion).resolves.toBe('delivered');
+    const partitions = broker.receivedBatches.map((b) => b.partition);
+    expect(partitions).toHaveLength(2);
+    expect(partitions[0]).toBe(partitions[1]);
+  });
+
+  it('a settled batch sent again is a no-op', async () => {
+    broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
+    const port = await broker.listen();
+    producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }] });
+    const batch = producer.prepare([outgoing('events')]);
+    await producer.send(batch);
+    await producer.send(batch);
+    expect(broker.receivedBatches).toHaveLength(1);
+  });
+});

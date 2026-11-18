@@ -170,6 +170,51 @@ describe('kafka sink', () => {
     expect(attempts).toBeGreaterThanOrEqual(2);
   }, 15_000);
 
+  it('retries a partly failed batch without resending the partitions that were accepted', async () => {
+    // Keyed records spread over two partitions; partition 1 fails once with a retryable error.
+    let failuresLeft = 1;
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 2 },
+      onProduce: ({ partition }) => {
+        if (partition === 1 && failuresLeft > 0) {
+          failuresLeft--;
+          return { errorCode: 6 }; // NOT_LEADER_OR_FOLLOWER
+        }
+        return { errorCode: 0 };
+      },
+    });
+    const port = await broker.listen();
+    const sink = createKafkaSink(baseOptions(port, { key: '{{ message }}' }));
+    const ctx = createTestSinkContext();
+    const events = Array.from({ length: 20 }, (_, i) => LogEvent.fromMessage(`k${i}`));
+    const completions = events.map(withFinalizer);
+
+    const running = sink.run(ctx.ctx);
+    await ctx.feed(events);
+    ctx.close();
+    for (let i = 0; i < 200 && broker.receivedBatches.length < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await ctx.clock.advance(20);
+    }
+    await running;
+    await expect(Promise.all(completions)).resolves.toEqual(Array(20).fill('delivered'));
+
+    // Three batches reached the broker: partition 0 (accepted) and partition 1 (rejected) in the
+    // first request, in either order, then the retry of partition 1 alone. Partition 0's records
+    // were never sent a second time.
+    const [first, second, retry] = broker.receivedBatches;
+    const keysOf = (b: typeof first): string[] =>
+      b!.decoded.records.map((r) => r.key!.toString('utf8')).sort();
+    expect(retry!.partition).toBe(1);
+    const acceptedFirst = first!.partition === 0 ? first : second;
+    const rejectedFirst = first!.partition === 0 ? second : first;
+    expect(rejectedFirst!.partition).toBe(1);
+    expect(keysOf(retry)).toEqual(keysOf(rejectedFirst));
+    expect([...keysOf(acceptedFirst), ...keysOf(retry)].sort()).toEqual(
+      events.map((_, i) => `k${i}`).sort(),
+    );
+  }, 15_000);
+
   it('healthcheck succeeds against a reachable broker', async () => {
     broker = new FakeKafkaBroker();
     const port = await broker.listen();

@@ -339,11 +339,12 @@ wrapping `kafkajs`.
   stale-leader error), and `send()`, which assigns every record's partition (murmur2 for a keyed
   record, sticky/round-robin otherwise), groups by partition and then by that partition's leader
   broker, and issues at most one `Produce` request per broker involved regardless of how many
-  topic-partitions it touches. Finishes each record's event `delivered`/`rejected` directly as its
-  own partition's response arrives; a retryable per-partition error is thrown (without finishing
-  those events) so the sink's `RetryPolicy` resends — which may re-send records a partition already
-  accepted, an accepted consequence of the pipeline's at-least-once contract, since idempotence is
-  out of scope here. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
+  topic-partitions it touches. The unit of retry is a `ProduceBatch` handle: `send()` finishes
+  each record's event `delivered`/`rejected` directly as its own partition's response arrives and
+  marks that partition group settled; a retryable per-partition error is thrown (without finishing
+  those events) so the sink's `RetryPolicy` calls `send()` again with the *same* handle, which
+  resends only the groups still unsettled, so a partition that already accepted its records is not
+  asked to append them again because a sibling partition failed. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
   dependency, per CONTRIBUTING.md's dependency policy) and are rejected at encode time.
 - **`sink.ts`** — topic/key/header templates (`stream/template.ts`), an `acks` schema of
   `'0' | '1' | '-1'` (mapped to the numeric wire value), the shared `encoding`/`batch`/`retry`
@@ -380,8 +381,10 @@ themselves are genuine (if fast, loopback) async I/O.
   itself be wrong.
 - **Kafka compression** supports `none` and `gzip` only (no snappy/lz4/zstd, which need a native
   dependency this project avoids); **idempotent/transactional production** is not implemented
-  (not required by the task); a partial batch failure can cause an already-accepted partition's
-  records to be resent on retry.
+  (not required by the task). A partial batch failure no longer resends partitions that answered
+  successfully, but a request whose response is lost (connection dropped after the broker appended)
+  is still resent whole, since without producer ids and sequence numbers the broker cannot
+  recognise the repeat.
 - **PostgreSQL extended query protocol** supports text-format parameters and results only (no
   binary format), and does not use prepared-statement caching (`Parse` targets the unnamed
   statement every call) — sufficient for the sink's own `COPY`-based inserts, which are the

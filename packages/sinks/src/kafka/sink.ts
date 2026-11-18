@@ -19,7 +19,7 @@ import {
 } from '../fragments.js';
 import { compileTemplate, renderTemplate, type CompiledTemplate } from '../stream/template.js';
 import { KafkaError } from './errors.js';
-import { KafkaProducer, type OutgoingRecord } from './producer.js';
+import { KafkaProducer, type OutgoingRecord, type ProduceBatch } from './producer.js';
 
 export const kafkaSinkOptionsSchema = s.object({
   /** Bootstrap broker addresses (`host:port`); metadata discovers the rest of the cluster. */
@@ -149,10 +149,13 @@ export function createKafkaSink(
           maxEvents: options.batch?.max_events ?? 500,
           maxBytes: options.batch?.max_size ?? 1024 * 1024,
           timeoutMs: options.batch?.timeout ?? 1_000,
-          encode: encodeBatch,
-          send: async (outgoing: OutgoingRecord[]) => {
+          // The encoded payload is a ProduceBatch handle, not a plain record array: the retry
+          // loop passes the same payload to every attempt, and the producer uses it to resend
+          // only the partitions that have not been accepted yet.
+          encode: (events: Event[]): ProduceBatch => producer.prepare(encodeBatch(events)),
+          send: async (batch: ProduceBatch) => {
             try {
-              await producer.send(outgoing);
+              await producer.send(batch);
             } catch (error) {
               if (error instanceof KafkaError) {
                 if (error.isRetryable) {

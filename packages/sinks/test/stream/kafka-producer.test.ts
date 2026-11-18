@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BatchNotifier, LogEvent, type DeliveryStatus } from '@ferrule/core';
 import { KafkaError } from '../../src/kafka/errors.js';
-import { KafkaProducer, type OutgoingRecord } from '../../src/kafka/producer.js';
+import { KafkaProducer, stampedGroups, type OutgoingRecord } from '../../src/kafka/producer.js';
 import { FakeKafkaBroker } from './support/fake-kafka-broker.js';
 
 function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {
@@ -108,7 +108,11 @@ describe('KafkaProducer: basic produce', () => {
   it('acks=0 finishes events as delivered without waiting for a broker response', async () => {
     broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
     const port = await broker.listen();
-    producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }], acks: 0 });
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port }],
+      acks: 0,
+      idempotent: false,
+    });
     const event = LogEvent.fromMessage('x');
     const completion = withFinalizer(event);
     await producer.send([outgoing('events', { event })]);
@@ -293,5 +297,204 @@ describe('KafkaProducer: partial-failure retries', () => {
     await producer.send(batch);
     await producer.send(batch);
     expect(broker.receivedBatches).toHaveLength(1);
+  });
+});
+
+describe('KafkaProducer: idempotence', () => {
+  it('stamps each batch with the broker-issued producer id and advancing per-partition sequences', async () => {
+    broker = new FakeKafkaBroker({ partitionCounts: { events: 2 } });
+    const port = await broker.listen();
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port }],
+      partitioner: 'round_robin',
+    });
+
+    // Two batches of three unkeyed records each: round-robin gives partitions 0,1,0 then 1,0,1.
+    const first = producer.prepare([outgoing('events'), outgoing('events'), outgoing('events')]);
+    await producer.send(first);
+    const second = producer.prepare([outgoing('events'), outgoing('events'), outgoing('events')]);
+    await producer.send(second);
+
+    expect(broker.issuedProducerIds).toHaveLength(1);
+    const pid = broker.issuedProducerIds[0]!;
+    expect(producer.producerIdentity).toEqual({ id: pid, epoch: 0 });
+
+    const stamps = [...stampedGroups(first), ...stampedGroups(second)].map((g) => [
+      g.partition,
+      g.baseSequence,
+      g.recordCount,
+    ]);
+    expect(stamps.sort((a, b) => a[0]! - b[0]! || a[1]! - b[1]!)).toEqual([
+      [0, 0, 2],
+      [0, 2, 1],
+      [1, 0, 1],
+      [1, 1, 2],
+    ]);
+    for (const b of broker.appendedBatches) {
+      expect(b.decoded.producerId).toBe(pid);
+      expect(b.decoded.producerEpoch).toBe(0);
+    }
+    expect(broker.appendedBatches).toHaveLength(4);
+  });
+
+  it('sends batches with no producer id when idempotence is off', async () => {
+    broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
+    const port = await broker.listen();
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port }],
+      idempotent: false,
+    });
+    await producer.send([outgoing('events')]);
+    expect(broker.issuedProducerIds).toHaveLength(0);
+    expect(broker.appendedBatches[0]!.decoded.producerId).toBe(-1n);
+    expect(broker.appendedBatches[0]!.decoded.baseSequence).toBe(-1);
+  });
+
+  it.each([
+    ['acknowledged with error code 0', false],
+    ['reported as DUPLICATE_SEQUENCE_NUMBER', true],
+  ])(
+    'a batch whose response was lost is resent byte-for-byte and %s, not appended twice',
+    async (_label, duplicatesAsError) => {
+      let dropsLeft = 1;
+      broker = new FakeKafkaBroker({
+        partitionCounts: { events: 1 },
+        duplicatesAsError,
+        onProduce: () => {
+          if (dropsLeft > 0) {
+            dropsLeft--;
+            return { errorCode: 0, dropConnection: true };
+          }
+          return { errorCode: 0 };
+        },
+      });
+      const port = await broker.listen();
+      producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }] });
+
+      const event = LogEvent.fromMessage('once');
+      const completion = withFinalizer(event);
+      const batch = producer.prepare([outgoing('events', { event })]);
+      await expect(producer.send(batch)).rejects.toThrow(KafkaError);
+      expect(batch.pending).toHaveLength(1);
+      expect(broker.appendedBatches).toHaveLength(1); // the broker did append it
+
+      await producer.send(batch);
+      await expect(completion).resolves.toBe('delivered');
+      expect(broker.receivedBatches).toHaveLength(2);
+      expect(broker.appendedBatches).toHaveLength(1);
+      const [a, b] = broker.receivedBatches;
+      expect(b!.decoded.producerId).toBe(a!.decoded.producerId);
+      expect(b!.decoded.baseSequence).toBe(a!.decoded.baseSequence);
+      expect(b!.decoded.crc).toBe(a!.decoded.crc);
+    },
+  );
+
+  it('after a batch is abandoned, the next batch recovers from the out-of-order sequence under a new producer id in one send', async () => {
+    let failuresLeft = 1;
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 1 },
+      onProduce: () => {
+        if (failuresLeft > 0) {
+          failuresLeft--;
+          return { errorCode: 7 }; // REQUEST_TIMED_OUT: retryable, nothing appended
+        }
+        return { errorCode: 0 };
+      },
+    });
+    const port = await broker.listen();
+    producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }] });
+
+    // The caller gives up on this batch (as the sink does once retries are exhausted): the
+    // broker never saw its sequence 0.
+    await expect(producer.send([outgoing('events')])).rejects.toThrow(KafkaError);
+    const firstPid = producer.producerIdentity!.id;
+
+    const event = LogEvent.fromMessage('next');
+    const completion = withFinalizer(event);
+    const next = producer.prepare([outgoing('events', { event })]);
+    await producer.send(next);
+    await expect(completion).resolves.toBe('delivered');
+
+    // Sequence 1 under the old id was refused (OUT_OF_ORDER_SEQUENCE_NUMBER), then the group was
+    // re-stamped with a fresh id at sequence 0 and accepted, all inside one send().
+    expect(broker.issuedProducerIds).toHaveLength(2);
+    expect(producer.producerIdentity!.id).not.toBe(firstPid);
+    const codes = broker.receivedBatches.map((b) => [b.decoded.producerId, b.decoded.baseSequence]);
+    expect(codes).toEqual([
+      [firstPid, 0],
+      [firstPid, 1],
+      [producer.producerIdentity!.id, 0],
+    ]);
+    expect(broker.appendedBatches).toHaveLength(1);
+    expect(stampedGroups(next)[0]!.baseSequence).toBe(0);
+  });
+
+  it('a partial failure plus a lost response on the retry still appends every record exactly once', async () => {
+    // Round 1: partition 0 accepted, partition 1 refused (retryable). Round 2 (partition 1 only):
+    // appended, but the connection drops before the response. Round 3: recognised as a duplicate.
+    let round = 0;
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 2 },
+      onProduce: ({ partition }) => {
+        if (round === 0 && partition === 1) return { errorCode: 6 };
+        if (round === 1) return { errorCode: 0, dropConnection: true };
+        return { errorCode: 0 };
+      },
+    });
+    const port = await broker.listen();
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port }],
+      partitioner: 'round_robin',
+    });
+    const events = Array.from({ length: 6 }, (_, i) => LogEvent.fromMessage(`m${i}`));
+    const completions = events.map(withFinalizer);
+    const batch = producer.prepare(
+      events.map((event, i) => outgoing('events', { value: Buffer.from(`v${i}`), event })),
+    );
+
+    await expect(producer.send(batch)).rejects.toThrow(KafkaError);
+    round = 1;
+    await expect(producer.send(batch)).rejects.toThrow();
+    round = 2;
+    await producer.send(batch);
+
+    await expect(Promise.all(completions)).resolves.toEqual(Array(6).fill('delivered'));
+    const appended = broker.appendedBatches.flatMap((b) =>
+      b.decoded.records.map((r) => r.value!.toString('utf8')),
+    );
+    expect(appended.sort()).toEqual(['v0', 'v1', 'v2', 'v3', 'v4', 'v5']);
+  });
+
+  it('rejects acks other than -1 when idempotent', () => {
+    const bootstrapBrokers = [{ host: '127.0.0.1', port: 1 }];
+    expect(() => new KafkaProducer({ bootstrapBrokers, acks: 0 })).toThrow(/acks=-1/);
+    expect(() => new KafkaProducer({ bootstrapBrokers, acks: 1 })).toThrow(/acks=-1/);
+    expect(() => new KafkaProducer({ bootstrapBrokers, acks: 1, idempotent: false })).not.toThrow();
+  });
+
+  it('surfaces a permanent InitProducerId error without finishing the events', async () => {
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 1 },
+      initProducerIdError: 31, // CLUSTER_AUTHORIZATION_FAILED
+    });
+    const port = await broker.listen();
+    producer = new KafkaProducer({ bootstrapBrokers: [{ host: '127.0.0.1', port }] });
+    const event = LogEvent.fromMessage('x');
+    const completion = withFinalizer(event);
+    let caught: unknown;
+    try {
+      await producer.send([outgoing('events', { event })]);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(KafkaError);
+    expect((caught as KafkaError).errorCode).toBe(31);
+    expect((caught as KafkaError).isRetryable).toBe(false);
+    expect(broker.receivedBatches).toHaveLength(0);
+    const raced = await Promise.race([
+      completion.then(() => 'settled'),
+      Promise.resolve('pending'),
+    ]);
+    expect(raced).toBe('pending');
   });
 });

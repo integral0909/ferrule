@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BatchNotifier, LogEvent, type DeliveryStatus } from '@ferrule/core';
 import { createTestSinkContext } from '@ferrule/runtime';
-import { createKafkaSink, type KafkaSinkOptions } from '../../src/kafka/sink.js';
-import { FakeKafkaBroker } from './support/fake-kafka-broker.js';
+import {
+  createKafkaSink,
+  kafkaSinkOptionsSchema,
+  type KafkaSinkOptions,
+} from '../../src/kafka/sink.js';
+import { FakeKafkaBroker, type ProduceDecision } from './support/fake-kafka-broker.js';
 
 function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {
   const batch = new BatchNotifier();
@@ -18,6 +22,7 @@ function baseOptions(port: number, overrides: Partial<KafkaSinkOptions> = {}): K
     topic: 'events',
     encoding: { codec: 'json' },
     acks: '-1',
+    idempotent: true,
     compression: 'none',
     partitioner: 'sticky',
     connect_timeout: 2_000,
@@ -214,6 +219,66 @@ describe('kafka sink', () => {
       events.map((_, i) => `k${i}`).sort(),
     );
   }, 15_000);
+
+  it('appends every record exactly once under injected partial failures and lost responses', async () => {
+    // A scripted fault per Produce request for the first several requests: per-partition
+    // retryable errors (nothing appended) interleaved with requests the broker appends but never
+    // answers. Every batch is keyed across three partitions, so each request carries several
+    // groups and a fault on one partition leaves the others accepted.
+    const faults: ((partition: number) => ProduceDecision)[] = [
+      (p) => (p === 1 ? { errorCode: 6 } : { errorCode: 0 }), // NOT_LEADER_OR_FOLLOWER on one
+      () => ({ errorCode: 0, dropConnection: true }), // appended, response lost
+      (p) => (p === 2 ? { errorCode: 7 } : { errorCode: 0 }), // REQUEST_TIMED_OUT on another
+      (p) => (p === 0 ? { errorCode: 0, dropConnection: true } : { errorCode: 0 }),
+      (p) => (p === 2 ? { errorCode: 19 } : { errorCode: 0 }), // NOT_ENOUGH_REPLICAS
+      () => ({ errorCode: 0, dropConnection: true }),
+    ];
+    broker = new FakeKafkaBroker({
+      partitionCounts: { events: 3 },
+      onProduce: ({ request, partition }) => faults[request]?.(partition) ?? { errorCode: 0 },
+    });
+    const port = await broker.listen();
+    const sink = createKafkaSink(
+      baseOptions(port, {
+        key: '{{ message }}',
+        batch: { max_events: 9, max_size: 1024 * 1024, timeout: 100 },
+      }),
+    );
+    const ctx = createTestSinkContext();
+    const total = 45;
+    const events = Array.from({ length: total }, (_, i) => LogEvent.fromMessage(`k${i}`));
+    const completions = events.map(withFinalizer);
+
+    const running = sink.run(ctx.ctx);
+    await ctx.feed(events);
+    ctx.close();
+    for (let i = 0; i < 400; i++) {
+      const settled = await Promise.race([
+        Promise.all(completions).then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5)),
+      ]);
+      if (settled) break;
+      await ctx.clock.advance(20);
+    }
+    await running;
+    await expect(Promise.all(completions)).resolves.toEqual(Array(total).fill('delivered'));
+
+    const appended = broker.appendedBatches.flatMap((b) =>
+      b.decoded.records.map((r) => r.key!.toString('utf8')),
+    );
+    expect(appended.length).toBe(total);
+    expect(new Set(appended).size).toBe(total);
+    // The schedule actually fired: some received batches were rejected or recognised as repeats.
+    expect(broker.receivedBatches.length).toBeGreaterThan(broker.appendedBatches.length);
+  }, 20_000);
+
+  it('rejects acks other than "-1" when idempotent, and accepts them when idempotence is off', () => {
+    const base = { brokers: ['127.0.0.1:9092'], topic: 'events' };
+    expect(() => kafkaSinkOptionsSchema.parse({ ...base, acks: '0' })).toThrow(/idempotent/);
+    expect(() => kafkaSinkOptionsSchema.parse({ ...base, acks: '1' })).toThrow(/idempotent/);
+    expect(kafkaSinkOptionsSchema.parse({ ...base, acks: '0', idempotent: false }).acks).toBe('0');
+    expect(kafkaSinkOptionsSchema.parse(base).idempotent).toBe(true);
+  });
 
   it('healthcheck succeeds against a reachable broker', async () => {
     broker = new FakeKafkaBroker();

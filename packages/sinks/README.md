@@ -342,9 +342,19 @@ wrapping `kafkajs`.
   topic-partitions it touches. The unit of retry is a `ProduceBatch` handle: `send()` finishes
   each record's event `delivered`/`rejected` directly as its own partition's response arrives and
   marks that partition group settled; a retryable per-partition error is thrown (without finishing
-  those events) so the sink's `RetryPolicy` calls `send()` again with the *same* handle, which
-  resends only the groups still unsettled, so a partition that already accepted its records is not
-  asked to append them again because a sibling partition failed. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
+  those events) so the sink's `RetryPolicy` calls `send()` again with the _same_ handle, which
+  resends only the groups still unsettled. **Idempotent production** (KIP-98, on by default):
+  the producer obtains a producer id with `InitProducerId` (v4), stamps each group's RecordBatch
+  once with that id, epoch 0, and the partition's next sequence number, and resends the identical
+  bytes on retry, so a group whose response was lost after the broker appended it is recognised as
+  a duplicate and acknowledged (error code 0 on modern brokers, `DUPLICATE_SEQUENCE_NUMBER` on
+  old ones) rather than appended again. A producer-state error (`OUT_OF_ORDER_SEQUENCE_NUMBER`,
+  `INVALID_PRODUCER_EPOCH`, `UNKNOWN_PRODUCER_ID` — none of which append) makes the producer fetch
+  a fresh id and re-stamp the affected groups once inline, which is also how it recovers after the
+  sink abandons a batch mid-sequence. This relies on at most one unsettled batch per partition at
+  a time (the sink's default concurrency of one), so a resend always falls inside the broker's
+  five-batch duplicate window. `idempotent` requires `acks: "-1"`; the option schema rejects any
+  other combination. `gzip` compression is supported; `snappy`/`lz4`/`zstd` are not (no native
   dependency, per CONTRIBUTING.md's dependency policy) and are rejected at encode time.
 - **`sink.ts`** — topic/key/header templates (`stream/template.ts`), an `acks` schema of
   `'0' | '1' | '-1'` (mapped to the numeric wire value), the shared `encoding`/`batch`/`retry`
@@ -358,8 +368,12 @@ Every protocol client is tested against an in-process fake server built from the
 primitives, not mocks: `test/stream/support/fake-postgres-server.ts` (an async request/response
 pump per connection — trust/cleartext/MD5/SCRAM-SHA-256 auth, the simple and extended query
 protocols, `COPY` with byte-for-byte capture and a configurable server-side accept/reject
-decision) and `test/stream/support/fake-kafka-broker.ts` (`ApiVersions`/`Metadata`/`Produce`/SASL,
-decoding and CRC-verifying every `RecordBatch` it receives). `test/stream/support/scram-server.ts`
+decision) and `test/stream/support/fake-kafka-broker.ts` (`ApiVersions`/`Metadata`/`Produce`/
+`InitProducerId`/SASL, decoding and CRC-verifying every `RecordBatch` it receives, and applying
+the broker-side idempotence rules — per-producer sequence checks and a five-batch duplicate
+window — so it keeps separate logs of batches _received_ and batches actually _appended_; a
+produce hook can inject per-partition errors or "append, then drop the connection before
+answering", and the idempotence tests assert the appended log holds every record exactly once). `test/stream/support/scram-server.ts`
 is a from-scratch SCRAM-SHA-256 _server_-side verifier shared by both fakes, so the client in
 `stream/scram.ts` is checked against an independent implementation, not just against itself; the
 RFC 7677 §3 published test vector is asserted exactly (`scram.test.ts`). `murmur2` is
@@ -380,11 +394,10 @@ themselves are genuine (if fast, loopback) async I/O.
   specific magic numbers for named inputs, to avoid asserting a value from memory that could
   itself be wrong.
 - **Kafka compression** supports `none` and `gzip` only (no snappy/lz4/zstd, which need a native
-  dependency this project avoids); **idempotent/transactional production** is not implemented
-  (not required by the task). A partial batch failure no longer resends partitions that answered
-  successfully, but a request whose response is lost (connection dropped after the broker appended)
-  is still resent whole, since without producer ids and sequence numbers the broker cannot
-  recognise the repeat.
+  dependency this project avoids). **Transactional production** is not implemented (idempotent
+  production is); the idempotence guarantee also assumes one unsettled batch per partition at a
+  time, which holds with the sink's fixed concurrency of one but would not if a Kafka sink were
+  ever given a wider concurrency limiter.
 - **PostgreSQL extended query protocol** supports text-format parameters and results only (no
   binary format), and does not use prepared-statement caching (`Parse` targets the unnamed
   statement every call) — sufficient for the sink's own `COPY`-based inserts, which are the

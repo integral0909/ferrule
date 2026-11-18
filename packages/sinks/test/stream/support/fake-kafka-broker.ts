@@ -11,9 +11,11 @@ import {
 /**
  * A fake Kafka broker speaking just enough of the wire protocol to exercise the producer in
  * `src/kafka/`: `ApiVersions`, `Metadata` (v9, flexible), `Produce` (v9, flexible, decoding and
- * CRC-verifying every `RecordBatch` it receives), and `SaslHandshake`/`SaslAuthenticate` (v1,
- * PLAIN and SCRAM-SHA-256). Driven as a small async request/response pump per connection, the
- * same style as the fake PostgreSQL server.
+ * CRC-verifying every `RecordBatch` it receives), `InitProducerId` (v4) with the broker-side
+ * idempotence rules (per-producer, per-partition sequence checks; exact repeats of a recently
+ * appended batch are acknowledged again rather than appended twice), and
+ * `SaslHandshake`/`SaslAuthenticate` (v1, PLAIN and SCRAM-SHA-256). Driven as a small async
+ * request/response pump per connection, the same style as the fake PostgreSQL server.
  */
 
 export interface FakeKafkaSaslOptions {
@@ -32,9 +34,16 @@ export interface ProduceDecisionInput {
   readonly topic: string;
   readonly partition: number;
   readonly decoded: DecodedRecordBatch;
+  /** Zero-based index of the `Produce` request this batch arrived in, counted across every
+   * connection to the broker, so a hook can script faults per request rather than per batch. */
+  readonly request: number;
 }
 
-export type ProduceDecision = { errorCode: 0 } | { errorCode: number; errorMessage?: string };
+export type ProduceDecision =
+  /** Accept the batch. With `dropConnection`, the broker appends it (subject to the sequence
+   * checks) but then destroys the connection instead of answering, so the client sees a lost
+   * response for a request that actually succeeded. */
+  { errorCode: 0; dropConnection?: boolean } | { errorCode: number; errorMessage?: string };
 
 export interface FakeKafkaBrokerOptions {
   readonly nodeId?: number;
@@ -42,8 +51,39 @@ export interface FakeKafkaBrokerOptions {
   /** Topics to answer with `errorCode` instead of real metadata (e.g. `UNKNOWN_TOPIC_OR_PARTITION`). */
   readonly topicErrors?: Readonly<Record<string, number>>;
   readonly sasl?: FakeKafkaSaslOptions;
+  /** Decides each received batch *before* the idempotence checks: an error here models a broker
+   * that rejected the request outright (nothing appended, sequences untouched). */
   readonly onProduce?: (input: ProduceDecisionInput) => ProduceDecision;
+  /** Answer every `InitProducerId` with this error code instead of allocating an id. */
+  readonly initProducerIdError?: number;
+  /** Report an exact repeat of a recently appended batch as `DUPLICATE_SEQUENCE_NUMBER` (46), as
+   * old brokers did, instead of acknowledging it with error code 0 as modern brokers do. */
+  readonly duplicatesAsError?: boolean;
 }
+
+/** Broker-side state for one (producer id, topic, partition): what Kafka's `ProducerStateManager`
+ * keeps. `recent` mirrors the broker's cache of the last five appended batches, which is what
+ * makes an exact resend recognisable as a duplicate. */
+interface ProducerPartitionState {
+  epoch: number;
+  lastSequence: number;
+  recent: { baseSequence: number; lastSequence: number }[];
+}
+
+/** State shared by every connection to one fake broker. */
+class BrokerState {
+  nextProducerId = 1000n;
+  produceRequests = 0;
+  readonly producers = new Map<string, ProducerPartitionState>();
+  readonly receivedBatches: ReceivedProduceBatch[] = [];
+  readonly appendedBatches: ReceivedProduceBatch[] = [];
+  readonly issuedProducerIds: bigint[] = [];
+}
+
+const OUT_OF_ORDER_SEQUENCE_NUMBER = 45;
+const DUPLICATE_SEQUENCE_NUMBER = 46;
+const INVALID_PRODUCER_EPOCH = 47;
+const INVALID_REQUIRED_ACKS = 21;
 
 function msg(body: Buffer): Buffer {
   const w = new KafkaWriter();
@@ -65,7 +105,7 @@ class KafkaConnectionHandler {
     private readonly options: FakeKafkaBrokerOptions,
     private readonly nodeId: number,
     private readonly selfPort: number,
-    readonly receivedBatches: ReceivedProduceBatch[],
+    private readonly state: BrokerState,
   ) {
     socket.on('data', (chunk: Buffer) => this.onData(chunk));
     socket.on('error', () => undefined);
@@ -88,7 +128,8 @@ class KafkaConnectionHandler {
       const clientIdLen = frame.readInt16BE(offset);
       offset += 2;
       if (clientIdLen >= 0) offset += clientIdLen;
-      const flexible = apiKey === ApiKey.Metadata || apiKey === ApiKey.Produce;
+      const flexible =
+        apiKey === ApiKey.Metadata || apiKey === ApiKey.Produce || apiKey === ApiKey.InitProducerId;
       if (flexible) {
         // empty tagged fields section: a single 0x00 byte, since this client never sends any.
         offset += 1;
@@ -144,6 +185,9 @@ class KafkaConnectionHandler {
       case ApiKey.Produce:
         this.handleProduce(request.correlationId, request.body);
         return;
+      case ApiKey.InitProducerId:
+        this.handleInitProducerId(request.correlationId, request.body);
+        return;
       default:
         return;
     }
@@ -159,6 +203,7 @@ class KafkaConnectionHandler {
         { apiKey: ApiKey.SaslHandshake, min: 0, max: 1 },
         { apiKey: ApiKey.SaslAuthenticate, min: 0, max: 1 },
         { apiKey: ApiKey.ApiVersions, min: 0, max: 3 },
+        { apiKey: ApiKey.InitProducerId, min: 0, max: 4 },
       ],
       (writer, v) => writer.int16(v.apiKey).int16(v.min).int16(v.max),
     );
@@ -274,6 +319,80 @@ class KafkaConnectionHandler {
     this.send(correlationId, w.build());
   }
 
+  private handleInitProducerId(correlationId: number, body: Buffer): void {
+    const r = new KafkaReader(body);
+    r.compactNullableString(); // transactional_id
+    r.int32(); // transaction_timeout_ms
+    r.int64(); // producer_id (KIP-360; ignored for a non-transactional producer)
+    r.int16(); // producer_epoch
+    r.skipTaggedFields();
+
+    const w = new KafkaWriter();
+    w.int32(0); // throttle_time_ms
+    const errorCode = this.options.initProducerIdError ?? 0;
+    w.int16(errorCode);
+    if (errorCode === 0) {
+      const producerId = this.state.nextProducerId++;
+      this.state.issuedProducerIds.push(producerId);
+      w.int64(producerId);
+      w.int16(0);
+    } else {
+      w.int64(-1n);
+      w.int16(-1);
+    }
+    w.emptyTaggedFields();
+    this.send(correlationId, w.build());
+  }
+
+  /** Applies Kafka's idempotent-producer checks to one batch and appends it if they pass. */
+  private checkAndAppend(
+    topic: string,
+    partition: number,
+    decoded: DecodedRecordBatch,
+  ): ProduceDecision {
+    const received = { topic, partition, decoded };
+    if (decoded.producerId < 0n) {
+      this.state.appendedBatches.push(received);
+      return { errorCode: 0 };
+    }
+    const key = `${decoded.producerId}:${topic}:${partition}`;
+    const lastSequence = decoded.baseSequence + decoded.records.length - 1;
+    let state = this.state.producers.get(key);
+    if (state === undefined || decoded.producerEpoch > state.epoch) {
+      if (state !== undefined && decoded.producerEpoch > state.epoch) {
+        state = undefined; // a bumped epoch starts its sequences from zero again
+      }
+      if (decoded.baseSequence !== 0) {
+        return { errorCode: OUT_OF_ORDER_SEQUENCE_NUMBER, errorMessage: 'expected sequence 0' };
+      }
+      state = { epoch: decoded.producerEpoch, lastSequence, recent: [] };
+      this.state.producers.set(key, state);
+    } else {
+      if (decoded.producerEpoch < state.epoch) {
+        return { errorCode: INVALID_PRODUCER_EPOCH };
+      }
+      const duplicate = state.recent.find(
+        (b) => b.baseSequence === decoded.baseSequence && b.lastSequence === lastSequence,
+      );
+      if (duplicate !== undefined) {
+        return this.options.duplicatesAsError === true
+          ? { errorCode: DUPLICATE_SEQUENCE_NUMBER }
+          : { errorCode: 0 };
+      }
+      if (decoded.baseSequence !== state.lastSequence + 1) {
+        return {
+          errorCode: OUT_OF_ORDER_SEQUENCE_NUMBER,
+          errorMessage: `expected sequence ${state.lastSequence + 1}, got ${decoded.baseSequence}`,
+        };
+      }
+      state.lastSequence = lastSequence;
+    }
+    state.recent.push({ baseSequence: decoded.baseSequence, lastSequence });
+    if (state.recent.length > 5) state.recent.shift();
+    this.state.appendedBatches.push(received);
+    return { errorCode: 0 };
+  }
+
   private handleProduce(correlationId: number, body: Buffer): void {
     const r = new KafkaReader(body);
     r.compactNullableString(); // transactional_id
@@ -284,6 +403,8 @@ class KafkaConnectionHandler {
       name: string;
       partitions: { index: number; decision: ProduceDecision }[];
     }[] = [];
+    let dropConnection = false;
+    const request = this.state.produceRequests++;
     for (let t = 0; t < topicCount; t++) {
       const name = r.compactString();
       const partitionCount = r.compactArrayLength();
@@ -293,15 +414,26 @@ class KafkaConnectionHandler {
         const records = r.compactNullableBytes();
         r.skipTaggedFields();
         const decoded = records === null ? undefined : decodeRecordBatch(records);
+        let decision: ProduceDecision = { errorCode: 0 };
         if (decoded !== undefined) {
-          this.receivedBatches.push({ topic: name, partition: index, decoded });
+          this.state.receivedBatches.push({ topic: name, partition: index, decoded });
+          decision = this.options.onProduce?.({
+            topic: name,
+            partition: index,
+            decoded,
+            request,
+          }) ?? { errorCode: 0 };
+          if (decision.errorCode === 0) {
+            if ('dropConnection' in decision && decision.dropConnection === true) {
+              dropConnection = true;
+            }
+            if (decoded.producerId >= 0n && acks !== -1) {
+              decision = { errorCode: INVALID_REQUIRED_ACKS };
+            } else {
+              decision = this.checkAndAppend(name, index, decoded);
+            }
+          }
         }
-        const decision: ProduceDecision =
-          decoded === undefined
-            ? { errorCode: 0 }
-            : (this.options.onProduce?.({ topic: name, partition: index, decoded }) ?? {
-                errorCode: 0,
-              });
         partitions.push({ index, decision });
       }
       r.skipTaggedFields();
@@ -309,6 +441,10 @@ class KafkaConnectionHandler {
     }
     r.skipTaggedFields();
 
+    if (dropConnection) {
+      this.socket.destroy();
+      return;
+    }
     if (acks === 0) return; // no response for fire-and-forget
 
     const w = new KafkaWriter();
@@ -337,7 +473,7 @@ class KafkaConnectionHandler {
 export class FakeKafkaBroker {
   private readonly server: net.Server;
   private _port = 0;
-  readonly receivedBatches: ReceivedProduceBatch[] = [];
+  private readonly state = new BrokerState();
   readonly nodeId: number;
 
   constructor(private readonly options: FakeKafkaBrokerOptions = {}) {
@@ -348,7 +484,7 @@ export class FakeKafkaBroker {
         this.options,
         this.nodeId,
         this._port,
-        this.receivedBatches,
+        this.state,
       );
       handler.run().catch(() => undefined);
     });
@@ -363,6 +499,22 @@ export class FakeKafkaBroker {
 
   get port(): number {
     return this._port;
+  }
+
+  /** Every batch that arrived in a `Produce` request, including ones rejected or recognised as
+   * duplicates. */
+  get receivedBatches(): readonly ReceivedProduceBatch[] {
+    return this.state.receivedBatches;
+  }
+
+  /** Only the batches the broker actually appended to its (notional) log: what a consumer would
+   * read. A correct idempotent producer never makes this contain the same record twice. */
+  get appendedBatches(): readonly ReceivedProduceBatch[] {
+    return this.state.appendedBatches;
+  }
+
+  get issuedProducerIds(): readonly bigint[] {
+    return this.state.issuedProducerIds;
   }
 
   async close(): Promise<void> {

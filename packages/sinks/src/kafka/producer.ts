@@ -1,13 +1,15 @@
 import type { Event } from '@ferrule/core';
 import type { TlsOptions } from '../fragments.js';
 import { KafkaBrokerConnection } from './connection.js';
-import { KafkaError, KafkaProtocolError } from './errors.js';
+import { KafkaError, KafkaErrorCode, KafkaProtocolError } from './errors.js';
 import { murmur2Partition, RoundRobinPartitioner, StickyPartitioner } from './murmur2.js';
 import { encodeRecordBatch, type CompressionType, type RecordHeaderInput } from './record-batch.js';
 import {
   ApiKey,
+  decodeInitProducerIdResponseV4,
   decodeMetadataResponseV9,
   decodeProduceResponseV9,
+  encodeInitProducerIdRequestV4,
   encodeMetadataRequestV9,
   encodeProduceRequestV9,
   type ProducePartitionRequest,
@@ -33,6 +35,13 @@ export interface KafkaProducerOptions {
   /** Partition strategy for records with no key. Keyed records always use the murmur2 default
    * partitioner (matching the classic Java client). Default `sticky`. */
   readonly partitioner?: 'round_robin' | 'sticky';
+  /**
+   * Idempotent production (KIP-98): obtain a producer id with `InitProducerId` and stamp every
+   * RecordBatch with it plus a per-partition sequence number, so a batch resent after a lost
+   * response is recognised by the broker and acknowledged without being appended again. Requires
+   * `acks: -1`. Default `true`.
+   */
+  readonly idempotent?: boolean;
 }
 
 export interface OutgoingRecord {
@@ -46,6 +55,16 @@ export interface OutgoingRecord {
   readonly event: Event;
 }
 
+/** One RecordBatch as it went on the wire, kept so a retry resends byte-identical content: with
+ * idempotence that means the same producer id, epoch and base sequence, which is exactly what lets
+ * the broker tell a resend from new data. */
+interface EncodedGroup {
+  readonly bytes: Buffer;
+  readonly producerId: bigint;
+  readonly producerEpoch: number;
+  readonly baseSequence: number;
+}
+
 /** The records of one batch bound for one topic-partition, settled together by that partition's
  * response. */
 interface PartitionGroup {
@@ -55,6 +74,24 @@ interface PartitionGroup {
   /** Set once the partition has answered conclusively (accepted, or a permanent error): the group
    * is never sent again. */
   settled: boolean;
+  /** Built on first send and reused by every retry; cleared when the broker reports that our
+   * producer state is stale, so the next attempt re-stamps the group under a fresh producer id. */
+  encoded: EncodedGroup | undefined;
+  /** The producer-state error the broker answered with in the latest round, if any: the group was
+   * not appended and must be re-stamped under a fresh producer id before it is resent. */
+  resetError: KafkaError | undefined;
+}
+
+interface ProducerState {
+  readonly id: bigint;
+  readonly epoch: number;
+}
+
+/** Sequence numbers are `int32` and wrap past `Integer.MAX_VALUE`, matching
+ * `DefaultRecordBatch.incrementSequence` in the Java client. */
+function incrementSequence(sequence: number, increment: number): number {
+  if (sequence > 0x7fffffff - increment) return increment - (0x7fffffff - sequence) - 1;
+  return sequence + increment;
 }
 
 /**
@@ -74,6 +111,30 @@ export class ProduceBatch {
     if (this.groups === undefined) return this.records;
     return this.groups.filter((g) => !g.settled).flatMap((g) => g.records);
   }
+}
+
+/** The idempotent-producer coordinates each RecordBatch of a {@link ProduceBatch} was stamped
+ * with, for tests and diagnostics. */
+export interface StampedGroup {
+  readonly topic: string;
+  readonly partition: number;
+  readonly producerId: bigint;
+  readonly producerEpoch: number;
+  readonly baseSequence: number;
+  readonly recordCount: number;
+}
+
+export function stampedGroups(batch: ProduceBatch): StampedGroup[] {
+  return (batch.groups ?? [])
+    .filter((g) => g.encoded !== undefined)
+    .map((g) => ({
+      topic: g.topic,
+      partition: g.partition,
+      producerId: g.encoded!.producerId,
+      producerEpoch: g.encoded!.producerEpoch,
+      baseSequence: g.encoded!.baseSequence,
+      recordCount: g.records.length,
+    }));
 }
 
 /**
@@ -98,12 +159,66 @@ export class KafkaProducer {
   private readonly brokerAddresses = new Map<number, BrokerAddress>();
   private readonly roundRobin = new RoundRobinPartitioner();
   private readonly sticky = new StickyPartitioner();
+  private readonly idempotent: boolean;
+  private producerState: ProducerState | undefined;
+  private readonly nextSequence = new Map<string, number>(); // "topic\0partition" -> sequence
 
   constructor(private readonly options: KafkaProducerOptions) {
     if (options.bootstrapBrokers.length === 0) {
       throw new KafkaProtocolError('at least one bootstrap broker is required');
     }
+    this.idempotent = options.idempotent ?? true;
+    if (this.idempotent && (options.acks ?? -1) !== -1) {
+      throw new KafkaProtocolError(
+        'idempotent production requires acks=-1 (the broker rejects other settings); set idempotent: false to use acks 0 or 1',
+      );
+    }
     this.bootstrapAddrs = [...options.bootstrapBrokers];
+  }
+
+  /** The producer id and epoch currently in use, once `InitProducerId` has succeeded. */
+  get producerIdentity(): ProducerState | undefined {
+    return this.producerState;
+  }
+
+  /** Obtains a producer id from any reachable bootstrap broker (an `InitProducerId` with no
+   * transactional id always allocates a fresh one), and restarts every partition's sequence
+   * counter from zero, as the broker expects of a new producer id. */
+  private async ensureProducerId(): Promise<void> {
+    if (this.producerState !== undefined) return;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < this.bootstrapAddrs.length; attempt++) {
+      const addr = this.nextBootstrap();
+      try {
+        const conn = await this.getOrConnect(addr);
+        const body = await conn.sendRequest(
+          ApiKey.InitProducerId,
+          4,
+          true,
+          encodeInitProducerIdRequestV4({
+            transactionalId: null,
+            transactionTimeoutMs: 60_000,
+            producerId: -1n,
+            producerEpoch: -1,
+          }),
+        );
+        const response = decodeInitProducerIdResponseV4(body);
+        if (response.errorCode !== 0) {
+          throw new KafkaError(response.errorCode, 'InitProducerId failed');
+        }
+        this.producerState = { id: response.producerId, epoch: response.producerEpoch };
+        this.nextSequence.clear();
+        return;
+      } catch (error) {
+        // A broker-reported error (e.g. CLUSTER_AUTHORIZATION_FAILED) is the answer, not a
+        // connectivity problem; the next bootstrap broker would say the same.
+        if (error instanceof KafkaError) throw error;
+        lastError = error;
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new KafkaProtocolError('failed to obtain a Kafka producer id');
   }
 
   private async getOrConnect(addr: BrokerAddress): Promise<KafkaBrokerConnection> {
@@ -215,11 +330,41 @@ export class KafkaProducer {
 
     const unsettled = batch.groups.filter((g) => !g.settled);
     if (unsettled.length === 0) return;
-    await this.ensureMetadata([...new Set(unsettled.map((g) => g.topic))]);
+    if (this.idempotent) await this.ensureProducerId();
 
+    const retryableErrors: KafkaError[] = [];
+    await this.sendRound(unsettled, retryableErrors);
+
+    // Groups the broker refused for stale producer state were not appended. Re-stamp them under a
+    // fresh producer id and resend once right away, as the Java client does; if that fails too,
+    // the caller's backoff takes over.
+    const reset = unsettled.filter((g) => !g.settled && g.resetError !== undefined);
+    if (reset.length > 0) {
+      for (const g of reset) g.resetError = undefined;
+      await this.ensureProducerId();
+      await this.sendRound(reset, retryableErrors);
+    }
+
+    if (unsettled.some((g) => !g.settled)) {
+      throw (
+        retryableErrors[0] ??
+        unsettled.find((g) => g.resetError !== undefined)?.resetError ??
+        new KafkaError(-1, 'produce did not settle every partition')
+      );
+    }
+  }
+
+  /** One `Produce` round over `groups`: resolves leaders, issues one request per leader, and
+   * settles what the responses settle. Retryable per-partition and connection errors are
+   * collected into `retryableErrors`; producer-state errors are recorded on their group. */
+  private async sendRound(
+    groups: readonly PartitionGroup[],
+    retryableErrors: KafkaError[],
+  ): Promise<void> {
+    await this.ensureMetadata([...new Set(groups.map((g) => g.topic))]);
     const byLeader = new Map<number, PartitionGroup[]>();
     const leaderless: PartitionGroup[] = [];
-    for (const group of unsettled) {
+    for (const group of groups) {
       const leaderId = this.topicLeaders.get(group.topic)?.get(group.partition);
       if (leaderId === undefined || leaderId < 0) {
         leaderless.push(group);
@@ -230,23 +375,20 @@ export class KafkaProducer {
       else list.push(group);
     }
 
-    const retryableErrors: KafkaError[] = [];
     if (leaderless.length > 0) {
       for (const topic of new Set(leaderless.map((g) => g.topic))) this.invalidateTopic(topic);
       retryableErrors.push(new KafkaError(-1, 'no known leader for one or more partitions'));
     }
 
     await Promise.all(
-      [...byLeader.entries()].map(([nodeId, groups]) =>
-        this.sendToLeader(nodeId, groups, retryableErrors).catch((error: unknown) => {
+      [...byLeader.entries()].map(([nodeId, leaderGroups]) =>
+        this.sendToLeader(nodeId, leaderGroups, retryableErrors).catch((error: unknown) => {
           retryableErrors.push(
             error instanceof KafkaError ? error : new KafkaError(-1, String(error)),
           );
         }),
       ),
     );
-
-    if (retryableErrors.length > 0) throw retryableErrors[0]!;
   }
 
   /** Resolves every record's partition (fetching metadata first if needed) and groups the records
@@ -262,12 +404,19 @@ export class KafkaProducer {
       const partition = this.partitionFor(record.topic, record.key);
       const key = `${record.topic}\u0000${partition}`;
       const group = groups.get(key);
-      if (group === undefined)
+      if (group === undefined) {
         groups.set(key, { topic: record.topic, partition, records: [record] });
-      else group.records.push(record);
+      } else {
+        group.records.push(record);
+      }
     }
     for (const topic of topics) this.sticky.onBatchComplete(topic);
-    return [...groups.values()].map((g) => ({ ...g, settled: false }));
+    return [...groups.values()].map((g) => ({
+      ...g,
+      settled: false,
+      encoded: undefined,
+      resetError: undefined,
+    }));
   }
 
   private invalidateTopic(topic: string): void {
@@ -294,17 +443,9 @@ export class KafkaProducer {
     const byTopic = new Map<string, ProducePartitionRequest[]>();
     const byKey = new Map<string, PartitionGroup>();
     for (const group of groups) {
-      const batch = encodeRecordBatch(
-        group.records.map((r) => ({
-          key: r.key,
-          value: r.value,
-          headers: r.headers,
-          timestamp: r.timestamp,
-        })),
-        { compression: this.options.compression ?? 'none' },
-      );
+      if (group.encoded === undefined) group.encoded = this.encodeGroup(group);
       const partitions = byTopic.get(group.topic);
-      const request = { index: group.partition, records: batch };
+      const request = { index: group.partition, records: group.encoded.bytes };
       if (partitions === undefined) byTopic.set(group.topic, [request]);
       else partitions.push(request);
       byKey.set(`${group.topic}\u0000${group.partition}`, group);
@@ -336,12 +477,56 @@ export class KafkaProducer {
           this.settle(group, 'delivered');
           continue;
         }
+        if (partition.errorCode === KafkaErrorCode.DUPLICATE_SEQUENCE_NUMBER) {
+          // The broker already has this exact batch (our earlier response was lost): delivered.
+          this.settle(group, 'delivered');
+          continue;
+        }
         const error = new KafkaError(partition.errorCode, partition.errorMessage ?? undefined);
         if (error.needsMetadataRefresh) this.invalidateTopic(topic.name);
+        if (error.needsProducerReset) {
+          // Nothing was appended; drop the stale stamp so the group is re-encoded under a fresh
+          // producer id. Groups still carrying the old id are unaffected: the broker keeps state
+          // per producer id, so their eventual resend is still judged against it.
+          group.encoded = undefined;
+          group.resetError = error;
+          this.producerState = undefined;
+          continue;
+        }
         if (error.isRetryable) retryableErrors.push(error);
         else this.settle(group, 'rejected');
       }
     }
+  }
+
+  /** Encodes a group's RecordBatch, stamping it with the current producer id and claiming the
+   * next run of sequence numbers for its partition when idempotence is on. */
+  private encodeGroup(group: PartitionGroup): EncodedGroup {
+    const records = group.records.map((r) => ({
+      key: r.key,
+      value: r.value,
+      headers: r.headers,
+      timestamp: r.timestamp,
+    }));
+    const compression = this.options.compression ?? 'none';
+    if (!this.idempotent || this.producerState === undefined) {
+      return {
+        bytes: encodeRecordBatch(records, { compression }),
+        producerId: -1n,
+        producerEpoch: -1,
+        baseSequence: -1,
+      };
+    }
+    const key = `${group.topic}\u0000${group.partition}`;
+    const baseSequence = this.nextSequence.get(key) ?? 0;
+    this.nextSequence.set(key, incrementSequence(baseSequence, records.length));
+    const { id: producerId, epoch: producerEpoch } = this.producerState;
+    return {
+      bytes: encodeRecordBatch(records, { compression, producerId, producerEpoch, baseSequence }),
+      producerId,
+      producerEpoch,
+      baseSequence,
+    };
   }
 
   /** Connects to any one reachable bootstrap broker and asks its supported API versions, as a

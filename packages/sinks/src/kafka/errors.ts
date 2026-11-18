@@ -22,8 +22,12 @@ export const KafkaErrorCode = {
   CLUSTER_AUTHORIZATION_FAILED: 31,
   UNSUPPORTED_SASL_MECHANISM: 33,
   ILLEGAL_SASL_STATE: 34,
-  SASL_AUTHENTICATION_FAILED: 58,
+  OUT_OF_ORDER_SEQUENCE_NUMBER: 45,
+  DUPLICATE_SEQUENCE_NUMBER: 46,
+  INVALID_PRODUCER_EPOCH: 47,
   KAFKA_STORAGE_ERROR: 56,
+  SASL_AUTHENTICATION_FAILED: 58,
+  UNKNOWN_PRODUCER_ID: 59,
 } as const;
 
 /**
@@ -44,6 +48,9 @@ const RETRIABLE_CODES: ReadonlySet<number> = new Set([
   KafkaErrorCode.NOT_ENOUGH_REPLICAS_AFTER_APPEND,
   KafkaErrorCode.KAFKA_STORAGE_ERROR,
   KafkaErrorCode.UNKNOWN_SERVER_ERROR,
+  KafkaErrorCode.OUT_OF_ORDER_SEQUENCE_NUMBER,
+  KafkaErrorCode.INVALID_PRODUCER_EPOCH,
+  KafkaErrorCode.UNKNOWN_PRODUCER_ID,
 ]);
 
 /** Error codes that specifically mean "the metadata this client is using is stale" and so should
@@ -54,12 +61,28 @@ const STALE_METADATA_CODES: ReadonlySet<number> = new Set([
   KafkaErrorCode.NOT_LEADER_OR_FOLLOWER,
 ]);
 
+/**
+ * Error codes meaning the broker's view of this producer's id/epoch/sequence no longer matches
+ * ours, so the batch was *not* appended and the producer must obtain a fresh producer id and
+ * re-stamp the batch before retrying. (An idempotent producer with no transactional id cannot
+ * bump its own epoch; a new `InitProducerId` is how it resets.)
+ */
+const PRODUCER_RESET_CODES: ReadonlySet<number> = new Set([
+  KafkaErrorCode.OUT_OF_ORDER_SEQUENCE_NUMBER,
+  KafkaErrorCode.INVALID_PRODUCER_EPOCH,
+  KafkaErrorCode.UNKNOWN_PRODUCER_ID,
+]);
+
 export function isRetriableErrorCode(code: number): boolean {
   return RETRIABLE_CODES.has(code);
 }
 
 export function needsMetadataRefresh(code: number): boolean {
   return STALE_METADATA_CODES.has(code);
+}
+
+export function needsProducerReset(code: number): boolean {
+  return PRODUCER_RESET_CODES.has(code);
 }
 
 function errorCodeName(code: number): string {
@@ -88,6 +111,10 @@ export class KafkaError extends FerruleError {
 
   get needsMetadataRefresh(): boolean {
     return needsMetadataRefresh(this.errorCode);
+  }
+
+  get needsProducerReset(): boolean {
+    return needsProducerReset(this.errorCode);
   }
 }
 

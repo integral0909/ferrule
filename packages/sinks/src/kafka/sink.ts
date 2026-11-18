@@ -19,44 +19,60 @@ import {
 } from '../fragments.js';
 import { compileTemplate, renderTemplate, type CompiledTemplate } from '../stream/template.js';
 import { KafkaError } from './errors.js';
-import { KafkaProducer, type OutgoingRecord } from './producer.js';
+import { KafkaProducer, type OutgoingRecord, type ProduceBatch } from './producer.js';
 
-export const kafkaSinkOptionsSchema = s.object({
-  /** Bootstrap broker addresses (`host:port`); metadata discovers the rest of the cluster. */
-  brokers: s.array(s.socketAddress(), { minItems: 1 }),
-  client_id: s.string().default('ferrule'),
-  tls: tlsSchema,
-  sasl: s
-    .object({
-      mechanism: s.enum(['PLAIN', 'SCRAM-SHA-256']),
-      username: s.string(),
-      password: s.string().secret(),
-    })
-    .optional(),
-  /** Topic template. Supports `{{ field.path }}`. */
-  topic: s.string().nonEmpty(),
-  /** Key template; unset means unkeyed records (partitioned by `partitioner`). */
-  key: s.string().optional(),
-  /** Header name -> value template. */
-  headers: s.record(s.string()).optional(),
-  /** Codec used to encode each event. Default `json`. */
-  encoding: encodingSchema('json'),
-  acks: s.enum(['0', '1', '-1']).default('-1'),
-  compression: s.enum(['none', 'gzip']).default('none'),
-  /** Partition strategy for unkeyed records. Default `sticky` (KIP-480). */
-  partitioner: s.enum(['round_robin', 'sticky']).default('sticky'),
-  connect_timeout: s.duration().default(10_000),
-  request_timeout: s.duration().default(30_000),
-  max_in_flight_requests_per_connection: s.integer({ min: 1 }).default(5),
-  /** Groups events into batches before producing them. Default: 500 events / 1MiB / 1s. */
-  batch: batchSchema,
-  /** Retry backoff for produce failures. Default 250ms/30s. */
-  retry: retrySchema,
-});
+export const kafkaSinkOptionsSchema = s
+  .object({
+    /** Bootstrap broker addresses (`host:port`); metadata discovers the rest of the cluster. */
+    brokers: s.array(s.socketAddress(), { minItems: 1 }),
+    client_id: s.string().default('ferrule'),
+    tls: tlsSchema,
+    sasl: s
+      .object({
+        mechanism: s.enum(['PLAIN', 'SCRAM-SHA-256']),
+        username: s.string(),
+        password: s.string().secret(),
+      })
+      .optional(),
+    /** Topic template. Supports `{{ field.path }}`. */
+    topic: s.string().nonEmpty(),
+    /** Key template; unset means unkeyed records (partitioned by `partitioner`). */
+    key: s.string().optional(),
+    /** Header name -> value template. */
+    headers: s.record(s.string()).optional(),
+    /** Codec used to encode each event. Default `json`. */
+    encoding: encodingSchema('json'),
+    acks: s.enum(['0', '1', '-1']).default('-1'),
+    /** Idempotent production: a producer id and per-partition sequence numbers let the broker
+     * discard a batch resent after a lost response instead of appending it twice. Requires
+     * `acks: "-1"`. */
+    idempotent: s
+      .boolean()
+      .default(true)
+      .describe(
+        'Stamp every batch with a producer id and sequence number so retries after a partial ' +
+          'failure or lost response never duplicate records. Requires acks "-1".',
+      ),
+    compression: s.enum(['none', 'gzip']).default('none'),
+    /** Partition strategy for unkeyed records. Default `sticky` (KIP-480). */
+    partitioner: s.enum(['round_robin', 'sticky']).default('sticky'),
+    connect_timeout: s.duration().default(10_000),
+    request_timeout: s.duration().default(30_000),
+    max_in_flight_requests_per_connection: s.integer({ min: 1 }).default(5),
+    /** Groups events into batches before producing them. Default: 500 events / 1MiB / 1s. */
+    batch: batchSchema,
+    /** Retry backoff for produce failures. Default 250ms/30s. */
+    retry: retrySchema,
+  })
+  .refine(
+    (v) => !v.idempotent || v.acks === '-1',
+    'idempotent production requires acks "-1" (the broker rejects idempotent batches sent with ' +
+      'acks 0 or 1); set idempotent: false to use another acks setting',
+  );
 
 export type KafkaSinkOptions = Infer<typeof kafkaSinkOptionsSchema>;
 
-function buildProducer(options: KafkaSinkOptions): KafkaProducer {
+function buildProducer(options: KafkaSinkOptions, ctx?: SinkContext): KafkaProducer {
   return new KafkaProducer({
     bootstrapBrokers: options.brokers,
     clientId: options.client_id,
@@ -68,6 +84,20 @@ function buildProducer(options: KafkaSinkOptions): KafkaProducer {
     requestTimeoutMs: options.request_timeout,
     compression: options.compression,
     partitioner: options.partitioner,
+    idempotent: options.idempotent,
+    ...(ctx !== undefined
+      ? {
+          onPermanentError: (error: KafkaError, rejected) => {
+            ctx.logger.error('kafka sink: partition permanently rejected a batch of records', {
+              code: error.code,
+              error: error.message,
+              topic: rejected.topic,
+              partition: rejected.partition,
+              records: rejected.recordCount,
+            });
+          },
+        }
+      : {}),
   });
 }
 
@@ -135,7 +165,7 @@ export function createKafkaSink(
 
   return {
     async run(ctx: SinkContext): Promise<void> {
-      const producer = buildProducer(options);
+      const producer = buildProducer(options, ctx);
       const encodeBatch = makeEncodeBatch(
         options,
         encoder,
@@ -149,15 +179,25 @@ export function createKafkaSink(
           maxEvents: options.batch?.max_events ?? 500,
           maxBytes: options.batch?.max_size ?? 1024 * 1024,
           timeoutMs: options.batch?.timeout ?? 1_000,
-          encode: encodeBatch,
-          send: async (outgoing: OutgoingRecord[]) => {
+          // The encoded payload is a ProduceBatch handle, not a plain record array: the retry
+          // loop passes the same payload to every attempt, and the producer uses it to resend
+          // only the partitions that have not been accepted yet.
+          encode: (events: Event[]): ProduceBatch => producer.prepare(encodeBatch(events)),
+          send: async (batch: ProduceBatch) => {
             try {
-              await producer.send(outgoing);
+              await producer.send(batch);
             } catch (error) {
               if (error instanceof KafkaError) {
                 if (error.isRetryable) {
                   throw SinkError.retryable('E_KAFKA_RETRYABLE', error.message, { cause: error });
                 }
+                // The batched-sink loop finishes the batch `rejected` without logging, so this is
+                // the only trace of a permanent failure such as a missing IDEMPOTENT_WRITE ACL.
+                ctx.logger.error('kafka sink: batch rejected on a permanent broker error', {
+                  code: error.code,
+                  error: error.message,
+                  records: batch.pending.length,
+                });
                 throw SinkError.permanent('E_KAFKA_PERMANENT', error.message, error);
               }
               throw SinkError.retryable(
@@ -190,7 +230,7 @@ export const kafkaSink = defineSink({
   kind: 'sink',
   type: 'kafka',
   description:
-    'Produces events to Kafka via a hand-written protocol client (RecordBatch v2, murmur2 partitioning).',
+    'Produces events to Kafka via a hand-written protocol client (RecordBatch v2, murmur2 partitioning, idempotent by default).',
   options: kafkaSinkOptionsSchema,
   accepts: ['log', 'metric', 'span'],
   examples: [

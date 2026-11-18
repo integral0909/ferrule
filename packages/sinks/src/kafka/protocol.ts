@@ -7,7 +7,8 @@ import { KafkaReader, KafkaWriter } from './primitives.js';
  * before either side knows the other speaks flexible headers, and which never got a flexible
  * SASL version widely deployed. `Metadata` and `Produce` are implemented at flexible versions (9)
  * so the compact string/array and tagged-fields primitives are genuinely exercised on the wire,
- * not just unit-tested in isolation.
+ * not just unit-tested in isolation; `InitProducerId` is at v4 (flexible, KIP-360 fields), which
+ * every broker new enough for `Produce` v9 supports.
  */
 
 export const ApiKey = {
@@ -15,6 +16,7 @@ export const ApiKey = {
   Metadata: 3,
   SaslHandshake: 17,
   ApiVersions: 18,
+  InitProducerId: 22,
   SaslAuthenticate: 36,
 } as const;
 
@@ -254,6 +256,47 @@ export function decodeProduceResponseV9(body: Buffer): ProduceResponse {
   const throttleTimeMs = r.int32();
   r.skipTaggedFields();
   return { topics, throttleTimeMs };
+}
+
+// ---------------------------------------------------------------------------------------------
+// InitProducerId (key 22, v4; flexible request/response headers and bodies)
+// ---------------------------------------------------------------------------------------------
+
+export interface InitProducerIdRequest {
+  /** `null` for an idempotent-only (non-transactional) producer. */
+  readonly transactionalId: string | null;
+  /** Only meaningful with a transactional id; the broker ignores it otherwise. */
+  readonly transactionTimeoutMs: number;
+  /** The producer's current id and epoch (KIP-360), or `-1`/`-1` to allocate a fresh id. */
+  readonly producerId: bigint;
+  readonly producerEpoch: number;
+}
+
+export interface InitProducerIdResponse {
+  readonly throttleTimeMs: number;
+  readonly errorCode: number;
+  readonly producerId: bigint;
+  readonly producerEpoch: number;
+}
+
+export function encodeInitProducerIdRequestV4(request: InitProducerIdRequest): Buffer {
+  const w = new KafkaWriter();
+  w.compactNullableString(request.transactionalId);
+  w.int32(request.transactionTimeoutMs);
+  w.int64(request.producerId);
+  w.int16(request.producerEpoch);
+  w.emptyTaggedFields();
+  return w.build();
+}
+
+export function decodeInitProducerIdResponseV4(body: Buffer): InitProducerIdResponse {
+  const r = new KafkaReader(body);
+  const throttleTimeMs = r.int32();
+  const errorCode = r.int16();
+  const producerId = r.int64();
+  const producerEpoch = r.int16();
+  r.skipTaggedFields();
+  return { throttleTimeMs, errorCode, producerId, producerEpoch };
 }
 
 // ---------------------------------------------------------------------------------------------

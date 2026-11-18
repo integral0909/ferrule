@@ -99,8 +99,10 @@ export class KafkaBrokerConnection {
     flexible: boolean,
     body: Buffer,
   ): Promise<Buffer> {
+    this.throwIfFailed();
     await this.acquireInFlightSlot();
     try {
+      this.throwIfFailed(); // the socket may have died while we waited for a slot
       const { frame, correlationId } = this.buildFrame(apiKey, apiVersion, flexible, body);
       const responsePromise = new Promise<Buffer>((resolve, reject) => {
         this.pending.set(correlationId, { resolve, reject });
@@ -120,8 +122,15 @@ export class KafkaBrokerConnection {
     flexible: boolean,
     body: Buffer,
   ): Promise<void> {
+    this.throwIfFailed();
     const { frame } = this.buildFrame(apiKey, apiVersion, flexible, body);
     await this.write(frame);
+  }
+
+  /** A failed connection (socket error, or dropped by the broker) never carries another request:
+   * `fail` already rejected everything in flight, and a new request would otherwise hang. */
+  private throwIfFailed(): void {
+    if (this.terminalError !== undefined) throw this.terminalError;
   }
 
   private buildFrame(
@@ -214,8 +223,11 @@ export class KafkaBrokerConnection {
     });
   }
 
+  /** True once this connection can no longer carry requests: closed locally, or failed (the
+   * socket errored or the broker dropped it). A failed connection is never reused; callers open a
+   * new one. */
   get isClosed(): boolean {
-    return this.closed;
+    return this.closed || this.terminalError !== undefined;
   }
 }
 

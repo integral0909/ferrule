@@ -98,11 +98,14 @@ describe('ferrule tap / ferrule top (against a real running pipeline + admin ser
     });
     const runPromise = runCli(env);
     await waitUntil(() => env.stdoutText().includes('overall: running'));
-    // Let at least one more refresh happen so a rate can be computed from two samples.
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Wait for the second render itself, rather than for 60ms of wall clock and hoping one
+    // happened: each refresh is an HTTP round trip to the admin server in this same thread, and
+    // the SIGTERM below ends the refresh loop, so a render that arrives late cannot rescue the
+    // assertion. Two renders are what lets `top` compute a rate from two samples.
+    await waitUntil(() => env.stdoutText().split('overall: running').length > 2);
     env.fakeSignals.emit('SIGTERM');
     const code = await runPromise;
     expect(code).toBe(EXIT_OK);
     expect(env.stdoutText().split('overall: running').length).toBeGreaterThan(2);
-  });
+  }, 15_000); // real HTTP refresh loop; headroom over waitUntil's own budget under parallel load
 });

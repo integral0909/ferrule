@@ -13,10 +13,16 @@ async function listenAndGetPort(
   logs: ReturnType<typeof testBuildContext>['logs'],
 ): Promise<{ run: Promise<void>; port: number }> {
   const run = sink.run(ctx);
-  await vi.waitFor(() => {
-    const record = logs.find((l) => l.message.includes('listening'));
-    if (record === undefined) throw new Error('not listening yet');
-  });
+  await vi.waitFor(
+    () => {
+      const record = logs.find((l) => l.message.includes('listening'));
+      if (record === undefined) throw new Error('not listening yet');
+    },
+    // vitest's default budget here is 1s, the tightest waiter in the suite, for a real HTTP
+    // server binding a port. It polls, so starvation should only make it slower — give it room
+    // to actually be slower instead of failing a test whose subject isn't timing at all.
+    { timeout: 10_000 },
+  );
   const record = logs.find((l) => l.message.includes('listening'))!;
   return { run, port: record.fields['port'] as number };
 }

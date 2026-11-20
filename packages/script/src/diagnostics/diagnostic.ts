@@ -291,7 +291,7 @@ export const DIAGNOSTIC_CATALOG: readonly DiagnosticCatalogEntry[] = [
     'E312',
     'error',
     'read-only metric field',
-    "A metric script assigned to or removed `.type`. A metric's value type determines the shape of its value and cannot be changed in place.",
+    "A metric script assigned to or removed a read-only field: `.type` (a metric's value type determines the shape of its value) or `.scale` (an exponential histogram's scale defines what every bucket index means). Neither can be changed in place.",
   ),
   entry(
     'E313',

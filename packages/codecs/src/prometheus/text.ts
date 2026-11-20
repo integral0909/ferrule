@@ -1,5 +1,6 @@
 import {
   createMetadata,
+  exponentialToExplicitHistogram,
   LimitExceededError,
   MetricEvent,
   Timestamp,
@@ -472,6 +473,7 @@ function prometheusType(type: MetricValue['type']): PrometheusMetricType {
     case 'counter':
       return 'counter';
     case 'histogram':
+    case 'exponential_histogram':
       return 'histogram';
     case 'summary':
       return 'summary';
@@ -496,6 +498,14 @@ function encodeSample(
       return [`${name}${labelText} ${formatValue(event.value.value)}${suffix}`];
     case 'histogram':
       return encodeHistogramSample(event.value, name, event.series.tags, suffix);
+    case 'exponential_histogram':
+      // No exponential form in the text format: emitted as explicit buckets (lossy).
+      return encodeHistogramSample(
+        exponentialToExplicitHistogram(event.value),
+        name,
+        event.series.tags,
+        suffix,
+      );
     case 'summary':
       return encodeSummarySample(event.value, name, event.series.tags, suffix);
     case 'set':

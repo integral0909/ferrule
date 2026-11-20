@@ -1,9 +1,11 @@
 import {
   addMetricValues,
   cloneMetricValue,
+  exponentialToExplicitHistogram,
   FerruleError,
   seriesKey,
   type MetricEvent,
+  type MetricSeries,
   type MetricValue,
 } from '@ferrule/core';
 import { ProtoWriter } from '@ferrule/codecs';
@@ -87,6 +89,10 @@ export function expandMetricToSeries(
 ): RemoteWriteSeries[] {
   const name = event.series.name;
   const tags = event.series.tags;
+  // Remote write is sent as classic `_bucket` series, so exponential histograms are converted
+  // here, after accumulation (which merges them across scales). Throws `ValueTypeError` when a
+  // boundary overflows a double. Lossy; Prometheus native histograms would not be.
+  if (value.type === 'exponential_histogram') value = exponentialToExplicitHistogram(value);
   switch (value.type) {
     case 'counter':
     case 'gauge':
@@ -179,6 +185,11 @@ export class MetricAccumulator {
     const value = combined ?? event.value;
     this.state.set(key, { value: cloneMetricValue(value), lastWallMs: nowMs });
     return value;
+  }
+
+  /** Drops any accumulated state for `series`, so its next observation starts afresh. */
+  forget(series: MetricSeries): void {
+    this.state.delete(seriesKey(series));
   }
 
   /** Series keys not observed within `staleBoundMs` of `nowMs`, removing them from tracked state.

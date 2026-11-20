@@ -1,8 +1,8 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import type { MetricEvent } from '@ferrule/core';
+import type { MetricEvent, MetricKind } from '@ferrule/core';
 import { aggregateTransform } from '@ferrule/operators';
-import { buildTransform, counterMetric, gaugeMetric, sealedBatch } from './helpers.js';
+import { buildTransform, counterMetric, gaugeMetric, metricEvent, sealedBatch } from './helpers.js';
 
 describe('aggregate', () => {
   it('sums incremental counters for the same series within a window', async () => {
@@ -85,6 +85,65 @@ describe('aggregate', () => {
     );
   });
 
+  it('merges incremental exponential histograms at different scales within a window', async () => {
+    const { transform, harness } = await buildTransform(aggregateTransform, { interval: 1000 });
+    transform.process(
+      [
+        // Scale 2 indices 0..3 all fall in scale-0 bucket 0, i.e. (1, 2].
+        exponentialMetric('incremental', 2, { offset: 0, counts: [1, 1, 1, 1] }, 5),
+        exponentialMetric('incremental', 0, { offset: 0, counts: [2, 3] }, 7),
+        exponentialMetric('incremental', 1, { offset: 2, counts: [4] }, 9),
+      ],
+      harness.out,
+    );
+    transform.tick!(harness.clock.now(), harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    const out = harness.pushed[0]!.event as MetricEvent;
+    expect(out.metricKind).toBe('incremental');
+    expect(out.value).toEqual({
+      type: 'exponential_histogram',
+      scale: 0,
+      zeroCount: 0,
+      zeroThreshold: 0,
+      // Bucket 0: 4 (from scale 2) + 2; bucket 1: 3 + 4 (scale-1 index 2 → floor(2 / 2) = 1).
+      positive: { offset: 0, counts: [6, 7] },
+      negative: { offset: 0, counts: [] },
+      count: 13,
+      sum: 21,
+    });
+  });
+
+  it('convert_absolute_to_incremental deltas a cumulative exponential series that downscaled', async () => {
+    const { transform, harness } = await buildTransform(aggregateTransform, {
+      interval: 1000,
+      convert_absolute_to_incremental: true,
+    });
+    transform.process(
+      [exponentialMetric('absolute', 1, { offset: 0, counts: [1, 2] }, 3)],
+      harness.out,
+    );
+    transform.tick!(harness.clock.now(), harness.out);
+    expect(harness.pushed).toHaveLength(0); // first reading only primes the delta
+
+    // The SDK widened its range and lowered the scale: (1, 2] now holds 3 + 2 new observations.
+    transform.process(
+      [exponentialMetric('absolute', 0, { offset: 0, counts: [5, 1] }, 11)],
+      harness.out,
+    );
+    transform.tick!(harness.clock.now(), harness.out);
+    expect(harness.pushed).toHaveLength(1);
+    expect((harness.pushed[0]!.event as MetricEvent).value).toEqual({
+      type: 'exponential_histogram',
+      scale: 0,
+      zeroCount: 0,
+      zeroThreshold: 0,
+      positive: { offset: 0, counts: [2, 1] },
+      negative: { offset: 0, counts: [] },
+      count: 3,
+      sum: 8,
+    });
+  });
+
   it('the flushed aggregate carries the merged finalizers of every contributing event', async () => {
     const { transform, harness } = await buildTransform(aggregateTransform, { interval: 1000 });
     const events = [counterMetric('reqs', 1), counterMetric('reqs', 1), counterMetric('reqs', 1)];
@@ -157,4 +216,26 @@ function absoluteCounter(name: string, value: number): MetricEvent {
   const m = counterMetric(name, value);
   m.metricKind = 'absolute';
   return m;
+}
+
+function exponentialMetric(
+  kind: MetricKind,
+  scale: number,
+  positive: { offset: number; counts: number[] },
+  sum: number,
+): MetricEvent {
+  return metricEvent({
+    name: 'latency',
+    kind,
+    value: {
+      type: 'exponential_histogram',
+      scale,
+      zeroCount: 0,
+      zeroThreshold: 0,
+      positive,
+      negative: { offset: 0, counts: [] },
+      count: positive.counts.reduce((a, b) => a + b, 0),
+      sum,
+    },
+  });
 }

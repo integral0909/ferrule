@@ -90,6 +90,22 @@ function metricValuesEqual(a: MetricEvent['value'], b: MetricEvent['value']): bo
         sameNumberOrBothNaN(a.sum, bh.sum)
       );
     }
+    case 'exponential_histogram': {
+      const be = b as typeof a;
+      const sameRange = (x: typeof a.positive, y: typeof a.positive): boolean =>
+        x.offset === y.offset &&
+        x.counts.length === y.counts.length &&
+        x.counts.every((c, i) => sameNumberOrBothNaN(c, y.counts[i]));
+      return (
+        a.scale === be.scale &&
+        sameNumberOrBothNaN(a.zeroCount, be.zeroCount) &&
+        sameNumberOrBothNaN(a.zeroThreshold, be.zeroThreshold) &&
+        sameRange(a.positive, be.positive) &&
+        sameRange(a.negative, be.negative) &&
+        sameNumberOrBothNaN(a.count, be.count) &&
+        sameNumberOrBothNaN(a.sum, be.sum)
+      );
+    }
     case 'summary': {
       const bs = b as typeof a;
       if (a.quantiles.length !== bs.quantiles.length) return false;

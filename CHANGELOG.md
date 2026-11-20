@@ -40,6 +40,14 @@ All notable changes to this project are documented here. The format follows
   `object_storage`. Decompression is bounded and detects truncated frames, which `node:zlib`
   itself silently accepts. Kafka's batch decoder now also bounds gzip output. LZ4 was dropped
   from scope (#16).
+- Exponential histograms end to end (#9). `@ferrule/core` has an `exponential_histogram` metric
+  value (scale, zero count and threshold, positive/negative bucket offsets and counts) whose
+  `addMetricValues`/`subtractMetricValues` merge points at different scales by downscaling,
+  capped at 160 buckets per range. The OTLP codecs decode `ExponentialHistogram` losslessly in
+  protobuf and JSON (JSON previously dropped it) and encode it natively. Prometheus text, remote
+  write, and the exporter convert to classic buckets with `exponentialToExplicitHistogram`, only
+  after merging. `@ferrule/buffer` stores it as metric tag 6. Ferrule Script reads `.scale`
+  (read-only) and reads/writes `.count` and `.sum`.
 - `@ferrule/config`: position-aware YAML parser, interpolation, secret backends, code-frame
   diagnostics, and config diffing.
 - `@ferrule/admin`: admin HTTP API with health, topology, metrics, live tap, and reload.
@@ -50,6 +58,19 @@ All notable changes to this project are documented here. The format follows
   `repl`, `eval`, `list`, `describe`, `explain`, `generate`, `bench`, and `lsp`.
 - Generated component reference (`docs/reference/components.md`), CI on Linux, macOS, and
   Windows, CodeQL, dependency review, and Dependabot.
+
+### Fixed
+
+- OTLP metric encoding (protobuf and JSON) put delta and cumulative histograms of the same name
+  into one `Metric`, so every point took the first point's temporality. Points are now grouped by
+  kind for every shape except `summary`, which has no temporality.
+- Converting an exponential histogram to explicit buckets computed boundaries as `base^i`, which
+  rounds twice: at scale 1 the boundary 2 came out as `2.0000000000000004`, so Prometheus `le`
+  labels for the same boundary differed between scales. Boundaries are now `2^(i·2^-scale)`,
+  exact at every power of two.
+- `prometheus_exporter` and `prometheus_remote_write` reject an exponential histogram point whose
+  explicit bucket boundaries would overflow a double (only at very low scales). The exporter
+  previously would have thrown on every scrape, and remote write failed the whole batch.
 
 ### Changed
 

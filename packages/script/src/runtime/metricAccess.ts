@@ -142,6 +142,15 @@ function valueOfType<T extends MetricValue['type']>(
   return metric.value as Extract<MetricValue, { type: T }>;
 }
 
+/** Value types carrying a total `count` and `sum` of their observations. */
+const COUNT_AND_SUM_TYPES = ['histogram', 'exponential_histogram', 'summary'] as const;
+
+function hasCountAndSum(
+  value: MetricValue,
+): value is Extract<MetricValue, { type: (typeof COUNT_AND_SUM_TYPES)[number] }> {
+  return (COUNT_AND_SUM_TYPES as readonly string[]).includes(value.type);
+}
+
 const FIELDS: Readonly<Record<MetricFieldName, FieldAccess>> = {
   name: {
     get: (m) => m.series.name,
@@ -297,20 +306,20 @@ const FIELDS: Readonly<Record<MetricFieldName, FieldAccess>> = {
       target.quantiles = quantiles;
     },
   },
+  scale: {
+    // Read-only (no `set`): see `READONLY_METRIC_FIELDS`.
+    get: (m) => (m.value.type === 'exponential_histogram' ? BigInt(m.value.scale) : null),
+  },
   count: {
-    get: (m) => (m.value.type === 'histogram' || m.value.type === 'summary' ? m.value.count : null),
+    get: (m) => (hasCountAndSum(m.value) ? m.value.count : null),
     set: (m, v, span) => {
-      valueOfType(m, ['histogram', 'summary'], 'count', span).count = expectNumber(
-        'count',
-        v,
-        span,
-      );
+      valueOfType(m, COUNT_AND_SUM_TYPES, 'count', span).count = expectNumber('count', v, span);
     },
   },
   sum: {
-    get: (m) => (m.value.type === 'histogram' || m.value.type === 'summary' ? m.value.sum : null),
+    get: (m) => (hasCountAndSum(m.value) ? m.value.sum : null),
     set: (m, v, span) => {
-      valueOfType(m, ['histogram', 'summary'], 'sum', span).sum = expectNumber('sum', v, span);
+      valueOfType(m, COUNT_AND_SUM_TYPES, 'sum', span).sum = expectNumber('sum', v, span);
     },
   },
 };

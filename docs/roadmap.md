@@ -27,8 +27,9 @@ Planned work, roughly in priority order:
 - **Script on metrics and spans.** The compiler currently runs on log events only; metrics and
   spans pass through `script` unchanged.
 - **Kafka source** (consumer groups, offset commits driven by acknowledgements).
-- **Exponential histograms end to end.** Decoding is supported; encoding always produces
-  explicit-bucket histograms.
+- **Prometheus native histograms.** Exponential histograms are carried end to end (#9), but both
+  Prometheus sinks still convert them to classic `le` buckets. Remote write's native histogram
+  messages would keep them lossless. OTLP `min`/`max` and exemplars are also still dropped.
 - **LZ4 for Kafka.** zstd shipped instead (#16): it needs no hand-written codec, and every broker
   this producer can reach already supports it. LZ4 would only pay off for brokers older than
   Kafka 2.1, which would first need a lower Produce version.

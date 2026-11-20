@@ -78,11 +78,22 @@ function zeroMetricValueOfType(type: Value | undefined, span: Span): MetricValue
       return { type: 'distribution', samples: [], statistic: 'histogram' };
     case 'histogram':
       return { type: 'histogram', buckets: [], count: 0, sum: 0 };
+    case 'exponential_histogram':
+      return {
+        type: 'exponential_histogram',
+        scale: 0,
+        zeroCount: 0,
+        zeroThreshold: 0,
+        positive: { offset: 0, counts: [] },
+        negative: { offset: 0, counts: [] },
+        count: 0,
+        sum: 0,
+      };
     case 'summary':
       return { type: 'summary', quantiles: [], count: 0, sum: 0 };
     default:
       throw abortSignal(
-        `a metric test's \`given\` must set 'type' to one of "counter", "gauge", "set", "distribution", "histogram", or "summary"`,
+        `a metric test's \`given\` must set 'type' to one of "counter", "gauge", "set", "distribution", "histogram", "exponential_histogram", or "summary"`,
         span,
       );
   }

@@ -107,7 +107,33 @@ const arbSample: fc.Arbitrary<Sample> = fc
   )
   .map(([value, rate]) => ({ value, rate }));
 
+/** A non-negative integer count that survives OTLP's uint64 ↔ `number` conversion exactly. */
+const arbCount = fc.integer({ min: 0, max: Number.MAX_SAFE_INTEGER });
+/** A finite double; `-0` is mapped to `0` since OTLP JSON cannot tell them apart. */
+const arbWireDouble = fc.double({ noNaN: true, noDefaultInfinity: true }).map((d) => d || 0);
+
+/** Any exponential histogram OTLP can carry: scale within the spec's [-10, 20], int32 offsets. */
+export const arbExponentialHistogram: fc.Arbitrary<
+  Extract<MetricValue, { type: 'exponential_histogram' }>
+> = fc.record({
+  type: fc.constant('exponential_histogram' as const),
+  scale: fc.integer({ min: -10, max: 20 }),
+  zeroCount: arbCount,
+  zeroThreshold: fc.double({ min: 0, noNaN: true, noDefaultInfinity: true }).map((d) => d || 0),
+  positive: fc.record({
+    offset: fc.integer({ min: -(2 ** 31), max: 2 ** 31 - 1 }),
+    counts: fc.array(arbCount, { maxLength: 8 }),
+  }),
+  negative: fc.record({
+    offset: fc.integer({ min: -(2 ** 31), max: 2 ** 31 - 1 }),
+    counts: fc.array(arbCount, { maxLength: 8 }),
+  }),
+  count: arbCount,
+  sum: arbWireDouble,
+});
+
 export const arbMetricValue: fc.Arbitrary<MetricValue> = fc.oneof(
+  arbExponentialHistogram,
   fc
     .double({ noNaN: true, min: -1e9, max: 1e9 })
     .map((value): MetricValue => ({ type: 'counter', value })),

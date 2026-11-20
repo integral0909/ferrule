@@ -116,6 +116,23 @@ function metricValueValue(value: MetricValue): ValueMap {
       out.set('count', value.count);
       out.set('sum', value.sum);
       break;
+    case 'exponential_histogram': {
+      out.set('scale', value.scale);
+      out.set('zeroCount', value.zeroCount);
+      out.set('zeroThreshold', value.zeroThreshold);
+      for (const [key, range] of [
+        ['positive', value.positive],
+        ['negative', value.negative],
+      ] as const) {
+        const m: ValueMap = new Map<string, Value>();
+        m.set('offset', range.offset);
+        m.set('counts', [...range.counts]);
+        out.set(key, m);
+      }
+      out.set('count', value.count);
+      out.set('sum', value.sum);
+      break;
+    }
     case 'summary':
       out.set(
         'quantiles',

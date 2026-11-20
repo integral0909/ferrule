@@ -545,3 +545,70 @@ describe('program.target', () => {
     expect(compile(parseAndCheck('.x = 1')).target).toBe('log');
   });
 });
+
+describe('metric scripts: exponential histograms', () => {
+  function exponential(): MetricEvent {
+    return new MetricEvent({
+      name: 'latency',
+      kind: 'incremental',
+      value: {
+        type: 'exponential_histogram',
+        scale: -2,
+        zeroCount: 1,
+        zeroThreshold: 0,
+        positive: { offset: 3, counts: [2, 4] },
+        negative: { offset: 0, counts: [] },
+        count: 7,
+        sum: 120.5,
+      },
+    });
+  }
+
+  it('reads .scale as an int, and .count and .sum as floats', () => {
+    expect(
+      runOk('.name = "{{ .scale }}/{{ .count }}/{{ .sum }}/{{ .buckets }}"', exponential()).series
+        .name,
+    ).toBe('-2/7.0/120.5/null');
+    expect(runOk('if .scale is int { .name = "int" }', exponential()).series.name).toBe('int');
+  });
+
+  it('.scale is null for every other metric type', () => {
+    expect(runOk('.name = "{{ .scale }}"', histogram()).series.name).toBe('null');
+    expect(runOk('.name = "{{ exists(.scale) }}"', counter()).series.name).toBe('false');
+  });
+
+  it('writes .count and .sum, leaving the bucket layout alone', () => {
+    const metric = runOk('.sum = (.sum ?? 0.0) * 2.0\n.count = 8.0', exponential());
+    expect(metric.value).toMatchObject({
+      type: 'exponential_histogram',
+      scale: -2,
+      count: 8,
+      sum: 241,
+      positive: { offset: 3, counts: [2, 4] },
+    });
+  });
+
+  it('rejects assigning to or removing the read-only .scale', () => {
+    expect(metricErrors('.scale = 3')).toEqual(['E312']);
+    expect(metricErrors('del(.scale)')).toEqual(['E312']);
+  });
+
+  it('lists only .scale, .count, and .sum among its value fields', () => {
+    expect(
+      runOk(
+        '.name = "{{ exists(.scale) }}{{ exists(.count) }}{{ exists(.sum) }}{{ exists(.buckets) }}{{ exists(.value) }}"',
+        exponential(),
+      ).series.name,
+    ).toBe('truetruetruefalsefalse');
+  });
+
+  it('builds an empty exponential histogram from a test fixture', () => {
+    const program = compileMetric(
+      'test "exp" {\n' +
+        '  given { "name": "e", "type": "exponential_histogram", "sum": 3.0 }\n' +
+        '  expect { "scale": 0, "count": 0.0, "sum": 3.0 }\n' +
+        '}\n',
+    );
+    expect(runInlineTests(program).map((t) => t.passed)).toEqual([true]);
+  });
+});

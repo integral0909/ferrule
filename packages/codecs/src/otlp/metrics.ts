@@ -5,6 +5,7 @@ import {
   MetricEvent,
   Timestamp,
   type Bucket,
+  type ExponentialBuckets,
   type MetricKind,
   type MetricValue,
   type Quantile,
@@ -42,13 +43,10 @@ const TEMPORALITY_CUMULATIVE = 2;
  *   than `explicit_bounds` (the implicit `+Inf` overflow bucket), which matches how core
  *   histograms already represent overflow (`count - sum(bucket.count)`), so the last
  *   `bucket_counts` entry is dropped and `count`/`sum` are carried over directly.
- * - `ExponentialHistogram` data points are converted to explicit buckets: with `base =
- *   2^(2^-scale)`, bucket `i` of the positive range covers `(base^i, base^(i+1)]` and becomes a
- *   core bucket with `upperLimit = base^(i+1)`; the negative range is mirrored (`upperLimit =
- *   -base^i`, buckets emitted from the most-negative index down to the least); the zero bucket
- *   (if `zero_count > 0`) becomes one more bucket at `upperLimit = zero_threshold`. This is lossy
- *   (buckets replace an implicit exponential scale with explicit boundaries) but round-trips
- *   through core's histogram operations like any other histogram.
+ * - `ExponentialHistogram` data points become `{ type: 'exponential_histogram' }` field for field
+ *   (`scale`, `zero_count`, `zero_threshold`, `positive`/`negative` offset and counts, `count`,
+ *   `sum`), with temporality mapped as for `Histogram`. `min`, `max`, `flags`, and exemplars are
+ *   dropped, as they are for `Histogram`.
  * - `Summary` data points become `{ type: 'summary' }`, kind always `absolute` (OTLP summaries
  *   have no temporality).
  *
@@ -58,9 +56,10 @@ const TEMPORALITY_CUMULATIVE = 2;
  * `tags`, with more specific values overriding less specific ones in that order. `description` and
  * `unit` have no equivalent field on `MetricEvent` and are dropped.
  *
- * Encoding is the mapping's inverse for `counter`, `gauge`, `histogram`, and `summary` values. An
- * `absolute` gauge encodes as `Gauge` (which has no temporality); an `incremental` gauge has no
- * home there, so it encodes as a non-monotonic, delta `Sum` instead, which round-trips the kind.
+ * Encoding is the mapping's inverse for `counter`, `gauge`, `histogram`, `exponential_histogram`,
+ * and `summary` values. An `absolute` gauge encodes as `Gauge` (which has no temporality); an
+ * `incremental` gauge has no home there, so it encodes as a non-monotonic, delta `Sum` instead,
+ * which round-trips the kind.
  * `set` and `distribution` values have no OTLP representation and raise
  * `E_OTLP_UNSUPPORTED_METRIC_TYPE`; convert them (e.g. with `samplesToHistogram`) before encoding.
  * Encoding never reconstructs resource/scope (core's `MetricEvent` does not carry them): output is
@@ -365,15 +364,26 @@ function decodeExponentialHistogram(
   const kind: MetricKind = temporality === TEMPORALITY_DELTA ? 'incremental' : 'absolute';
   for (const dp of points) {
     const tags = mergeTags(baseTags, dp.attrs);
-    const buckets = expandExponentialBuckets(dp, options);
-    const value: MetricValue = { type: 'histogram', buckets, count: dp.count, sum: dp.sum };
+    const totalBuckets = dp.positive.counts.length + dp.negative.counts.length;
+    if (totalBuckets > options.maxCollectionSize) {
+      throw new LimitExceededError(
+        'otlp.histogram.buckets',
+        options.maxCollectionSize,
+        'too many exponential histogram buckets',
+      );
+    }
+    const value: MetricValue = {
+      type: 'exponential_histogram',
+      scale: dp.scale,
+      zeroCount: dp.zeroCount,
+      zeroThreshold: dp.zeroThreshold,
+      positive: dp.positive,
+      negative: dp.negative,
+      count: dp.count,
+      sum: dp.sum,
+    };
     out.push(buildEvent(name, tags, kind, value, dp));
   }
-}
-
-interface ExpBuckets {
-  offset: number;
-  counts: bigint[];
 }
 
 function decodeExponentialHistogramDataPoint(
@@ -387,8 +397,8 @@ function decodeExponentialHistogramDataPoint(
   let sum = 0;
   let scale = 0;
   let zeroCount = 0;
-  let positive: ExpBuckets = { offset: 0, counts: [] };
-  let negative: ExpBuckets = { offset: 0, counts: [] };
+  let positive: ExponentialBuckets = { offset: 0, counts: [] };
+  let negative: ExponentialBuckets = { offset: 0, counts: [] };
   let zeroThreshold = 0;
   forEachField(bytes, (field, wireType, r) => {
     switch (field) {
@@ -443,16 +453,16 @@ function decodeExponentialHistogramDataPoint(
 function decodeExpBuckets(
   bytes: Uint8Array,
   options: ReturnType<typeof resolveDecodeOptions>,
-): ExpBuckets {
+): ExponentialBuckets {
   let offset = 0;
-  let counts: bigint[] = [];
+  let counts: number[] = [];
   forEachField(bytes, (field, wireType, r) => {
     switch (field) {
       case 1:
         offset = r.readZigZag32();
         break;
       case 2:
-        counts = r.readPacked((ir) => ir.readVarint());
+        counts = r.readPacked((ir) => Number(ir.readVarint()));
         checkCollectionSize(counts.length, options);
         break;
       default:
@@ -460,46 +470,6 @@ function decodeExpBuckets(
     }
   });
   return { offset, counts };
-}
-
-function expandExponentialBuckets(
-  dp: ReturnType<typeof decodeExponentialHistogramDataPoint>,
-  options: ReturnType<typeof resolveDecodeOptions>,
-): Bucket[] {
-  const totalBuckets =
-    dp.positive.counts.length + dp.negative.counts.length + (dp.zeroCount > 0 ? 1 : 0);
-  if (totalBuckets > options.maxCollectionSize) {
-    throw new LimitExceededError(
-      'otlp.histogram.buckets',
-      options.maxCollectionSize,
-      'too many exponential histogram buckets',
-    );
-  }
-  const base = Math.pow(2, Math.pow(2, -dp.scale));
-  const buckets: Bucket[] = [];
-  for (let i = dp.negative.counts.length - 1; i >= 0; i--) {
-    const index = dp.negative.offset + i;
-    const upperLimit = -Math.pow(base, index);
-    buckets.push({ upperLimit: finiteOrThrow(upperLimit), count: Number(dp.negative.counts[i]!) });
-  }
-  if (dp.zeroCount > 0) buckets.push({ upperLimit: dp.zeroThreshold, count: dp.zeroCount });
-  for (let i = 0; i < dp.positive.counts.length; i++) {
-    const index = dp.positive.offset + i;
-    const upperLimit = Math.pow(base, index + 1);
-    buckets.push({ upperLimit: finiteOrThrow(upperLimit), count: Number(dp.positive.counts[i]!) });
-  }
-  return buckets;
-}
-
-function finiteOrThrow(n: number): number {
-  if (!Number.isFinite(n)) {
-    throw new LimitExceededError(
-      'otlp.histogram.scale',
-      0,
-      'exponential histogram scale/offset produced a non-finite bucket boundary',
-    );
-  }
-  return n;
 }
 
 function decodeSummary(
@@ -640,7 +610,7 @@ export interface EncodeMetricsOptions {
 
 /**
  * Encodes `events` into one `ExportMetricsServiceRequest`. Events are grouped into `Metric`
- * messages by `(namespace + name, value type, and — for counters/gauges — kind)`, since one
+ * messages by `(namespace + name, value type, and — except for summaries — kind)`, since one
  * `Metric` can only describe data points of a single OTLP shape.
  */
 export function encodeExportMetricsServiceRequest(
@@ -664,7 +634,8 @@ export function encodeExportMetricsServiceRequest(
       event.series.namespace !== undefined
         ? `${event.series.namespace}.${event.series.name}`
         : event.series.name;
-    const key = `${fullName}\u0000${event.value.type}\u0000${event.value.type === 'counter' || event.value.type === 'gauge' ? event.metricKind : ''}`;
+    // Every shape but `summary` carries a temporality per `Metric`, so kinds must not share one.
+    const key = `${fullName}\u0000${event.value.type}\u0000${event.value.type === 'summary' ? '' : event.metricKind}`;
     let group = groups.get(key);
     if (group === undefined) {
       group = [];
@@ -751,6 +722,23 @@ function writeMetric(w: ProtoWriter, group: readonly MetricEvent[]): void {
         }
       });
       return;
+    case 'exponential_histogram':
+      w.writeMessage(10, (h) => {
+        h.writeInt32(
+          2,
+          first.metricKind === 'incremental' ? TEMPORALITY_DELTA : TEMPORALITY_CUMULATIVE,
+        );
+        for (const event of group) {
+          h.writeMessage(1, (dp) =>
+            writeExponentialHistogramDataPoint(
+              dp,
+              event,
+              event.value as Extract<MetricValue, { type: 'exponential_histogram' }>,
+            ),
+          );
+        }
+      });
+      return;
     case 'summary':
       w.writeMessage(11, (sm) => {
         for (const event of group) {
@@ -819,6 +807,30 @@ function writeHistogramDataPoint(
     (item, count) => item.writeRawFixed64(count),
   );
   w.writePacked(7, value.buckets, (item, bucket) => item.writeRawDouble(bucket.upperLimit));
+}
+
+function writeExponentialHistogramDataPoint(
+  w: ProtoWriter,
+  event: MetricEvent,
+  value: Extract<MetricValue, { type: 'exponential_histogram' }>,
+): void {
+  writeAttributesFromTags(w, 1, event.series.tags);
+  writePointTimestamps(w, event, 3, 2);
+  w.writeFixed64(4, BigInt(Math.round(value.count)));
+  w.writeDouble(5, value.sum);
+  w.writeZigZag32(6, value.scale);
+  w.writeFixed64(7, BigInt(Math.round(value.zeroCount)));
+  const writeRange = (field: number, range: ExponentialBuckets): void => {
+    w.writeMessage(field, (b) => {
+      b.writeZigZag32(1, range.offset);
+      b.writePacked(2, range.counts, (item, count) =>
+        item.writeRawVarint(BigInt(Math.round(count))),
+      );
+    });
+  };
+  writeRange(8, value.positive);
+  writeRange(9, value.negative);
+  w.writeDouble(14, value.zeroThreshold);
 }
 
 function writeSummaryDataPoint(

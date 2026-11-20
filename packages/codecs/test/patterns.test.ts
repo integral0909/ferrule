@@ -304,9 +304,19 @@ describe('builtinPatterns library', () => {
     const path = builtinPatterns.compile('%{PATH}$x', { anchored: false });
     const windows = builtinPatterns.compile('%{WINDOWS_PATH}$x', { anchored: false });
     const longInput = `/${'a'.repeat(5000)}`;
-    const start = Date.now();
+    // Budgeted in CPU time, not wall-clock: backtracking is a claim about work done, and a worker
+    // thread descheduled under full-suite load burns wall-clock time while doing none. Thread-
+    // scoped deliberately — `process.cpuUsage()` sums every vitest worker thread in this process,
+    // so it would be just as load-sensitive. (Needs Node >= 22.15; on older runtimes the patterns
+    // still run and a true hang is caught by the test timeout, there is simply no budget to
+    // check.) These two matches cost well under a millisecond; real catastrophic backtracking on
+    // a 5000-character input runs for seconds or longer, so the margin here is enormous.
+    const before = process.threadCpuUsage?.();
     path.test(longInput);
     windows.test(String.raw`C:\${'a'.repeat(5000)}`);
-    expect(Date.now() - start).toBeLessThan(1000);
+    if (before !== undefined) {
+      const spent = process.threadCpuUsage(before);
+      expect((spent.user + spent.system) / 1000).toBeLessThan(250);
+    }
   });
 });

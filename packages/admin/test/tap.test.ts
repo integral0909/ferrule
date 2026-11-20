@@ -2,7 +2,7 @@ import { LogEvent, parseJson, type ValueMap } from '@ferrule/core';
 import { ManualClock } from '@ferrule/runtime';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAdminHarness } from './fixtures.js';
-import { collectLinesForMs, openRaw, readLines, waitUntil } from './tap-helpers.js';
+import { collectLines, openRaw, readLines, readLinesUntilEnd, waitUntil } from './tap-helpers.js';
 
 function asMap(value: unknown): ValueMap {
   if (!(value instanceof Map)) throw new Error('expected an object');
@@ -72,13 +72,20 @@ describe('GET /tap/:component', () => {
     ]);
     cleanup = h.stop;
 
+    // The scripted source's own 5s sleep is pending before the tap is even opened, so a bare
+    // `pendingCount >= 1` is satisfied without the heartbeat timer existing — and advancing then
+    // would schedule the first heartbeat a full interval past the time we just advanced to, so it
+    // would never fire. Count up from that baseline instead: the extra sleep is the heartbeat.
+    const sleepsBeforeTap = clock.pendingCount;
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?format=sse`);
     expect(res.statusCode).toBe(200);
 
-    await waitUntil(() => clock.pendingCount >= 1, 10_000);
-    const heartbeats = collectLinesForMs(res, 200);
+    await waitUntil(
+      () => h.server.activeTapCount() === 1 && clock.pendingCount > sleepsBeforeTap,
+      10_000,
+    );
     await clock.advance(1000);
-    const lines = await heartbeats;
+    const lines = await collectLines(res, { minLines: 1, quietMs: 100 });
     req.destroy();
 
     expect(lines.some((l) => l.includes('heartbeat'))).toBe(true);
@@ -93,13 +100,12 @@ describe('GET /tap/:component', () => {
     const { req, res } = await openRaw(`${h.baseUrl}/tap/in?limit=3`);
     await waitUntil(() => h.server.activeTapCount() === 1);
     await clock.advance(10);
-    const lines = await readLines(res, 3);
-    // The server closes the stream once the limit is reached; give it a moment, then confirm no
-    // further data (and that the connection ended).
-    const extra = await collectLinesForMs(res, 200);
+    // The server closes the stream once the limit is reached, so reading to the end asserts both
+    // halves of this test at once — three events, and then the stream really was over — without
+    // a silence window, which a stalled worker thread satisfies whether or not the server closed.
+    const lines = await readLinesUntilEnd(res);
     req.destroy();
     expect(lines).toHaveLength(3);
-    expect(extra).toHaveLength(0);
   }, 15_000);
 
   it('accepts an explicit ?port= for the default port', async () => {
@@ -199,8 +205,10 @@ describe('GET /tap/:component', () => {
     // dropped everything — not that the events were published before anyone was listening.
     await waitUntil(() => h.server.activeTapCount() === 1);
     await clock.advance(10);
-    // The whole batch is published essentially at once; give it a generous window to arrive.
-    const lines = await collectLinesForMs(res, 500);
+    // Wait for the first line rather than for a fixed window to elapse: the sampled events are
+    // all written before `advance()` even returns, so "no lines yet" never means "not sampled
+    // through" — only that this thread hasn't been scheduled to read them yet.
+    const lines = await collectLines(res, { minLines: 1, quietMs: 200 });
     req.destroy();
 
     // True expectation is ~30 (10% of 300); this only checks sampling clearly did *something*,
@@ -240,7 +248,9 @@ describe('GET /tap/:component', () => {
     // what "the tap never affects delivery" actually means for this test.
     await waitUntil(() => h.collector.events.length === total, 10_000);
 
-    const lines = await collectLinesForMs(res, 300);
+    // Same reason as the `?sample=` test: what survived the queue is already written by now, so
+    // wait for it to be read rather than for a window to expire.
+    const lines = await collectLines(res, { minLines: 1, quietMs: 200 });
     req.destroy();
 
     expect(h.collector.events).toHaveLength(total); // the pipeline delivered every event...

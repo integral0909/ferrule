@@ -27,6 +27,16 @@ function baseOptions(overrides: Partial<SocketSinkOptions>): SocketSinkOptions {
   };
 }
 
+/** Polls `predicate` until it holds, so a test can wait for a signal instead of betting on a
+ * fixed delay. No real delay between checks; `timeoutMs` is only a safety net. */
+async function waitUntil(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for condition');
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 /** Resolves `true` if `p` has already settled by the next tick, `false` otherwise, without
  * consuming `p`'s eventual rejection here (the caller still awaits `p` itself afterward). */
 function raced(p: Promise<unknown>): Promise<boolean> {
@@ -109,7 +119,15 @@ describe('socket sink (TCP)', () => {
     await new Promise<void>((r) => probe.close(() => r()));
 
     const sink = createSocketSink(
-      baseOptions({ protocol: 'tcp', port, retry: { initial_backoff: 5, max_backoff: 20 } }),
+      baseOptions({
+        protocol: 'tcp',
+        port,
+        retry: { initial_backoff: 5, max_backoff: 20 },
+        // One event per batch, so the batcher flushes inside `add()` and aborts its own timeout
+        // sleep in the very turn it scheduled it. That leaves the retry backoff as the only thing
+        // that ever sleeps on this manual clock, which is what makes the wait below unambiguous.
+        batch: { max_events: 1, max_size: 1024 * 1024, timeout: 1_000 },
+      }),
     );
     const ctx = createTestSinkContext();
     const event = LogEvent.fromMessage('delayed');
@@ -119,9 +137,13 @@ describe('socket sink (TCP)', () => {
     await ctx.feed(event);
     ctx.close();
 
-    // Let the first connection attempt fail (ECONNREFUSED, real loopback I/O) before the server
-    // starts listening, so the send genuinely has to go through the retry path.
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Wait for the first connection attempt to have actually failed (ECONNREFUSED, real loopback
+    // I/O) before the server starts listening, so the send genuinely has to go through the retry
+    // path. The sink sleeps on `ctx.clock` only after an attempt has failed and the retry policy
+    // has granted a backoff, so a pending sleep *is* that failure — where the previous fixed 30ms
+    // delay was a bet that the attempt had got that far, and silently skipped the retry path
+    // (still passing) whenever it hadn't.
+    await waitUntil(() => ctx.clock.pendingCount > 0);
 
     const server = net.createServer((socket) => {
       socket.on('data', () => undefined);

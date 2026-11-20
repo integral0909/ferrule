@@ -301,9 +301,14 @@ describe('sync policies', () => {
   it('"none" resolves write() immediately, without waiting for a durability point', async () => {
     const fs = new InMemoryFileSystem();
     const buffer = await openBuffer(fs, '/buf', { sync: { kind: 'none' } });
-    const started = Date.now();
-    await buffer.writer.write(events('a'));
-    expect(Date.now() - started).toBeLessThan(1000);
+    // Assert the mechanism rather than the elapsed time: make every durability point an error,
+    // so a `write()` that reached one would reject instead of resolving. Timing it instead ("took
+    // under a second") measures the worker thread's scheduling luck as much as the sync policy.
+    fs.injectFault({ op: 'fsync', times: Number.MAX_SAFE_INTEGER });
+    fs.injectFault({ op: 'fsyncDir', times: Number.MAX_SAFE_INTEGER });
+    await expect(buffer.writer.write(events('a'))).resolves.toBeUndefined();
+    // close() legitimately flushes, so the faults have to go before it.
+    fs.clearFaults();
     await buffer.close();
   });
 

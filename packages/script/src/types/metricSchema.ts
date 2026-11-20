@@ -45,6 +45,7 @@ export const METRIC_FIELD_NAMES = Object.freeze([
   'samples',
   'statistic',
   'buckets',
+  'scale',
   'count',
   'sum',
   'quantiles',
@@ -61,9 +62,11 @@ export function isMetricFieldName(name: string): name is MetricFieldName {
 /**
  * Fields a script may not assign to. `type` is read-only because changing it would mean rebuilding
  * the whole `MetricValue` — a script that wants a different metric type should `emit` a new metric
- * (a later milestone) or use the `log_to_metric`/`metric_to_log` transforms.
+ * (a later milestone) or use the `log_to_metric`/`metric_to_log` transforms. An exponential
+ * histogram's `scale` is read-only because it defines what every bucket index means: changing it
+ * without re-bucketing would silently move every observation.
  */
-export const READONLY_METRIC_FIELDS: ReadonlySet<string> = new Set(['type']);
+export const READONLY_METRIC_FIELDS: ReadonlySet<string> = new Set(['type', 'scale']);
 
 /** Which value-shaped fields apply to each `MetricValue` type. */
 export const METRIC_VALUE_FIELDS: Readonly<Record<string, readonly MetricFieldName[]>> =
@@ -73,6 +76,7 @@ export const METRIC_VALUE_FIELDS: Readonly<Record<string, readonly MetricFieldNa
     set: Object.freeze(['values'] as const),
     distribution: Object.freeze(['samples', 'statistic'] as const),
     histogram: Object.freeze(['buckets', 'count', 'sum'] as const),
+    exponential_histogram: Object.freeze(['scale', 'count', 'sum'] as const),
     summary: Object.freeze(['quantiles', 'count', 'sum'] as const),
   });
 
@@ -111,6 +115,7 @@ export const metricEventSchema: Type = objectType({
   samples: nullable(arrayType(sampleType)),
   statistic: nullable(stringType),
   buckets: nullable(arrayType(bucketType)),
+  scale: nullable(intType),
   count: nullable(floatType),
   sum: nullable(floatType),
   quantiles: nullable(arrayType(quantileType)),

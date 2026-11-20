@@ -29,6 +29,8 @@ import { defineTransform, DEFAULT_PORT, type TransformOutput } from '@ferrule/ru
  *   values: [string]         # set
  *   samples: [{value, rate}] # distribution
  *   buckets: [{upper_limit, count}], count, sum  # histogram
+ *   scale, zero_count, zero_threshold, positive/negative: {offset, counts}, count, sum
+ *                                                # exponential_histogram
  *   quantiles: [{quantile, value}], count, sum   # summary
  * ```
  */
@@ -70,6 +72,17 @@ function valueBody(metric: MetricEvent): ValueMap {
       return floatObject({
         type: 'histogram',
         buckets: v.buckets.map((b) => ({ upper_limit: b.upperLimit, count: b.count })),
+        count: v.count,
+        sum: v.sum,
+      });
+    case 'exponential_histogram':
+      return floatObject({
+        type: 'exponential_histogram',
+        scale: v.scale,
+        zero_count: v.zeroCount,
+        zero_threshold: v.zeroThreshold,
+        positive: { offset: v.positive.offset, counts: [...v.positive.counts] },
+        negative: { offset: v.negative.offset, counts: [...v.negative.counts] },
         count: v.count,
         sum: v.sum,
       });

@@ -1,4 +1,4 @@
-import { MetricEvent, type Event } from '@ferrule/core';
+import { MetricEvent, ValueTypeError, type Event } from '@ferrule/core';
 import { defineSink, FixedConcurrencyLimiter, runBatchedSink } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
 import { HttpClient, ensureSuccess } from '../client.js';
@@ -81,6 +81,13 @@ export const prometheusRemoteWriteSink = defineSink<PrometheusRemoteWriteSinkOpt
                   series.push(...expandMetricToSeries(event, value, timestampMs));
                 } catch (error) {
                   if (error instanceof UnsupportedMetricTypeError) {
+                    event.metadata.finalizers.finish('rejected');
+                    continue;
+                  }
+                  if (error instanceof ValueTypeError) {
+                    // An exponential histogram with no finite explicit form. Forget the series
+                    // too, or every later point would merge into the same unsendable total.
+                    accumulator.forget(event.series);
                     event.metadata.finalizers.finish('rejected');
                     continue;
                   }

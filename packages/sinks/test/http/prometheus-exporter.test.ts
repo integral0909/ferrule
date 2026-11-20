@@ -27,6 +27,45 @@ async function listenAndGetPort(
   return { run, port: record.fields['port'] as number };
 }
 
+/** Two incremental exponential points at different scales whose buckets overlap on (1, 2]. */
+function exponentialPointsAtTwoScales(): [MetricEvent, MetricEvent] {
+  const point = (scale: number, counts: number[], sum: number) =>
+    new MetricEvent({
+      name: 'latency',
+      kind: 'incremental',
+      value: {
+        type: 'exponential_histogram',
+        scale,
+        zeroCount: 0,
+        zeroThreshold: 0,
+        positive: { offset: 0, counts },
+        negative: { offset: 0, counts: [] },
+        count: counts.reduce((a, b) => a + b, 0),
+        sum,
+      },
+    });
+  // Scale 1: (1, √2] holds 1 and (√2, 2] holds 2. Scale 0: (1, 2] holds 4.
+  return [point(1, [1, 2], 4), point(0, [4], 6)];
+}
+
+/** An exponential point whose boundaries overflow a double: at scale -10, bucket 1 ends at 2^2048. */
+function overflowingExponential(): MetricEvent {
+  return new MetricEvent({
+    name: 'huge',
+    kind: 'incremental',
+    value: {
+      type: 'exponential_histogram',
+      scale: -10,
+      zeroCount: 0,
+      zeroThreshold: 0,
+      positive: { offset: 1, counts: [1] },
+      negative: { offset: 0, counts: [] },
+      count: 1,
+      sum: 1,
+    },
+  });
+}
+
 describe('prometheus_exporter sink', () => {
   it('serves an ephemeral port and returns 404 for anything but GET <path>', async () => {
     const buildCtx = testBuildContext();
@@ -69,6 +108,58 @@ describe('prometheus_exporter sink', () => {
     const text = await (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
     expect(text).toContain('temp 21.5');
     expect(text).toContain('hits 10'); // 4 + 6 accumulated
+
+    harness.close();
+    await run;
+  });
+
+  it('merges exponential points at different scales and converts only when scraped', async () => {
+    const buildCtx = testBuildContext();
+    const options = prometheusExporterSinkOptions.parse({ listen_address: '127.0.0.1:0' });
+    const sink = await prometheusExporterSink.build(options, buildCtx.ctx);
+    const harness = createTestSinkContext();
+    const { run, port } = await listenAndGetPort(sink, harness.ctx, buildCtx.logs);
+
+    const [fine, coarse] = exponentialPointsAtTwoScales();
+    await harness.feed([fine]);
+    const first = await (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
+    expect(first).toContain(`latency_bucket{le="${Math.SQRT2}"} 1`);
+    expect(first).toContain('latency_bucket{le="2"} 3');
+
+    await harness.feed([coarse]);
+    const merged = await (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
+    // 3 (downscaled from scale 1) + 4. Converting before merging would restart the series at 4.
+    expect(merged).toContain('# TYPE latency histogram');
+    expect(merged).not.toContain(`le="${Math.SQRT2}"`);
+    expect(merged).toContain('latency_bucket{le="2"} 7');
+    expect(merged).toContain('latency_bucket{le="+Inf"} 7');
+    expect(merged).toContain('latency_sum 10');
+    expect(merged).toContain('latency_count 7');
+
+    harness.close();
+    await run;
+  });
+
+  it('rejects an exponential point with no finite explicit form, and keeps serving the rest', async () => {
+    const buildCtx = testBuildContext();
+    const options = prometheusExporterSinkOptions.parse({ listen_address: '127.0.0.1:0' });
+    const sink = await prometheusExporterSink.build(options, buildCtx.ctx);
+    const harness = createTestSinkContext();
+    const { run, port } = await listenAndGetPort(sink, harness.ctx, buildCtx.logs);
+
+    const bad = withNotifier(overflowingExponential());
+    const good = withNotifier(
+      new MetricEvent({ name: 'temp', kind: 'absolute', value: { type: 'gauge', value: 3 } }),
+    );
+    await harness.feed([bad.event, good.event]);
+    await expect(bad.completion).resolves.toBe('rejected');
+    await expect(good.completion).resolves.toBe('delivered');
+
+    const response = await fetch(`http://127.0.0.1:${port}/metrics`);
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('temp 3');
+    expect(text).not.toContain('huge');
 
     harness.close();
     await run;

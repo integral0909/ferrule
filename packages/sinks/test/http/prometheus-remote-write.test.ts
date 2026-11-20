@@ -82,6 +82,45 @@ function counter(name: string, value: number, tags: Record<string, string> = {})
   return new MetricEvent({ name, tags, kind: 'incremental', value: { type: 'counter', value } });
 }
 
+/** Two incremental exponential points at different scales whose buckets overlap on (1, 2]. */
+function exponentialPointsAtTwoScales(): [MetricEvent, MetricEvent] {
+  const point = (scale: number, counts: number[], sum: number) =>
+    new MetricEvent({
+      name: 'latency',
+      kind: 'incremental',
+      value: {
+        type: 'exponential_histogram',
+        scale,
+        zeroCount: 0,
+        zeroThreshold: 0,
+        positive: { offset: 0, counts },
+        negative: { offset: 0, counts: [] },
+        count: counts.reduce((a, b) => a + b, 0),
+        sum,
+      },
+    });
+  // Scale 1: (1, √2] holds 1 and (√2, 2] holds 2. Scale 0: (1, 2] holds 4.
+  return [point(1, [1, 2], 4), point(0, [4], 6)];
+}
+
+/** An exponential point whose boundaries overflow a double: at scale -10, bucket 1 ends at 2^2048. */
+function overflowingExponential(): MetricEvent {
+  return new MetricEvent({
+    name: 'huge',
+    kind: 'incremental',
+    value: {
+      type: 'exponential_histogram',
+      scale: -10,
+      zeroCount: 0,
+      zeroThreshold: 0,
+      positive: { offset: 1, counts: [1] },
+      negative: { offset: 0, counts: [] },
+      count: 1,
+      sum: 1,
+    },
+  });
+}
+
 describe('prometheus_remote_write sink', () => {
   it('sends the required headers and a snappy-compressed protobuf body', async () => {
     server = await startCapturingServer();
@@ -170,6 +209,37 @@ describe('prometheus_remote_write sink', () => {
     expect(byName('latency_count')!.samples[0]!.value).toBe(6);
   });
 
+  it('merges exponential points at different scales before converting to _bucket series', async () => {
+    server = await startCapturingServer();
+    const options = prometheusRemoteWriteSinkOptions.parse({
+      url: server.url,
+      batch: { max_events: 1 },
+    });
+    const sink = await prometheusRemoteWriteSink.build(options, testBuildContext().ctx);
+    const harness = createTestSinkContext();
+    const run = sink.run(harness.ctx);
+    await harness.feed(exponentialPointsAtTwoScales());
+    harness.close();
+    await run;
+
+    const bucket = (request: number, le: string) =>
+      received[request]!.find(
+        (s) => s.labels['__name__'] === 'latency_bucket' && s.labels['le'] === le,
+      )?.samples[0]!.value;
+    expect(received).toHaveLength(2);
+    // First point alone, at scale 1.
+    expect(bucket(0, String(Math.SQRT2))).toBe(1);
+    expect(bucket(0, '2')).toBe(3);
+    // Accumulated: the scale-1 total was downscaled to scale 0 and added (3 + 4). Converting to
+    // explicit buckets first would have made the two points unmergeable, restarting at 4.
+    const second = received[1]!.filter((s) => s.labels['__name__'] === 'latency_bucket');
+    expect(second.map((s) => s.labels['le'])).toEqual(['2', '+Inf']);
+    expect(bucket(1, '2')).toBe(7);
+    expect(bucket(1, '+Inf')).toBe(7);
+    const sum = received[1]!.find((s) => s.labels['__name__'] === 'latency_sum');
+    expect(sum!.samples[0]!.value).toBe(10);
+  });
+
   it('expands a summary into per-quantile series plus _sum/_count', async () => {
     server = await startCapturingServer();
     const options = prometheusRemoteWriteSinkOptions.parse({ url: server.url });
@@ -218,6 +288,24 @@ describe('prometheus_remote_write sink', () => {
     await run;
     await expect(completion).resolves.toBe('rejected');
     expect(server.requests).toHaveLength(0);
+  });
+
+  it('rejects an exponential point with no finite explicit form without failing the batch', async () => {
+    server = await startCapturingServer();
+    const options = prometheusRemoteWriteSinkOptions.parse({ url: server.url });
+    const sink = await prometheusRemoteWriteSink.build(options, testBuildContext().ctx);
+    const harness = createTestSinkContext();
+    const run = sink.run(harness.ctx);
+    const bad = withNotifier(overflowingExponential());
+    const good = withNotifier(counter('requests_total', 2));
+    await harness.feed([bad.event, good.event]);
+    harness.close();
+    await run;
+
+    await expect(bad.completion).resolves.toBe('rejected');
+    await expect(good.completion).resolves.toBe('delivered');
+    const names = received.flat().map((s) => s.labels['__name__']);
+    expect(names).toEqual(['requests_total']);
   });
 
   it('uses the event timestamp when present, else the batch flush time', async () => {

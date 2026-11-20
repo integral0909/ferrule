@@ -292,6 +292,14 @@ class Checker {
       );
       return;
     }
+    if (segments[0] === 'scale') {
+      this.error(
+        'E312',
+        '`.scale` is read-only: it defines every bucket index of an exponential histogram, so it cannot be changed in place',
+        span,
+      );
+      return;
+    }
     const declared = pathType(this.inputSchema, segments);
     if (!isAssignableToMetricField(valueType, declared)) {
       this.error(
@@ -760,8 +768,9 @@ class Checker {
     }
     if (name === 'del' && this.target === 'metric') {
       const arg = expr.args[0]?.value;
-      if (arg?.kind === 'path' && arg.segments[0] === 'type') {
-        this.error('E312', '`.type` is read-only and cannot be removed', arg.span);
+      const head = arg?.kind === 'path' ? arg.segments[0] : undefined;
+      if (head === 'type' || head === 'scale') {
+        this.error('E312', `\`.${head}\` is read-only and cannot be removed`, arg!.span);
       }
     }
     const signature = this.registry.get(name);

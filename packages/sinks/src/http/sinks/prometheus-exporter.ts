@@ -4,8 +4,10 @@ import {
   addMetricValues,
   cloneMetricValue,
   cloneSeries,
+  exponentialToExplicitHistogram,
   MetricEvent,
   seriesKey,
+  ValueTypeError,
   type MetricSeries,
   type MetricValue,
 } from '@ferrule/core';
@@ -28,33 +30,53 @@ interface SeriesState {
   lastWallMs: number;
 }
 
+/** Whether `value` can be rendered as Prometheus text (see {@link SeriesStore.observe}). */
+function servable(value: MetricValue): boolean {
+  if (value.type !== 'exponential_histogram') return true;
+  try {
+    exponentialToExplicitHistogram(value);
+    return true;
+  } catch (error) {
+    if (error instanceof ValueTypeError) return false;
+    throw error;
+  }
+}
+
 /** Keeps the latest (or, for `incremental` metrics, the running accumulated) value per series,
  * for {@link prometheusExporterSink} to serve on scrape. */
 class SeriesStore {
   private readonly state = new Map<string, SeriesState>();
 
-  observe(event: MetricEvent, nowMs: number): void {
+  /**
+   * Incorporates `event`, or returns `false` (leaving the series as it was) if the result could
+   * not be served: an exponential histogram whose boundaries overflow a double has no explicit
+   * form, and finding that out at scrape time would fail every scrape.
+   */
+  observe(event: MetricEvent, nowMs: number): boolean {
     const key = seriesKey(event.series);
     if (
       event.metricKind === 'absolute' ||
       event.value.type === 'summary' ||
       event.value.type === 'set'
     ) {
+      if (!servable(event.value)) return false;
       this.state.set(key, {
         series: cloneSeries(event.series),
         value: cloneMetricValue(event.value),
         lastWallMs: nowMs,
       });
-      return;
+      return true;
     }
     const prior = this.state.get(key);
     const combined = prior === undefined ? undefined : addMetricValues(prior.value, event.value);
     const value = combined ?? event.value;
+    if (!servable(value)) return false;
     this.state.set(key, {
       series: cloneSeries(event.series),
       value: cloneMetricValue(value),
       lastWallMs: nowMs,
     });
+    return true;
   }
 
   /** Removes series not observed within `staleBoundMs` of `nowMs` and returns the current
@@ -138,8 +160,8 @@ export const prometheusExporterSink = defineSink<PrometheusExporterSinkOptions>(
           for await (const batch of sinkCtx.input) {
             const nowMs = sinkCtx.clock.now().toMillis();
             for (const event of batch) {
-              if (event instanceof MetricEvent) store.observe(event, nowMs);
-              event.metadata.finalizers.finish('delivered');
+              const accepted = !(event instanceof MetricEvent) || store.observe(event, nowMs);
+              event.metadata.finalizers.finish(accepted ? 'delivered' : 'rejected');
             }
           }
         } finally {

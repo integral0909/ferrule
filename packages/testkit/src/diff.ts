@@ -147,6 +147,26 @@ function metricValueToValue(value: MetricEvent['value']): Value {
         }),
       );
       break;
+    case 'exponential_histogram': {
+      out.set('count', BigInt(value.count));
+      out.set('sum', value.sum);
+      out.set('scale', BigInt(value.scale));
+      out.set('zero_count', BigInt(value.zeroCount));
+      out.set('zero_threshold', value.zeroThreshold);
+      for (const [key, range] of [
+        ['positive', value.positive],
+        ['negative', value.negative],
+      ] as const) {
+        const m: ValueMap = new Map();
+        m.set('offset', BigInt(range.offset));
+        m.set(
+          'counts',
+          range.counts.map((c) => BigInt(c)),
+        );
+        out.set(key, m);
+      }
+      break;
+    }
     case 'summary':
       out.set('count', BigInt(value.count));
       out.set('sum', value.sum);

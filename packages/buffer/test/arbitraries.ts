@@ -121,6 +121,22 @@ export const arbMetricValue: fc.Arbitrary<MetricValue> = fc.oneof(
     sum: arbFiniteFloat,
   }),
   fc.record({
+    type: fc.constant('exponential_histogram' as const),
+    scale: fc.integer({ min: -10, max: 20 }),
+    zeroCount: arbFiniteFloat,
+    zeroThreshold: arbFiniteFloat,
+    positive: fc.record({
+      offset: fc.integer({ min: -(2 ** 31), max: 2 ** 31 - 1 }),
+      counts: fc.array(arbFiniteFloat, { maxLength: 5 }),
+    }),
+    negative: fc.record({
+      offset: fc.integer({ min: -(2 ** 31), max: 2 ** 31 - 1 }),
+      counts: fc.array(arbFiniteFloat, { maxLength: 5 }),
+    }),
+    count: arbFiniteFloat,
+    sum: arbFiniteFloat,
+  }),
+  fc.record({
     type: fc.constant('summary' as const),
     quantiles: fc.array(arbQuantile, { maxLength: 5 }),
     count: arbFiniteFloat,

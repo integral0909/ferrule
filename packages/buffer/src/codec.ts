@@ -6,6 +6,7 @@ import {
   SpanEvent,
   Timestamp,
   type Bucket,
+  type ExponentialBuckets,
   type Event,
   type EventMetadata,
   type InstrumentationScope,
@@ -68,6 +69,7 @@ const METRIC_SET = 2;
 const METRIC_DISTRIBUTION = 3;
 const METRIC_HISTOGRAM = 4;
 const METRIC_SUMMARY = 5;
+const METRIC_EXPONENTIAL_HISTOGRAM = 6;
 
 const SPAN_KINDS: readonly SpanKind[] = [
   'unspecified',
@@ -443,6 +445,19 @@ function encodeMetricValue(w: ByteWriter, value: MetricValue): void {
       w.writeFloat64LE(value.count);
       w.writeFloat64LE(value.sum);
       return;
+    case 'exponential_histogram':
+      w.writeUint8(METRIC_EXPONENTIAL_HISTOGRAM);
+      w.writeFloat64LE(value.scale);
+      w.writeFloat64LE(value.zeroCount);
+      w.writeFloat64LE(value.zeroThreshold);
+      for (const range of [value.positive, value.negative]) {
+        w.writeFloat64LE(range.offset);
+        w.writeVarint(range.counts.length);
+        for (const c of range.counts) w.writeFloat64LE(c);
+      }
+      w.writeFloat64LE(value.count);
+      w.writeFloat64LE(value.sum);
+      return;
     case 'summary':
       w.writeUint8(METRIC_SUMMARY);
       w.writeVarint(value.quantiles.length);
@@ -490,6 +505,32 @@ function decodeMetricValue(r: ByteReader, limits: ResolvedLimits): MetricValue {
       const count = r.readFloat64LE();
       const sum = r.readFloat64LE();
       return { type: 'histogram', buckets, count, sum };
+    }
+    case METRIC_EXPONENTIAL_HISTOGRAM: {
+      const scale = r.readFloat64LE();
+      const zeroCount = r.readFloat64LE();
+      const zeroThreshold = r.readFloat64LE();
+      const readRange = (): ExponentialBuckets => {
+        const offset = r.readFloat64LE();
+        const n = readCount(r, limits.maxCollectionLength, 'metric.exponential_histogram.buckets');
+        const counts: number[] = [];
+        for (let i = 0; i < n; i++) counts.push(r.readFloat64LE());
+        return { offset, counts };
+      };
+      const positive = readRange();
+      const negative = readRange();
+      const count = r.readFloat64LE();
+      const sum = r.readFloat64LE();
+      return {
+        type: 'exponential_histogram',
+        scale,
+        zeroCount,
+        zeroThreshold,
+        positive,
+        negative,
+        count,
+        sum,
+      };
     }
     case METRIC_SUMMARY: {
       const n = readCount(r, limits.maxCollectionLength, 'metric.summary.quantiles');

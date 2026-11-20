@@ -1,6 +1,12 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { FerruleError, MetricEvent, Timestamp } from '@ferrule/core';
+import {
+  exponentialToExplicitHistogram,
+  FerruleError,
+  MetricEvent,
+  Timestamp,
+  type ExponentialHistogram,
+} from '@ferrule/core';
 import {
   decodeExportMetricsServiceRequest,
   encodeExportMetricsServiceRequest,
@@ -172,7 +178,14 @@ describe('OTLP metrics protobuf: summary', () => {
   });
 });
 
-describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to explicit buckets)', () => {
+describe('OTLP metrics protobuf: exponential histogram', () => {
+  /** Decodes a lone exponential histogram and expands it as the Prometheus sinks will. */
+  function decodeExpanded(bytes: Uint8Array) {
+    const [decoded] = decodeExportMetricsServiceRequest(bytes);
+    expect(decoded!.value.type).toBe('exponential_histogram');
+    return exponentialToExplicitHistogram(decoded!.value as ExponentialHistogram);
+  }
+
   function encodeExponentialHistogramRequest(opts: {
     scale: number;
     positiveOffset: number;
@@ -217,6 +230,31 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
     return request.finish();
   }
 
+  it('decodes every field losslessly, including the bucket layout', () => {
+    const bytes = encodeExponentialHistogramRequest({
+      scale: -3,
+      positiveOffset: -7,
+      positiveCounts: [3n, 0n, 2n],
+      negativeOffset: 4,
+      negativeCounts: [1n],
+      zeroCount: 4n,
+      zeroThreshold: 0.001,
+      count: 10n,
+      sum: 42.5,
+    });
+    const [decoded] = decodeExportMetricsServiceRequest(bytes);
+    expect(decoded!.value).toEqual({
+      type: 'exponential_histogram',
+      scale: -3,
+      zeroCount: 4,
+      zeroThreshold: 0.001,
+      positive: { offset: -7, counts: [3, 0, 2] },
+      negative: { offset: 4, counts: [1] },
+      count: 10,
+      sum: 42.5,
+    });
+  });
+
   it('expands positive-only buckets to ascending explicit upper limits', () => {
     const bytes = encodeExponentialHistogramRequest({
       scale: 0, // base = 2
@@ -225,9 +263,7 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
       count: 10n,
       sum: 42,
     });
-    const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    expect(decoded!.value.type).toBe('histogram');
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
+    const hist = decodeExpanded(bytes);
     // base=2^(2^-0)=2; bucket i covers (2^i, 2^(i+1)], upperLimit = 2^(i+1)
     expect(hist.buckets.map((b) => b.upperLimit)).toEqual([2, 4, 8]);
     expect(hist.buckets.map((b) => b.count)).toEqual([3, 5, 2]);
@@ -247,8 +283,7 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
       count: 6n,
       sum: 0,
     });
-    const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
+    const hist = decodeExpanded(bytes);
     expect(hist.buckets).toHaveLength(3);
     expect(hist.buckets.map((b) => b.count)).toEqual([1, 4, 1]);
     // ascending order: negative bucket upperLimit < zero threshold < positive bucket upperLimit
@@ -265,8 +300,7 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
       count: 1n,
       sum: 1,
     });
-    const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
+    const hist = decodeExpanded(bytes);
     expect(hist.buckets).toHaveLength(1);
   });
 
@@ -280,8 +314,7 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
       count: 10n,
       sum: -42,
     });
-    const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
+    const hist = decodeExpanded(bytes);
     // Negative bucket index i covers (-base^(i+1), -base^i], upperLimit = -base^i; buckets are
     // emitted from the most negative index down to the least, giving ascending upperLimits.
     expect(hist.buckets.map((b) => b.upperLimit)).toEqual([-4, -2, -1]);
@@ -296,8 +329,7 @@ describe('OTLP metrics protobuf: exponential histogram (decode-only, expanded to
       count: 2n,
       sum: 1,
     });
-    const [decoded] = decodeExportMetricsServiceRequest(bytes);
-    const hist = decoded!.value as Extract<MetricEvent['value'], { type: 'histogram' }>;
+    const hist = decodeExpanded(bytes);
     expect(hist.buckets.every((b) => Number.isFinite(b.upperLimit))).toBe(true);
     expect(hist.buckets[0]!.upperLimit).toBeLessThan(hist.buckets[1]!.upperLimit);
   });

@@ -163,14 +163,12 @@ per-series, per-point, unlike OTLP's per-metric batching):
   represents overflow the same way (`count - sum(bucket.count)`), so the last `bucket_counts` entry
   is simply dropped and `count`/`sum` are carried over directly — no cumulative/non-cumulative
   conversion is needed here (OTLP histogram buckets are already non-cumulative, unlike Prometheus's).
-- **ExponentialHistogram** data points are _decode-only_, converted to explicit buckets: with
-  `base = 2^(2^-scale)`, positive-range bucket index `i` covers `(base^i, base^(i+1)]` and becomes
-  a core bucket at `upperLimit = base^(i+1)`; the negative range mirrors this
-  (`upperLimit = -base^i`, emitted from the most-negative index down to the least, so the result is
-  ascending); the zero bucket (if `zero_count > 0`) becomes one more bucket at
-  `upperLimit = zero_threshold`. This is a lossy but standard "expand to explicit boundaries"
-  conversion. Encoding never re-derives an `ExponentialHistogram` — core→OTLP encoding always
-  produces a classic `Histogram`.
+- **ExponentialHistogram** data points become `{ type: 'exponential_histogram' }` losslessly
+  (`scale`, `zero_count`, `zero_threshold`, positive/negative offset and counts, `count`, `sum`),
+  in both protobuf and JSON, and encode back as `ExponentialHistogram`. Anything this encoder
+  writes re-encodes byte-for-byte after a decode. Like `Histogram`, `min`, `max`, `flags`, and
+  exemplars are dropped. Formats with no exponential form (Prometheus text, remote write) convert
+  at the edge with core's `exponentialToExplicitHistogram`.
 - **Summary** data points become `{ type: 'summary' }`, kind always `absolute` (OTLP summaries have
   no temporality field at all).
 
@@ -356,8 +354,6 @@ with `new CodecRegistry()`) to extend the set by name.
 
 - OTLP encoding never reconstructs `Metric.description`/`.unit`, `LogRecord`/`Span` dropped-counts,
   or `Span.flags` — none of them have a home in core's data model.
-- Exponential histograms are decode-only; core→OTLP metric encoding always produces a classic
-  `Histogram`.
 - `set` and `distribution` core metric values cannot be encoded to OTLP or StatsD (no wire
   representation exists in either format) — convert them first.
 - The pattern engine's backtracking guard is a heuristic over the built-in library and the

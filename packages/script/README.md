@@ -498,23 +498,24 @@ it exists here; convert a span to a log representation, or route around the prog
 #### The metric shape
 
 Field names match `metric_to_log`'s projection in `@ferrule/operators`, so the two representations
-of a metric agree. Every field is readable; all but `.type` are writable.
+of a metric agree. Every field is readable; all but `.type` and `.scale` are writable.
 
-| Path                     | Type                                                      | Applies to         |
-| ------------------------ | --------------------------------------------------------- | ------------------ |
-| `.name`                  | `string`                                                  | every metric       |
-| `.namespace`             | `string \| null`                                          | every metric       |
-| `.tags`, `.tags.<name>`  | `object { ..string \| null }`, `string \| null`           | every metric       |
-| `.kind`                  | `string` — `"incremental"` or `"absolute"`                | every metric       |
-| `.type`                  | `string` — **read-only**                                  | every metric       |
-| `.timestamp`             | `timestamp \| null`                                       | every metric       |
-| `.interval_ms`           | `int \| null`                                             | every metric       |
-| `.value`                 | `float \| null`                                           | counter, gauge     |
-| `.values`                | `array<string> \| null`                                   | set                |
-| `.samples`, `.statistic` | `array<object { value, rate }> \| null`, `string \| null` | distribution       |
-| `.buckets`               | `array<object { upper_limit, count }> \| null`            | histogram          |
-| `.quantiles`             | `array<object { quantile, value }> \| null`               | summary            |
-| `.count`, `.sum`         | `float \| null`                                           | histogram, summary |
+| Path                     | Type                                                      | Applies to                                |
+| ------------------------ | --------------------------------------------------------- | ----------------------------------------- |
+| `.name`                  | `string`                                                  | every metric                              |
+| `.namespace`             | `string \| null`                                          | every metric                              |
+| `.tags`, `.tags.<name>`  | `object { ..string \| null }`, `string \| null`           | every metric                              |
+| `.kind`                  | `string` — `"incremental"` or `"absolute"`                | every metric                              |
+| `.type`                  | `string` — **read-only**                                  | every metric                              |
+| `.timestamp`             | `timestamp \| null`                                       | every metric                              |
+| `.interval_ms`           | `int \| null`                                             | every metric                              |
+| `.value`                 | `float \| null`                                           | counter, gauge                            |
+| `.values`                | `array<string> \| null`                                   | set                                       |
+| `.samples`, `.statistic` | `array<object { value, rate }> \| null`, `string \| null` | distribution                              |
+| `.buckets`               | `array<object { upper_limit, count }> \| null`            | histogram                                 |
+| `.scale`                 | `int \| null` — **read-only**                             | exponential_histogram                     |
+| `.quantiles`             | `array<object { quantile, value }> \| null`               | summary                                   |
+| `.count`, `.sum`         | `float \| null`                                           | histogram, exponential_histogram, summary |
 
 `%source_id`/`%source_type`/`%received_at` work unchanged: metadata is shared by every event kind.
 

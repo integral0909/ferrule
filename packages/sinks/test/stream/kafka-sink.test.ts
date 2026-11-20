@@ -6,6 +6,7 @@ import {
   kafkaSinkOptionsSchema,
   type KafkaSinkOptions,
 } from '../../src/kafka/sink.js';
+import { logText } from '../support/log-lines.js';
 import { FakeKafkaBroker, type ProduceDecision } from './support/fake-kafka-broker.js';
 
 function withFinalizer(event: LogEvent): Promise<DeliveryStatus> {
@@ -24,6 +25,7 @@ function baseOptions(port: number, overrides: Partial<KafkaSinkOptions> = {}): K
     acks: '-1',
     idempotent: true,
     compression: 'none',
+    zstd_level: 3,
     partitioner: 'sticky',
     connect_timeout: 2_000,
     request_timeout: 5_000,
@@ -326,6 +328,53 @@ describe('kafka sink', () => {
     expect(kafkaSinkOptionsSchema.parse({ ...base, acks: '0', idempotent: false }).acks).toBe('0');
     expect(kafkaSinkOptionsSchema.parse(base).idempotent).toBe(true);
   });
+
+  it('defaults zstd_level to 3 and rejects levels outside 1..22', () => {
+    const base = { brokers: ['127.0.0.1:9092'], topic: 'events', compression: 'zstd' };
+    expect(kafkaSinkOptionsSchema.parse(base).zstd_level).toBe(3);
+    expect(kafkaSinkOptionsSchema.parse({ ...base, zstd_level: 1 }).zstd_level).toBe(1);
+    expect(kafkaSinkOptionsSchema.parse({ ...base, zstd_level: 22 }).zstd_level).toBe(22);
+    for (const zstd_level of [0, 23, 2.5]) {
+      expect(() => kafkaSinkOptionsSchema.parse({ ...base, zstd_level })).toThrow();
+    }
+  });
+
+  // Both producer paths: idempotent batches and plain ones are encoded at different call sites.
+  it.each([true, false])(
+    'applies the configured zstd_level (idempotent: %s)',
+    async (idempotent) => {
+      broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
+      const port = await broker.listen();
+      const sizes: number[] = [];
+      for (const zstd_level of [1, 19]) {
+        const before = broker.receivedBatches.length;
+        const sink = createKafkaSink(
+          baseOptions(port, {
+            compression: 'zstd',
+            zstd_level,
+            idempotent,
+            ...(idempotent ? {} : { acks: '1' as const }),
+          }),
+        );
+        const harness = createTestSinkContext();
+        const run = sink.run(harness.ctx);
+        await harness.feed(
+          logText(300, 5)
+            .toString('utf8')
+            .trimEnd()
+            .split('\n')
+            .map((line) => LogEvent.fromMessage(line)),
+        );
+        harness.close();
+        await run;
+        const batches = broker.receivedBatches.slice(before);
+        expect(batches.every((b) => b.decoded.compression === 'zstd')).toBe(true);
+        expect(batches.reduce((n, b) => n + b.decoded.records.length, 0)).toBe(300);
+        sizes.push(batches.reduce((n, b) => n + b.decoded.totalLength, 0));
+      }
+      expect(sizes[1]!).toBeLessThan(sizes[0]!);
+    },
+  );
 
   it('healthcheck succeeds against a reachable broker', async () => {
     broker = new FakeKafkaBroker();

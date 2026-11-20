@@ -109,6 +109,21 @@ describe('KafkaProducer: basic produce', () => {
     );
   });
 
+  it('zstd-compresses the record batch when configured', async () => {
+    broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
+    const port = await broker.listen();
+    producer = new KafkaProducer({
+      bootstrapBrokers: [{ host: '127.0.0.1', port }],
+      compression: 'zstd',
+    });
+    const event = LogEvent.fromMessage('x');
+    await producer.send([outgoing('events', { value: Buffer.from('compress-me'), event })]);
+    expect(broker.receivedBatches[0]!.decoded.compression).toBe('zstd');
+    expect(broker.receivedBatches[0]!.decoded.records[0]?.value?.toString('utf8')).toBe(
+      'compress-me',
+    );
+  });
+
   it('acks=0 finishes events as delivered without waiting for a broker response', async () => {
     broker = new FakeKafkaBroker({ partitionCounts: { events: 1 } });
     const port = await broker.listen();

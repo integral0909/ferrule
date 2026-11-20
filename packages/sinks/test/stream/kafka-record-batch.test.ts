@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 import { crc32c } from '@ferrule/buffer';
+import { FerruleError, LimitExceededError } from '@ferrule/core';
+import { logText } from '../support/log-lines.js';
 import {
   decodeRecordBatch,
   encodeRecordBatch,
@@ -76,6 +78,94 @@ describe('encodeRecordBatch / decodeRecordBatch', () => {
     expect(decoded.compression).toBe('gzip');
     expect(decoded.crcValid).toBe(true);
     expect(decoded.records.map((r) => r.value?.toString('utf8'))).toEqual(payloads);
+  });
+
+  it('zstd-compresses and decompresses the records section', () => {
+    const payloads = Array.from({ length: 20 }, (_, i) => `payload-${i}`);
+    const records = payloads.map((p) => record({ value: Buffer.from(p) }));
+    const encoded = encodeRecordBatch(records, { compression: 'zstd' });
+    const decoded = decodeRecordBatch(encoded);
+    expect(decoded.compression).toBe('zstd');
+    expect(decoded.crcValid).toBe(true);
+    expect(decoded.records.map((r) => r.value?.toString('utf8'))).toEqual(payloads);
+  });
+
+  it('honours zstdLevel: a higher level gives a smaller batch that still round-trips', () => {
+    const lines = logText(300, 3).toString('utf8').trimEnd().split('\n');
+    const records = lines.map((l) => record({ value: Buffer.from(l) }));
+    const fast = encodeRecordBatch(records, { compression: 'zstd', zstdLevel: 1 });
+    const small = encodeRecordBatch(records, { compression: 'zstd', zstdLevel: 19 });
+    expect(small.length).toBeLessThan(fast.length);
+    for (const encoded of [fast, small]) {
+      expect(decodeRecordBatch(encoded).records.map((r) => r.value?.toString('utf8'))).toEqual(
+        lines,
+      );
+    }
+  });
+
+  it('marks zstd with compression code 4 in the batch attributes', () => {
+    const encoded = encodeRecordBatch([record()], { compression: 'zstd' });
+    // attributes are the first int16 after baseOffset+batchLength+leaderEpoch+magic+crc.
+    expect(encoded.readInt16BE(8 + 4 + 4 + 1 + 4) & 0x7).toBe(4);
+  });
+
+  it('shrinks a repetitive batch under zstd', () => {
+    const records = Array.from({ length: 200 }, () =>
+      record({ value: Buffer.from('the same line over and over again') }),
+    );
+    const plain = encodeRecordBatch(records);
+    const compressed = encodeRecordBatch(records, { compression: 'zstd' });
+    expect(compressed.length).toBeLessThan(plain.length / 4);
+  });
+
+  it('round-trips arbitrary payloads through every supported codec', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.uint8Array({ maxLength: 256 }), { minLength: 1, maxLength: 20 }),
+        fc.constantFrom('none' as const, 'gzip' as const, 'zstd' as const),
+        (values, compression) => {
+          const records = values.map((v) => record({ value: Buffer.from(v) }));
+          const decoded = decodeRecordBatch(encodeRecordBatch(records, { compression }));
+          expect(decoded.compression).toBe(compression);
+          expect(decoded.crcValid).toBe(true);
+          expect(decoded.records.map((r) => [...(r.value ?? [])])).toEqual(
+            values.map((v) => [...v]),
+          );
+        },
+      ),
+      { numRuns: 50 },
+    );
+  });
+
+  for (const compression of ['gzip', 'zstd'] as const) {
+    it(`refuses a ${compression} records section that expands past the cap`, () => {
+      const big = record({ value: Buffer.alloc(1024 * 1024) });
+      const encoded = encodeRecordBatch([big], { compression });
+      expect(encoded.length).toBeLessThan(16 * 1024);
+      expect(() => decodeRecordBatch(encoded, { maxDecompressedBytes: 4096 })).toThrow(
+        LimitExceededError,
+      );
+      expect(decodeRecordBatch(encoded).records[0]?.value?.length).toBe(1024 * 1024);
+    });
+  }
+
+  it('reports a truncated gzip records section as a coded error', () => {
+    const records = Array.from({ length: 50 }, (_, i) => record({ value: Buffer.from(`v-${i}`) }));
+    const encoded = encodeRecordBatch(records, { compression: 'gzip' });
+    // Clip the tail of the compressed section; the decoder reads the section as `rest()`.
+    let thrown: unknown;
+    try {
+      decodeRecordBatch(encoded.subarray(0, encoded.length - 6));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(FerruleError);
+  });
+
+  it('still rejects the codecs that are not implemented', () => {
+    for (const compression of ['snappy', 'lz4'] as const) {
+      expect(() => encodeRecordBatch([record()], { compression })).toThrow(RangeError);
+    }
   });
 
   it('computes a CRC-32C that matches @ferrule/buffer independently over the same bytes', () => {

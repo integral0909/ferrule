@@ -1,0 +1,5 @@
+{
+  "extends": "../../../tsconfig.tests.json",
+  "compilerOptions": { "allowImportingTsExtensions": true },
+  "include": ["./**/*.ts"]
+}

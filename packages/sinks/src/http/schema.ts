@@ -1,4 +1,5 @@
 import { s, type Infer } from '@ferrule/schema';
+import { ZSTD_DEFAULT_LEVEL, ZSTD_MAX_LEVEL, ZSTD_MIN_LEVEL } from '../compression/zstd.js';
 import { tlsSchema } from '../fragments.js';
 
 /**
@@ -64,11 +65,24 @@ export type ProxyOptions = Infer<typeof proxyInnerSchema>;
 // ---------------------------------------------------------------------------------------------
 
 export const compressionSchema = s
-  .enum(['none', 'gzip'])
+  .enum(['none', 'gzip', 'zstd'])
   .default('none')
-  .describe('Compresses the request body before sending.')
+  .describe(
+    'Compresses the request body before sending. `zstd` sends `Content-Encoding: zstd` (RFC ' +
+      '8878); check the receiving endpoint accepts it.',
+  )
   .example('gzip');
 export type CompressionOptions = Infer<typeof compressionSchema>;
+
+export const zstdLevelSchema = s
+  .integer({ min: ZSTD_MIN_LEVEL, max: ZSTD_MAX_LEVEL })
+  .default(ZSTD_DEFAULT_LEVEL)
+  .describe(
+    'zstd compression level, 1 (fastest) to 22 (smallest). Ignored unless compression is ' +
+      '"zstd". Default 3, matching Kafka and the zstd CLI; on our JSON log benchmarks ' +
+      'level 1 was both faster and smaller (see packages/sinks/README.md), so try it.',
+  )
+  .example(1);
 
 // ---------------------------------------------------------------------------------------------
 // HTTP client transport options common to every sink
@@ -88,6 +102,8 @@ export const transportSchemaNoAuth = s.object({
     .describe('Maximum bytes read from a response body before the request is aborted.'),
   /** Compress the request body before sending. */
   compression: compressionSchema,
+  /** zstd level; only read when `compression` is `zstd`. */
+  zstd_level: zstdLevelSchema,
   /** Extra static headers sent with every request. Values are never logged. */
   headers: s
     .record(s.string())

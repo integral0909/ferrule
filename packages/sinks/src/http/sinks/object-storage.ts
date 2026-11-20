@@ -91,7 +91,8 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
     const encoder = defaultCodecs.createEncoder(codec, codecOptions);
     const framing: BatchFraming = options.framing;
     const contentType = options.content_type ?? contentTypeFor(framing);
-    const gzip = options.compression === 'gzip';
+    const keySuffix =
+      options.compression === 'gzip' ? '.gz' : options.compression === 'zstd' ? '.zst' : undefined;
     const keyHasTemplate = /\{\{/.test(options.key);
 
     const client = new HttpClient({
@@ -100,6 +101,7 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
       timeoutMs: options.timeout,
       maxResponseBytes: options.max_response_size,
       compression: options.compression,
+      zstdLevel: options.zstd_level,
       headers: options.headers,
       maxSockets: options.max_sockets,
       logger: ctx.logger,
@@ -111,7 +113,7 @@ export const objectStorageSink = defineSink<ObjectStorageSinkOptions>({
       let key = formatTimePattern(options.key, date);
       if (keyHasTemplate) key = compileFieldTemplate(key).render(eventContext(events[0]!));
       key = appendUniqueSuffix(key);
-      return gzip && !key.endsWith('.gz') ? `${key}.gz` : key;
+      return keySuffix !== undefined && !key.endsWith(keySuffix) ? `${key}${keySuffix}` : key;
     }
 
     function requestUrl(key: string): URL {

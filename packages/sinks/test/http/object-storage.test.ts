@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns';
 import { gunzipSync } from 'node:zlib';
+import { zstdDecompress } from '../../src/compression/zstd.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { LogEvent } from '@ferrule/core';
@@ -157,6 +158,38 @@ describe('object_storage sink', () => {
     expect(req.headers['content-encoding']).toBe('gzip');
     const decompressed = gunzipSync(req.body).toString('utf8');
     expect(decompressed).toContain('compress-me');
+  });
+
+  it('zstd-compresses the object body and appends .zst to the key', async () => {
+    server = await startServer((_req, res) => res.end());
+    const options = objectStorageSinkOptions.parse({
+      endpoint: server.url,
+      bucket: 'b',
+      key: 'events',
+      compression: 'zstd',
+      ...credentials,
+    });
+    const sink = await objectStorageSink.build(options, testBuildContext().ctx);
+    const harness = createTestSinkContext();
+    const run = sink.run(harness.ctx);
+    await harness.feed([LogEvent.fromMessage('compress-me')]);
+    harness.close();
+    await run;
+
+    const req = server.requests[0]!;
+    expect(req.url).toMatch(/\.zst(\?|$)/);
+    expect(req.url).not.toContain('.gz');
+    expect(req.headers['content-encoding']).toBe('zstd');
+    expect(zstdDecompress(req.body).toString('utf8')).toContain('compress-me');
+  });
+
+  it('defaults zstd_level to 3 and rejects levels outside 1..22', () => {
+    const base = { endpoint: 'http://localhost:9000', bucket: 'b', key: 'k', ...credentials };
+    expect(objectStorageSinkOptions.parse(base).zstd_level).toBe(3);
+    expect(objectStorageSinkOptions.parse({ ...base, zstd_level: 1 }).zstd_level).toBe(1);
+    for (const zstd_level of [0, 23]) {
+      expect(() => objectStorageSinkOptions.parse({ ...base, zstd_level })).toThrow();
+    }
   });
 
   it('includes x-amz-security-token when a session token is configured', async () => {

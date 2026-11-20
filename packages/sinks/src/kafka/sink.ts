@@ -9,6 +9,7 @@ import {
   type SinkContext,
 } from '@ferrule/runtime';
 import { s, type Infer } from '@ferrule/schema';
+import { ZSTD_DEFAULT_LEVEL, ZSTD_MAX_LEVEL, ZSTD_MIN_LEVEL } from '../compression/zstd.js';
 import {
   batchSchema,
   buildRetryPolicy,
@@ -53,7 +54,24 @@ export const kafkaSinkOptionsSchema = s
         'Stamp every batch with a producer id and sequence number so retries after a partial ' +
           'failure or lost response never duplicate records. Requires acks "-1".',
       ),
-    compression: s.enum(['none', 'gzip']).default('none'),
+    /** `zstd` compressed 2.5–3x faster than gzip on our log data, with output ~10% larger at
+     * the default level. Every broker this sink can reach supports it (KIP-110 gates zstd at an
+     * API version below the Produce v9 this producer speaks). */
+    compression: s
+      .enum(['none', 'gzip', 'zstd'])
+      .default('none')
+      .describe('Compresses each record batch before producing it.')
+      .example('zstd'),
+    zstd_level: s
+      .integer({ min: ZSTD_MIN_LEVEL, max: ZSTD_MAX_LEVEL })
+      .default(ZSTD_DEFAULT_LEVEL)
+      .describe(
+        'zstd compression level, 1 (fastest) to 22 (smallest). Ignored unless compression is ' +
+          '"zstd". Default 3, matching Kafka and the zstd CLI; on our JSON log benchmarks ' +
+          'level 1 was both faster and smaller (see packages/sinks/README.md), so try it. ' +
+          'Batches are compressed on the event loop, so levels above ~9 can stall the pipeline.',
+      )
+      .example(1),
     /** Partition strategy for unkeyed records. Default `sticky` (KIP-480). */
     partitioner: s.enum(['round_robin', 'sticky']).default('sticky'),
     connect_timeout: s.duration().default(10_000),
@@ -83,6 +101,7 @@ function buildProducer(options: KafkaSinkOptions, ctx?: SinkContext): KafkaProdu
     acks: Number(options.acks) as -1 | 0 | 1,
     requestTimeoutMs: options.request_timeout,
     compression: options.compression,
+    zstdLevel: options.zstd_level,
     partitioner: options.partitioner,
     idempotent: options.idempotent,
     ...(ctx !== undefined

@@ -90,6 +90,7 @@ export const lokiSink = defineSink<LokiSinkOptions>({
       timeoutMs: options.timeout,
       maxResponseBytes: options.max_response_size,
       compression: options.compression,
+      zstdLevel: options.zstd_level,
       headers: options.headers,
       maxSockets: options.max_sockets,
       logger: ctx.logger,

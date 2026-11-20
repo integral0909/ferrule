@@ -32,6 +32,8 @@ export interface KafkaProducerOptions {
   readonly acks?: -1 | 0 | 1;
   readonly requestTimeoutMs?: number;
   readonly compression?: CompressionType;
+  /** zstd level (1–22), used only when `compression` is `zstd`. Default 3. */
+  readonly zstdLevel?: number;
   /** Partition strategy for records with no key. Keyed records always use the murmur2 default
    * partitioner (matching the classic Java client). Default `sticky`. */
   readonly partitioner?: 'round_robin' | 'sticky';
@@ -527,9 +529,13 @@ export class KafkaProducer {
       timestamp: r.timestamp,
     }));
     const compression = this.options.compression ?? 'none';
+    const zstdLevel = this.options.zstdLevel;
     if (!this.idempotent) {
       return {
-        bytes: encodeRecordBatch(records, { compression }),
+        bytes: encodeRecordBatch(records, {
+          compression,
+          ...(zstdLevel !== undefined ? { zstdLevel } : {}),
+        }),
         producerId: -1n,
         producerEpoch: -1,
         baseSequence: -1,
@@ -545,7 +551,13 @@ export class KafkaProducer {
     this.nextSequence.set(key, incrementSequence(baseSequence, records.length));
     const { id: producerId, epoch: producerEpoch } = identity;
     return {
-      bytes: encodeRecordBatch(records, { compression, producerId, producerEpoch, baseSequence }),
+      bytes: encodeRecordBatch(records, {
+        compression,
+        ...(zstdLevel !== undefined ? { zstdLevel } : {}),
+        producerId,
+        producerEpoch,
+        baseSequence,
+      }),
       producerId,
       producerEpoch,
       baseSequence,

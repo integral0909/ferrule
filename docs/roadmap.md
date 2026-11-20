@@ -29,4 +29,6 @@ Planned work, roughly in priority order:
 - **Kafka source** (consumer groups, offset commits driven by acknowledgements).
 - **Exponential histograms end to end.** Decoding is supported; encoding always produces
   explicit-bucket histograms.
-- **More compression codecs** for Kafka and HTTP (lz4, zstd).
+- **LZ4 for Kafka.** zstd shipped instead (#16): it needs no hand-written codec, and every broker
+  this producer can reach already supports it. LZ4 would only pay off for brokers older than
+  Kafka 2.1, which would first need a lower Produce version.

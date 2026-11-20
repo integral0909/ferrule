@@ -37,6 +37,59 @@ Durations (`timeout`, `initial_backoff`, `max_backoff`, ...) and byte sizes (`ma
 carry an `Ms`/`_ms`/`_bytes` suffix in a field name — the schema type (`s.duration()`/
 `s.byteSize()`) already makes the unit unambiguous.
 
+## Compression
+
+Kafka (`compression: none | gzip | zstd`) and every HTTP-family sink except
+`prometheus_remote_write` (`compression: none | gzip | zstd`, sent as `Content-Encoding`)
+compress with Node's built-in `node:zlib`; no compression library is bundled. zstd needs Node
+22.15+, which is why that is the workspace's `engines` floor. `lz4` and `snappy` remain
+unimplemented for Kafka: see issue #16 for why LZ4 was dropped.
+
+### zstd level
+
+Both families take `zstd_level` (1–22, default **3**; ignored unless `compression` is `zstd`). 3
+matches Kafka's `compression.zstd.level` default and the zstd CLI. **On our JSON log data, level 1
+was both faster and smaller than 3**, so it is worth trying. Codec-only numbers for the records
+section of a 500-event batch (157 KiB), from `bench/kafka-compression.ts` on Node 22.23:
+
+| codec  | size vs raw | compress | decompress |
+| ------ | ----------- | -------- | ---------- |
+| gzip-6 | 17.8%       | 81 MB/s  | 488 MB/s   |
+| zstd-3 | 19.8%       | 217 MB/s | 609 MB/s   |
+| zstd-1 | 18.6%       | 298 MB/s | 613 MB/s   |
+
+zstd compresses about 2.5–3× faster than gzip, but on this data gzip's output is the smallest.
+Measure on your own data before choosing: the ranking depends heavily on content. Cost climbs
+steeply with level: on a 3.8 MiB body, level 3 took ~50 ms, 9 took ~250 ms and 19 took ~7 s. The
+HTTP client compresses on the libuv threadpool, but the Kafka encoder runs on the event loop, so
+high levels there stall the pipeline. End to end,
+per-record Kafka framing currently costs more than either codec. Re-run with:
+
+```sh
+pnpm run build && node --experimental-strip-types packages/sinks/bench/kafka-compression.ts
+```
+
+### Decompression (`src/compression/zstd.ts`)
+
+All zstd use goes through one wrapper, because the `node:zlib` zstd API is still marked
+experimental. `zstdDecompress` is bounded (512 MiB by default) and fails with coded errors only
+(`E_ZSTD_TRUNCATED`, `E_ZSTD_CORRUPT`, `LimitExceededError`). Before decompressing, it walks the
+frame and block headers itself, because `node:zlib` (checked on 22.15 and 22.23) never verifies
+that a frame ended: a truncated frame comes back short or empty with no error, a frame missing only
+its checksum comes back unverified, and only the first of several concatenated frames is decoded.
+The wrapper turns the first two into errors and decodes every frame, as the zstd CLI does. Kafka's
+`decodeRecordBatch` bounds gzip the same way; `gunzipSync` already reports truncation itself.
+
+### Interop tests
+
+`test/compression/zstd-interop.test.ts` checks both directions against the reference zstd CLI:
+
+- **CLI → us:** fixtures in `test/compression/fixtures/` were written by the CLI (version in
+  `manifest.json`; regenerate with `generate.sh`) and must decode to the original bytes. These
+  always run.
+- **Us → CLI:** needs the CLI at test time: set `ZSTD_CLI` or put `zstd` on `PATH`. The tests
+  skip without it, unless `REQUIRE_ZSTD_CLI=1` (set on CI's Linux jobs) makes that a failure.
+
 ## HTTP-family sinks
 
 This section covers the eight HTTP(S)-based sinks: `http`, `loki`,
@@ -57,7 +110,8 @@ const client = new HttpClient({
   proxy, // { use_env, url? } — HTTP(S)_PROXY / NO_PROXY by default, or an explicit override
   timeoutMs,
   maxResponseBytes,
-  compression, // 'none' | 'gzip' — compresses the request body, sets Content-Encoding
+  compression, // 'none' | 'gzip' | 'zstd' — compresses the request body, sets Content-Encoding
+  zstdLevel, // 1–22, default 3; only used for 'zstd' (see Compression above)
   headers, // static headers merged into every request; secret values are never logged
   maxSockets,
   logger,
@@ -150,8 +204,8 @@ arbitrary bytes never throws an untyped error.
 - `object_storage` ignores the shared `auth` option entirely (it authenticates every request with
   SigV4 instead); its option schema (`transportSchemaNoAuth`) simply omits the field rather than
   exposing an unused one.
-- `prometheus_remote_write` ignores the shared `compression` option (the wire format mandates
-  Snappy, not the client's generic gzip-only request compression) rather than layering both.
+- `prometheus_remote_write` accepts but ignores the shared `compression` and `zstd_level`
+  options (the wire format mandates Snappy) rather than layering both.
 - The `CONNECT`-tunnel proxy path is tested for its request framing and its failure path (a proxy
   that refuses the tunnel); a full success-path integration test would need a locally trusted TLS
   certificate for the "origin" server behind the tunnel, which isn't set up here.
@@ -309,7 +363,7 @@ wrapping `kafkajs`.
 - **`record-batch.ts`** — `encodeRecordBatch`/`decodeRecordBatch`: RecordBatch v2 (magic byte
   `2`), with every per-record field (timestamp/offset deltas, key/value/header lengths) zigzag
   varint-encoded and the batch's CRC-32C (`@ferrule/buffer`'s `crc32c`, over everything from the
-  `attributes` field through the end of the — possibly gzip-compressed — records section) computed
+  `attributes` field through the end of the — possibly gzip- or zstd-compressed — records section) computed
   and verified. `decodeRecordBatch` exists for the test suite's fake broker and property tests,
   not the production send path.
 - **`murmur2.ts`** — `murmur2` reproduces `org.apache.kafka.common.utils.Utils.murmur2` bit-for-bit
@@ -359,9 +413,10 @@ wrapping `kafkajs`.
   `InitProducerId`, so a cluster that refuses it (typically a missing `IDEMPOTENT_WRITE` ACL)
   fails the pipeline's startup healthcheck instead of rejecting every batch at runtime; permanent
   rejections, per partition (via the `onPermanentError` hook) or per batch, are logged at error
-  level by the sink, since the batched-sink loop itself finishes them silently. `gzip`
-  compression is supported; `snappy`/`lz4`/`zstd` are not (no native dependency, per
-  CONTRIBUTING.md's dependency policy) and are rejected at encode time.
+  level by the sink, since the batched-sink loop itself finishes them silently. `gzip` and
+  `zstd` compression are supported (see [Compression](#compression)); `snappy`/`lz4` are not
+  and are rejected at encode time. zstd is always safe to send: KIP-110 gates it at a Produce
+  version below the v9 this producer speaks.
 - **`sink.ts`** — topic/key/header templates (`stream/template.ts`), an `acks` schema of
   `'0' | '1' | '-1'` (mapped to the numeric wire value), `idempotent` (default `true`; the schema
   rejects it with any `acks` other than `'-1'`, since the broker refuses idempotent batches

@@ -1,5 +1,7 @@
 import * as net from 'node:net';
 import { gunzipSync, gzipSync } from 'node:zlib';
+import { zstdDecompress } from '../../src/compression/zstd.js';
+import { logText } from '../support/log-lines.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SinkError, createCapturingLogger } from '@ferrule/runtime';
 import { applyAuth, ensureSuccess, HttpClient } from '../../src/http/client.js';
@@ -87,6 +89,34 @@ describe('HttpClient — auth end to end', () => {
 });
 
 describe('HttpClient — compression', () => {
+  it('compresses with the configured zstdLevel', async () => {
+    server = await startServer((_req, res) => res.end('ok'));
+    const body = logText(300, 4);
+    const sizes: number[] = [];
+    for (const zstdLevel of [1, 19]) {
+      const client = new HttpClient({ logger: logger(), compression: 'zstd', zstdLevel });
+      await client.request({ method: 'POST', url: server.url, body });
+      const received = server.requests.at(-1)!;
+      // Buffer.equals: toEqual walks large Buffers element by element and is slow under load.
+      expect(zstdDecompress(received.body).equals(body)).toBe(true);
+      sizes.push(received.body.length);
+      client.close();
+    }
+    expect(sizes[1]!).toBeLessThan(sizes[0]!);
+  });
+
+  it('zstd-compresses the request body and sets Content-Encoding: zstd', async () => {
+    server = await startServer((_req, res) => res.end('ok'));
+    const client = new HttpClient({ logger: logger(), compression: 'zstd' });
+    const original = new TextEncoder().encode('a'.repeat(1000));
+    await client.request({ method: 'POST', url: server.url, body: original });
+    const received = server.requests[0]!;
+    expect(received.headers['content-encoding']).toBe('zstd');
+    expect(received.body.length).toBeLessThan(original.length);
+    expect(zstdDecompress(received.body)).toEqual(Buffer.from(original));
+    client.close();
+  });
+
   it('gzips the request body and sets Content-Encoding: gzip', async () => {
     server = await startServer((_req, res) => res.end('ok'));
     const client = new HttpClient({ logger: logger(), compression: 'gzip' });

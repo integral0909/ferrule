@@ -1,0 +1,17 @@
+{
+  "zstdCli": "v1.5.7",
+  "inputs": {
+    "small": {
+      "bytes": 7616,
+      "sha256": "016c3883bdfafda22f098984acc72edf63d1403ef0a7ef3f5f32cb4b7430cc9b"
+    },
+    "large": {
+      "bytes": 455453,
+      "sha256": "8fefb8f1ca2d312456533306a1c3d20603fac0329f27978d19b05b9c7ee39f0e"
+    },
+    "empty": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

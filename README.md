@@ -38,7 +38,7 @@ The language design is described in [docs/language/design.md](docs/language/desi
 
 ## Quick start
 
-Requirements: Node.js 22.12+ and pnpm 10.
+Requirements: Node.js 22.15+ and pnpm 10.
 
 ```sh
 pnpm install && pnpm run build
@@ -85,7 +85,9 @@ More complete examples live in [packages/cli/examples](packages/cli/examples).
 - **Sinks:** HTTP, Loki, ClickHouse, Elasticsearch, S3-compatible object storage, OTLP,
   Prometheus remote write and exporter, Kafka, PostgreSQL, file, socket, syslog, console, and
   blackhole. The Kafka, PostgreSQL, SigV4, and Snappy protocol code is implemented in the repo,
-  with no third-party runtime dependencies.
+  with no third-party runtime dependencies. Kafka and the HTTP sinks (except Prometheus
+  remote write, which mandates Snappy) compress with gzip or zstd from Node's own `node:zlib`;
+  see the [sinks README](packages/sinks/README.md#compression).
 - **Tooling:** the `ferrule` CLI (`run`, `validate`, `test`, `tap`, `top`, `fmt`, `repl`, `eval`,
   `describe`, `generate`, `bench`, ...), a pipeline test runner with JUnit output, an admin API
   with a live event tap, and a language server for editor support.

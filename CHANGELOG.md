@@ -35,6 +35,11 @@ All notable changes to this project are documented here. The format follows
   (`idempotent: true`, requires `acks: "-1"`): a producer id and per-partition sequence numbers
   let the broker discard a batch resent after a partial failure or a lost response, so retries
   never duplicate records (#17).
+- `@ferrule/sinks`: zstd compression for the Kafka sink and the HTTP-family sinks via `node:zlib`
+  (`compression: zstd`, with `zstd_level` 1–22, default 3), and `.zst` object keys in
+  `object_storage`. Decompression is bounded and detects truncated frames, which `node:zlib`
+  itself silently accepts. Kafka's batch decoder now also bounds gzip output. LZ4 was dropped
+  from scope (#16).
 - `@ferrule/config`: position-aware YAML parser, interpolation, secret backends, code-frame
   diagnostics, and config diffing.
 - `@ferrule/admin`: admin HTTP API with health, topology, metrics, live tap, and reload.
@@ -45,3 +50,8 @@ All notable changes to this project are documented here. The format follows
   `repl`, `eval`, `list`, `describe`, `explain`, `generate`, `bench`, and `lsp`.
 - Generated component reference (`docs/reference/components.md`), CI on Linux, macOS, and
   Windows, CodeQL, dependency review, and Dependabot.
+
+### Changed
+
+- Node.js 22.15.0 or newer is now required (was 22.12.0): it is the first 22.x with zstd in
+  `node:zlib`. CI tests that exact version alongside the latest 22 and 24.

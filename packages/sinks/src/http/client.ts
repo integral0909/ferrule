@@ -4,6 +4,7 @@ import { brotliDecompress, gunzip, gzip, inflate } from 'node:zlib';
 import { promisify } from 'node:util';
 import { FerruleError } from '@ferrule/core';
 import { SinkError, type Logger } from '@ferrule/runtime';
+import { zstdCompressAsync } from '../compression/zstd.js';
 import type { AuthOptions, CompressionOptions, ProxyOptions, TlsOptions } from './schema.js';
 import { resolveTls, type ResolvedTls } from './tls.js';
 import {
@@ -26,6 +27,8 @@ export interface HttpClientOptions {
   readonly timeoutMs?: number | undefined;
   readonly maxResponseBytes?: number | undefined;
   readonly compression?: CompressionOptions | undefined;
+  /** zstd level, used only when `compression` is `zstd`. Default 3. */
+  readonly zstdLevel?: number | undefined;
   /** Static headers merged into every request. Never logged. */
   readonly headers?: ReadonlyMap<string, string> | undefined;
   readonly maxSockets?: number | undefined;
@@ -67,6 +70,7 @@ export class HttpClient {
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
   private readonly compression: CompressionOptions;
+  private readonly zstdLevel: number | undefined;
   private readonly staticHeaders: ReadonlyMap<string, string>;
   private readonly maxSockets: number;
 
@@ -81,6 +85,7 @@ export class HttpClient {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.compression = options.compression ?? 'none';
+    this.zstdLevel = options.zstdLevel;
     this.staticHeaders = options.headers ?? new Map();
     this.maxSockets = options.maxSockets ?? 16;
   }
@@ -93,9 +98,13 @@ export class HttpClient {
     applyAuth(headers, this.auth);
 
     let body = req.body;
-    if (body !== undefined && body.byteLength > 0 && this.compression === 'gzip') {
-      body = await gzipAsync(body);
-      headers['content-encoding'] = 'gzip';
+    if (body !== undefined && body.byteLength > 0 && this.compression !== 'none') {
+      // Both off the event loop: zstd at a high level can take seconds on a large batch.
+      body =
+        this.compression === 'gzip'
+          ? await gzipAsync(body)
+          : await zstdCompressAsync(body, { level: this.zstdLevel });
+      headers['content-encoding'] = this.compression;
     }
     if (body !== undefined) headers['content-length'] = String(body.byteLength);
 
